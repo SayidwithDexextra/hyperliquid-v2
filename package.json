@@ -1,0 +1,26 @@
+{
+  "name": "hyperliquidv2-orderbook-protocol",
+  "version": "1.0.0",
+  "description": "Production-ready futures-style order book protocol for Hyper Liquid Blockchain v2",
+  "main": "index.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy": "hardhat run scripts/deploy.js",
+    "deploy:testnet": "hardhat run scripts/deploy.js --network testnet",
+    "deploy:mainnet": "hardhat run scripts/deploy.js --network mainnet",
+    "trade": "hardhat run scripts/interactive-trader.js --network localhost",
+    "viewer": "hardhat run scripts/live-orderbook-viewer.js --network localhost"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@types/node": "^20.0.0",
+    "hardhat": "^2.19.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.4.0",
+    "@supabase/supabase-js": "^2.56.1",
+    "dotenv": "^17.2.1"
+  }
+}

@@ -1,0 +1,21 @@
+# Ignore OpenZeppelin files that require newer Solidity versions
+lib/openzeppelin-contracts/contracts/account/extensions/draft-AccountERC7579.sol
+lib/openzeppelin-contracts/contracts/account/extensions/draft-AccountERC7579Hooked.sol
+lib/openzeppelin-contracts/contracts/governance/
+lib/openzeppelin-contracts/contracts/mocks/
+lib/openzeppelin-contracts/contracts/proxy/ERC1967/
+lib/openzeppelin-contracts/contracts/proxy/beacon/
+lib/openzeppelin-contracts/contracts/proxy/transparent/
+lib/openzeppelin-contracts/contracts/proxy/utils/UUPSUpgradeable.sol
+lib/openzeppelin-contracts/contracts/token/ERC20/extensions/draft-ERC20TemporaryApproval.sol
+lib/openzeppelin-contracts/contracts/utils/Bytes.sol
+lib/openzeppelin-contracts/contracts/utils/CAIP10.sol
+lib/openzeppelin-contracts/contracts/utils/CAIP2.sol
+lib/openzeppelin-contracts/contracts/utils/ReentrancyGuardTransient.sol
+lib/openzeppelin-contracts/contracts/utils/TransientSlot.sol
+lib/openzeppelin-contracts/contracts/utils/cryptography/SignatureChecker.sol
+lib/openzeppelin-contracts/contracts/utils/cryptography/signers/MultiSignerERC7913.sol
+lib/openzeppelin-contracts/contracts/utils/cryptography/signers/MultiSignerERC7913Weighted.sol
+lib/openzeppelin-contracts/contracts/utils/cryptography/signers/SignerERC7913.sol
+lib/openzeppelin-contracts/test/
+lib/openzeppelin-contracts/certora/
