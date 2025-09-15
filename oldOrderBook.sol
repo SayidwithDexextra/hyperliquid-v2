@@ -6,7 +6,6 @@ interface ICentralizedVault {
     function releaseMargin(address user, bytes32 marketId, uint256 amount) external;
     function reserveMargin(address user, bytes32 orderId, bytes32 marketId, uint256 amount) external;
     function unreserveMargin(address user, bytes32 orderId) external;
-    function safeUnreserveMargin(address user, bytes32 orderId) external returns (bool success, uint256 amount);
     function releaseExcessMargin(address user, bytes32 orderId, uint256 actualMarginNeeded) external;
     function updatePosition(address user, bytes32 marketId, int256 sizeDelta, uint256 entryPrice) external;
     function updatePositionWithMargin(address user, bytes32 marketId, int256 sizeDelta, uint256 entryPrice, uint256 marginToLock) external;
@@ -86,7 +85,6 @@ contract OrderBook {
     uint256 public marginRequirementBps = 10000; // 100% margin requirement by default (1:1, basis points)
     uint256 public tradingFee = 10; // 0.1% trading fee (basis points)
     address public feeRecipient;
-    uint256 public constant MAINTENANCE_MARGIN_BPS = 500; // 5% maintenance margin
     uint256 public maxSlippageBps = 500; // 5% maximum slippage for market orders (basis points)
     
     // Leverage control system
@@ -96,47 +94,6 @@ contract OrderBook {
     
     // Position tracking for margin calculations
     mapping(address => int256) public userPositions; // user => position size
-    
-    // Isolated Margin Position Structure
-    struct IsolatedPosition {
-        uint256 positionId;
-        address trader;
-        int256 size; // Positive for long, negative for short
-        uint256 entryPrice;
-        uint256 isolatedMargin;
-        uint256 liquidationPrice;
-        uint256 maintenanceMargin;
-        uint256 openTimestamp;
-        bool isActive;
-    }
-    
-    // Isolated margin position tracking
-    mapping(address => mapping(uint256 => IsolatedPosition)) public userIsolatedPositions;
-    mapping(address => uint256[]) public userPositionIds;
-    mapping(address => uint256) public userNextPositionId;
-    
-    // Liquidation tracking
-    struct LiquidationEvent {
-        address trader;
-        uint256 positionId;
-        uint256 liquidationPrice;
-        uint256 bankruptcyPrice;
-        uint256 shortfall;
-        uint256 timestamp;
-    }
-    
-    uint256 public totalShortfall;
-    mapping(uint256 => LiquidationEvent) public liquidationHistory;
-    uint256 public nextLiquidationId = 1;
-    
-    // Socialized loss tracking
-    mapping(address => uint256) public socializedLossDebt; // Track losses to be socialized
-    mapping(address => uint256) public socializedLossCredit; // Track profits available for socialization
-    
-    
-    // Position limits based on collateral
-    uint256 public maxPositionMultiplier = 10; // Max position size = collateral * multiplier
-    mapping(address => uint256) public userMaxPositionSize;
     
     // Order tracking for viewer functions  
     mapping(uint256 => uint256) public filledAmounts; // orderId => filled amount
@@ -177,7 +134,7 @@ contract OrderBook {
     // VWAP configuration
     uint256 public vwapTimeWindow = 3600; // Default 1 hour window in seconds
     uint256 public minVolumeForVWAP = 100 * AMOUNT_SCALE; // Minimum 100 units volume for valid VWAP
-    bool public useVWAPForMarkPrice = false; // Enable/disable VWAP for mark price
+    bool public useVWAPForMarkPrice = true; // Enable/disable VWAP for mark price
     
     // Circular buffer for trade history (for efficient VWAP calculation)
     uint256 public constant MAX_TRADE_HISTORY = 1000; // Store last 1000 trades
@@ -215,8 +172,6 @@ contract OrderBook {
     event PositionUpdated(address indexed trader, int256 oldPosition, int256 newPosition);
     event MarginOrderPlaced(uint256 indexed orderId, address indexed trader, uint256 marginRequired);
     event DebugMarginRelease(address indexed user, uint256 orderId, uint256 executionPrice, uint256 amount, bool isMarginOrder);
-    event DebugMarginCalculation(uint256 amount, uint256 price, bool isBuy, uint256 marginRequired);
-    event MarginUnreserveError(uint256 indexed orderId, address indexed trader, string reason);
     
     // Leverage control events
     event LeverageEnabled(address indexed controller, uint256 maxLeverage, uint256 newMarginRequirement);
@@ -230,47 +185,6 @@ contract OrderBook {
     // VWAP events
     event VWAPConfigUpdated(uint256 timeWindow, uint256 minVolume, bool useVWAP);
     event VWAPCalculated(uint256 vwap, uint256 volume, uint256 tradeCount, uint256 timeWindow);
-    
-    // Isolated margin events
-    event IsolatedPositionOpened(
-        address indexed trader,
-        uint256 indexed positionId,
-        int256 size,
-        uint256 entryPrice,
-        uint256 isolatedMargin,
-        uint256 liquidationPrice
-    );
-    event IsolatedPositionClosed(
-        address indexed trader,
-        uint256 indexed positionId,
-        uint256 closePrice,
-        int256 pnl,
-        string reason
-    );
-    event LiquidationTriggered(
-        address indexed trader,
-        uint256 indexed positionId,
-        uint256 markPrice,
-        uint256 liquidationPrice,
-        uint256 loss
-    );
-    event CollateralWaterfallExecuted(
-        address indexed trader,
-        uint256 isolatedMarginUsed,
-        uint256 availableCollateralUsed,
-        uint256 remainingShortfall
-    );
-    event LosseSocialized(
-        uint256 totalShortfall,
-        uint256 totalProfits,
-        uint256 socializationPercentage
-    );
-    event TraderSocialized(
-        address indexed trader,
-        uint256 originalProfit,
-        uint256 socializedAmount,
-        uint256 finalProfit
-    );
 
     // Modifiers
     modifier validOrder(uint256 price, uint256 amount) {
@@ -314,7 +228,6 @@ contract OrderBook {
         );
         _;
     }
-    
 
     // ============ Constructor ============
 
@@ -360,14 +273,10 @@ contract OrderBook {
         marginOrderAllowed
         returns (uint256 orderId) 
     {
-        // Use the side-specific margin calculation function (100% for longs, 150% for shorts)
-        uint256 marginRequired = _calculateMarginRequiredWithSide(amount, price, isBuy);
-        
-        // Debug logging
-        emit DebugMarginCalculation(amount, price, isBuy, marginRequired);
-        
-        // Additional validation
-        require(marginRequired > 0, "OrderBook: calculated margin must be positive");
+        // For limit orders, we'll calculate margin based on the worst-case execution price
+        // For buy orders: use the limit price (worst case is paying full limit price)
+        // For sell orders: use the limit price (worst case is selling at full limit price)
+        uint256 marginRequired = _calculateMarginRequired(amount, price);
         
         return _placeLimitOrder(price, amount, isBuy, true, marginRequired);
     }
@@ -521,8 +430,7 @@ contract OrderBook {
                 (referencePrice * (10000 + slippageBps)) / 10000 : // Buy: price could go up
                 referencePrice; // Sell: use reference price (margin based on position size, not price)
                 
-            // Use the side-specific margin calculation function (100% for longs, 150% for shorts)
-            uint256 estimatedMargin = _calculateMarginRequiredWithSide(amount, worstCasePrice, isBuy);
+            uint256 estimatedMargin = _calculateMarginRequired(amount, worstCasePrice);
             
             // Check if user has sufficient available collateral
             uint256 availableCollateral = vault.getAvailableCollateral(msg.sender);
@@ -570,497 +478,6 @@ contract OrderBook {
     }
 
     /**
-     * @dev Open an isolated margin position
-     * @param size Position size (positive for long, negative for short)
-     * @param marginAmount Amount of margin to allocate to this position
-     * @return positionId The ID of the opened position
-     */
-    function openIsolatedPosition(
-        int256 size,
-        uint256 marginAmount
-    ) external returns (uint256 positionId) {
-        require(size != 0, "OrderBook: position size cannot be zero");
-        
-        // DEPRECATED: This function now just places a market order
-        // Isolated positions are created automatically on all trades
-        uint256 absSize = uint256(size > 0 ? size : -size);
-        bool isBuy = size > 0;
-        
-        // Place market order - isolated position created automatically
-        this.placeMarginMarketOrder(absSize, isBuy);
-        
-        // Return 0 as positions are created automatically
-        return 0;
-    }
-    
-    /**
-     * @dev Close an isolated position manually
-     * @param positionId Position ID to close
-     * @return pnl The realized profit/loss
-     */
-    function closeIsolatedPosition(
-        uint256 positionId
-    ) external  returns (int256 pnl) {
-        IsolatedPosition storage position = userIsolatedPositions[msg.sender][positionId];
-        require(position.isActive, "OrderBook: position not active");
-        require(position.trader == msg.sender, "OrderBook: not position owner");
-        
-        uint256 currentPrice = calculateMarkPrice();
-        uint256 absSize = uint256(position.size > 0 ? position.size : -position.size);
-        
-        // Calculate PnL
-        bool isProfit;
-        (pnl, isProfit) = calculatePositionPnL(msg.sender, positionId);
-        
-        // Close the position
-        position.isActive = false;
-        userPositions[msg.sender] -= position.size;
-        
-        // Release the isolated margin (isolated positions use lockMargin, not reserveMargin)
-        vault.releaseMargin(msg.sender, marketId, position.isolatedMargin);
-        
-        // Process PnL
-        if (isProfit) {
-            // Credit profit to user's available balance
-            vault.transferCollateral(address(this), msg.sender, uint256(pnl));
-        } else {
-            // Loss is already accounted for in the isolated margin
-            uint256 loss = uint256(-pnl);
-            if (loss > position.isolatedMargin) {
-                // User needs to pay additional loss from available balance
-                uint256 additionalLoss = loss - position.isolatedMargin;
-                vault.deductFees(msg.sender, additionalLoss, address(this));
-            }
-        }
-        
-        emit IsolatedPositionClosed(
-            msg.sender,
-            positionId,
-            currentPrice,
-            pnl,
-            "manual"
-        );
-        
-        return pnl;
-    }
-
-    // ============ Liquidation Functions ============
-    
-    /**
-     * @dev Check and liquidate positions that are underwater
-     * @param trader Address of the trader to check
-     * @param positionId Position ID to check (for isolated positions) or 0 for regular margin positions
-     * @return liquidated Whether the position was liquidated
-     */
-    function checkAndLiquidatePosition(
-        address trader,
-        uint256 positionId
-    ) external  returns (bool liquidated) {
-        // Check if this is an isolated position first
-        IsolatedPosition storage position = userIsolatedPositions[trader][positionId];
-        if (position.isActive) {
-            // This is an active isolated position
-        
-        uint256 currentPrice = calculateMarkPrice();
-        
-        // Check if position should be liquidated using mark price
-        // Recalculate liquidation price to ensure it's current and accurate
-        uint256 currentLiquidationPrice = _calculateLiquidationPrice(
-            position.size,
-            position.entryPrice,
-            position.isolatedMargin,
-            position.maintenanceMargin
-        );
-        
-        bool shouldLiquidate = false;
-        if (position.size > 0) {
-            // Long position: liquidate if mark price <= liquidation price
-            shouldLiquidate = currentPrice <= currentLiquidationPrice;
-        } else {
-            // Short position: liquidate if mark price >= liquidation price
-            shouldLiquidate = currentPrice >= currentLiquidationPrice;
-        }
-        
-        if (!shouldLiquidate) {
-            return false;
-        }
-        
-            // Execute liquidation using the recalculated liquidation price
-            _executeLiquidation(trader, positionId, currentLiquidationPrice);
-            return true;
-        } else {
-            // No active isolated position, check regular margin position
-            return _checkAndLiquidateMarginPosition(trader);
-        }
-    }
-    
-    /**
-     * @dev Internal function to execute liquidation
-     * @param trader Address of the trader
-     * @param positionId Position ID
-     * @param liquidationPrice Current mark price triggering liquidation
-     */
-    function _executeLiquidation(
-        address trader,
-        uint256 positionId,
-        uint256 liquidationPrice
-    ) internal {
-        IsolatedPosition storage position = userIsolatedPositions[trader][positionId];
-        
-        // Calculate the loss
-        uint256 absSize = uint256(position.size > 0 ? position.size : -position.size);
-        uint256 loss;
-        
-        if (position.size > 0) {
-            // Long position loss
-            if (liquidationPrice < position.entryPrice) {
-                loss = ((position.entryPrice - liquidationPrice) * absSize) / AMOUNT_SCALE;
-            }
-        } else {
-            // Short position loss
-            loss = ((liquidationPrice - position.entryPrice) * absSize) / AMOUNT_SCALE;
-        }
-        
-        // Convert loss to 6 decimals (USDC format) for vault operations
-        loss = scaleFrom18Decimals(loss, 6);
-        
-        // Apply liquidation penalty (2.5% of position value)
-        uint256 positionNotional = (absSize * liquidationPrice) / AMOUNT_SCALE;
-        uint256 liquidationPenalty = (positionNotional * 250) / 10000; // 2.5%
-        
-        // Convert penalty to 6 decimals (USDC format) for vault operations
-        liquidationPenalty = scaleFrom18Decimals(liquidationPenalty, 6);
-        
-        // Distribute penalty: 1.5% to keeper (msg.sender), 1% to protocol
-        uint256 keeperReward = (liquidationPenalty * 60) / 100; // 60% of penalty = 1.5% of position
-        uint256 protocolFee = liquidationPenalty - keeperReward;
-        
-        // Execute collateral waterfall
-        uint256 totalLoss = loss + liquidationPenalty;
-        uint256 isolatedMarginUsed = position.isolatedMargin > totalLoss ? totalLoss : position.isolatedMargin;
-        uint256 shortfall = totalLoss > position.isolatedMargin ? totalLoss - position.isolatedMargin : 0;
-        
-        if (shortfall > 0) {
-            // Use available collateral from vault
-            uint256 availableCollateral = vault.getAvailableCollateral(trader);
-            uint256 collateralUsed = shortfall > availableCollateral ? availableCollateral : shortfall;
-            
-            if (collateralUsed > 0) {
-                // Deduct from user's available collateral
-                vault.deductFees(trader, collateralUsed, address(this));
-            }
-            
-            uint256 remainingShortfall = shortfall - collateralUsed;
-            
-            if (remainingShortfall > 0) {
-                // Track for socialization
-                totalShortfall += remainingShortfall;
-                socializedLossDebt[trader] += remainingShortfall;
-                
-                // Trigger socialization immediately
-                _socializeLosses(remainingShortfall);
-            }
-            
-            emit CollateralWaterfallExecuted(
-                trader,
-                isolatedMarginUsed,
-                collateralUsed,
-                remainingShortfall
-            );
-        }
-        
-        // Release only the unused portion of the locked margin
-        uint256 unusedMargin = position.isolatedMargin - isolatedMarginUsed;
-        if (unusedMargin > 0) {
-            vault.releaseMargin(trader, marketId, unusedMargin);
-        }
-        
-        // Close the position
-        position.isActive = false;
-        userPositions[trader] -= position.size; // Subtract before resetting
-        position.size = 0; // Reset position size
-        position.isolatedMargin = 0; // Reset isolated margin
-        position.liquidationPrice = 0; // Reset liquidation price
-        
-        // Pay keeper reward
-        if (keeperReward > 0 && msg.sender != trader) {
-            vault.transferCollateral(trader, msg.sender, keeperReward);
-        }
-        
-        // Protocol fee to fee recipient
-        if (protocolFee > 0) {
-            vault.transferCollateral(trader, feeRecipient, protocolFee);
-        }
-        
-        // Record liquidation event
-        liquidationHistory[nextLiquidationId++] = LiquidationEvent({
-            trader: trader,
-            positionId: positionId,
-            liquidationPrice: liquidationPrice,
-            bankruptcyPrice: position.entryPrice,
-            shortfall: shortfall,
-            timestamp: block.timestamp
-        });
-        
-        emit LiquidationTriggered(
-            trader,
-            positionId,
-            liquidationPrice,
-            position.liquidationPrice,
-            totalLoss
-        );
-        
-        emit IsolatedPositionClosed(
-            trader,
-            positionId,
-            liquidationPrice,
-            -int256(totalLoss),
-            "liquidation"
-        );
-    }
-    
-    /**
-     * @dev Check and liquidate regular margin positions that are underwater
-     * @param trader Address of the trader to check
-     * @return liquidated Whether the position was liquidated
-     */
-    function _checkAndLiquidateMarginPosition(address trader) internal returns (bool liquidated) {
-        int256 positionSize = userPositions[trader];
-        
-        // No position to liquidate
-        if (positionSize == 0) {
-            return false;
-        }
-        
-        uint256 currentPrice = calculateMarkPrice();
-        uint256 absSize = uint256(positionSize > 0 ? positionSize : -positionSize);
-        
-        // For regular margin positions, we need to check if they should be liquidated
-        // This is a fallback for non-isolated positions - most positions should be isolated
-        uint256 availableMargin = vault.getAvailableCollateral(trader);
-        
-        // Calculate liquidation price based on maintenance margin
-        uint256 maintenanceMargin = (availableMargin * MAINTENANCE_MARGIN_BPS) / 10000;
-        
-        // Calculate liquidation price based on position size and maintenance margin
-        uint256 liquidationPrice;
-        if (positionSize > 0) {
-            // Long position: liquidation price = entry price - (maintenance margin / position size)
-            // For now, use current price as entry price since we don't store entry price for regular positions
-            liquidationPrice = currentPrice - (maintenanceMargin * AMOUNT_SCALE) / absSize;
-        } else {
-            // Short position: liquidation price = entry price + (maintenance margin / position size)
-            liquidationPrice = currentPrice + (maintenanceMargin * AMOUNT_SCALE) / absSize;
-        }
-        
-        // Check if position should be liquidated
-        bool shouldLiquidate = false;
-        if (positionSize > 0) {
-            // Long position: liquidate if current price <= liquidation price
-            shouldLiquidate = currentPrice <= liquidationPrice;
-        } else {
-            // Short position: liquidate if current price >= liquidation price
-            shouldLiquidate = currentPrice >= liquidationPrice;
-        }
-        
-        if (!shouldLiquidate) {
-            return false;
-        }
-        
-        // Execute liquidation
-        _executeMarginLiquidation(trader, liquidationPrice);
-        
-        emit LiquidationTriggered(
-            trader,
-            0, // positionId = 0 for regular margin positions
-            currentPrice,
-            liquidationPrice,
-            0 // loss will be calculated in _executeMarginLiquidation
-        );
-        
-        return true;
-    }
-    
-    /**
-     * @dev Execute liquidation for regular margin positions
-     * @param trader Address of the trader
-     * @param liquidationPrice Price at which liquidation occurs
-     */
-    function _executeMarginLiquidation(
-        address trader,
-        uint256 liquidationPrice
-    ) internal {
-        int256 positionSize = userPositions[trader];
-        uint256 absSize = uint256(positionSize > 0 ? positionSize : -positionSize);
-        
-        // Calculate the loss
-        uint256 currentPrice = calculateMarkPrice();
-        uint256 loss;
-        if (positionSize > 0) {
-            // Long position loss
-            if (liquidationPrice < currentPrice) {
-                loss = ((currentPrice - liquidationPrice) * absSize) / AMOUNT_SCALE;
-            }
-        } else {
-            // Short position loss
-            if (liquidationPrice > currentPrice) {
-                loss = ((liquidationPrice - currentPrice) * absSize) / AMOUNT_SCALE;
-            }
-        }
-        
-        // Calculate liquidation penalty (5% of position value)
-        uint256 liquidationPenalty = (absSize * liquidationPrice * 500) / (AMOUNT_SCALE * 10000);
-        
-        // Calculate keeper reward (1% of position value)
-        uint256 keeperReward = (absSize * liquidationPrice * 100) / (AMOUNT_SCALE * 10000);
-        
-        // Calculate protocol fee (0.5% of position value)
-        uint256 protocolFee = (absSize * liquidationPrice * 50) / (AMOUNT_SCALE * 10000);
-        
-        // Execute collateral waterfall
-        uint256 totalLoss = loss + liquidationPenalty;
-        uint256 availableCollateral = vault.getAvailableCollateral(trader);
-        uint256 collateralUsed = totalLoss > availableCollateral ? availableCollateral : totalLoss;
-        
-        if (collateralUsed > 0) {
-            // Deduct from user's available collateral
-            vault.deductFees(trader, collateralUsed, address(this));
-        }
-        
-        uint256 remainingShortfall = totalLoss > availableCollateral ? totalLoss - availableCollateral : 0;
-        
-        if (remainingShortfall > 0) {
-            // Track for socialization
-            totalShortfall += remainingShortfall;
-            socializedLossDebt[trader] += remainingShortfall;
-            
-            // Trigger socialization immediately
-            _socializeLosses(remainingShortfall);
-        }
-        
-        // Close the position
-        userPositions[trader] = 0;
-        
-        // Pay keeper reward
-        if (keeperReward > 0 && msg.sender != trader) {
-            vault.transferCollateral(trader, msg.sender, keeperReward);
-        }
-        
-        // Protocol fee to fee recipient
-        if (protocolFee > 0) {
-            vault.transferCollateral(trader, feeRecipient, protocolFee);
-        }
-        
-        emit CollateralWaterfallExecuted(
-            trader,
-            0, // isolatedMarginUsed = 0 for regular margin positions
-            collateralUsed,
-            remainingShortfall
-        );
-    }
-    
-    // ============ Socialized Loss Functions ============
-    
-    /**
-     * @dev Socialize losses among profitable traders
-     * @param shortfallAmount Amount to be socialized
-     */
-    function _socializeLosses(uint256 shortfallAmount) internal {
-        // Get all profitable positions
-        uint256 totalProfits = 0;
-        address[] memory profitableTraders = new address[](100); // Max 100 for gas efficiency
-        uint256[] memory traderProfits = new uint256[](100);
-        uint256 profitableCount = 0;
-        
-        // Iterate through all active positions to find profitable ones
-        // In production, this would need pagination or off-chain calculation
-        // For now, we'll use a simplified approach
-        
-        // Calculate total profits available for socialization
-        for (uint256 i = 0; i < profitableCount && i < 100; i++) {
-            totalProfits += traderProfits[i];
-        }
-        
-        if (totalProfits == 0) {
-            // No profits to socialize against - system bankruptcy
-            // In production, this would trigger emergency procedures
-            return;
-        }
-        
-        // Calculate socialization percentage
-        uint256 socializationBps = (shortfallAmount * 10000) / totalProfits;
-        if (socializationBps > 10000) {
-            socializationBps = 10000; // Cap at 100%
-        }
-        
-        // Apply socialization to each profitable trader
-        for (uint256 i = 0; i < profitableCount && i < 100; i++) {
-            address trader = profitableTraders[i];
-            uint256 profit = traderProfits[i];
-            uint256 socializedAmount = (profit * socializationBps) / 10000;
-            
-            // Deduct from trader's balance
-            vault.deductFees(trader, socializedAmount, address(this));
-            socializedLossCredit[trader] += socializedAmount;
-            
-            emit TraderSocialized(
-                trader,
-                profit,
-                socializedAmount,
-                profit - socializedAmount
-            );
-        }
-        
-        emit LosseSocialized(
-            shortfallAmount,
-            totalProfits,
-            socializationBps
-        );
-    }
-    
-    /**
-     * @dev Calculate unrealized PnL for a position
-     * @param trader Trader address
-     * @param positionId Position ID
-     * @return pnl Profit/loss amount (positive for profit)
-     * @return isProfit Whether it's a profit
-     */
-    function calculatePositionPnL(
-        address trader,
-        uint256 positionId
-    ) public view returns (int256 pnl, bool isProfit) {
-        IsolatedPosition memory position = userIsolatedPositions[trader][positionId];
-        if (!position.isActive) {
-            return (0, false);
-        }
-        
-        uint256 currentPrice = calculateMarkPrice();
-        uint256 absSize = uint256(position.size > 0 ? position.size : -position.size);
-        
-        if (position.size > 0) {
-            // Long position
-            if (currentPrice > position.entryPrice) {
-                pnl = int256(((currentPrice - position.entryPrice) * absSize) / AMOUNT_SCALE);
-                isProfit = true;
-            } else {
-                pnl = -int256(((position.entryPrice - currentPrice) * absSize) / AMOUNT_SCALE);
-                isProfit = false;
-            }
-        } else {
-            // Short position
-            if (currentPrice < position.entryPrice) {
-                pnl = int256(((position.entryPrice - currentPrice) * absSize) / AMOUNT_SCALE);
-                isProfit = true;
-            } else {
-                pnl = -int256(((currentPrice - position.entryPrice) * absSize) / AMOUNT_SCALE);
-                isProfit = false;
-            }
-        }
-        
-        return (pnl, isProfit);
-    }
-
-    /**
      * @dev Cancel an existing order
      * @param orderId The ID of the order to cancel
      */
@@ -1071,44 +488,24 @@ contract OrderBook {
     {
         Order storage order = orders[orderId];
         address trader = order.trader;
-        bool isMarginOrder = order.isMarginOrder;
         
-        // Store order details before deletion for event
-        uint256 price = order.price;
-        uint256 amount = order.amount;
-        bool isBuy = order.isBuy;
+        // Unreserve margin if it's a margin order
+        if (order.isMarginOrder) {
+            vault.unreserveMargin(trader, bytes32(orderId));
+        }
         
-        // First, remove from order book to prevent any further matching
-        if (isBuy) {
-            _removeFromBuyBook(orderId, price, amount);
+        if (order.isBuy) {
+            _removeFromBuyBook(orderId, order.price, order.amount);
         } else {
-            _removeFromSellBook(orderId, price, amount);
+            _removeFromSellBook(orderId, order.price, order.amount);
         }
 
-        // Remove order ID from user's order list
+        // CRITICAL FIX: Remove order ID from user's order list
         _removeOrderFromUserList(trader, orderId);
 
-        // Delete order data
+        emit OrderCancelled(orderId, trader);
         delete orders[orderId];
         delete cumulativeMarginUsed[orderId];
-        
-        // Finally, unreserve margin if it's a margin order
-        // Using try-catch pattern to ensure order cancellation completes even if vault fails
-        if (isMarginOrder) {
-            try vault.unreserveMargin(trader, bytes32(orderId)) {
-                // Successfully unreserved
-            } catch {
-                // If unreserve fails, try the safe version
-                try ICentralizedVault(address(vault)).safeUnreserveMargin(trader, bytes32(orderId)) returns (bool, uint256) {
-                    // Handled through safe unreserve
-                } catch {
-                    // Log the error but don't revert the cancellation
-                    emit MarginUnreserveError(orderId, trader, "Failed to unreserve margin during cancellation");
-                }
-            }
-        }
-
-        emit OrderCancelled(orderId, trader);
     }
 
     /**
@@ -1181,25 +578,13 @@ contract OrderBook {
                     // Order fully filled, remove from book
                     _removeOrderFromLevel(currentOrderId, currentPrice, false);
                     
-                    // Remove from user's order list
+                    // CRITICAL FIX: Remove from user's order list and unreserve margin
                     _removeOrderFromUserList(sellOrder.trader, currentOrderId);
-                    
-                    // Delete order data first
-                    delete orders[currentOrderId];
-                    
-                    // Unreserve margin with error handling
                     if (sellOrder.isMarginOrder) {
-                        try vault.unreserveMargin(sellOrder.trader, bytes32(currentOrderId)) {
-                            // Successfully unreserved
-                        } catch {
-                            // Try safe unreserve as fallback
-                            try ICentralizedVault(address(vault)).safeUnreserveMargin(sellOrder.trader, bytes32(currentOrderId)) returns (bool, uint256) {
-                                // Handled
-                            } catch {
-                                emit MarginUnreserveError(currentOrderId, sellOrder.trader, "Failed to unreserve on fill");
-                            }
-                        }
+                        vault.unreserveMargin(sellOrder.trader, bytes32(currentOrderId));
                     }
+                    
+                    delete orders[currentOrderId];
                 } else {
                     emit OrderPartiallyFilled(currentOrderId, matchAmount, sellOrder.amount);
                 }
@@ -1262,25 +647,13 @@ contract OrderBook {
                     // Order fully filled, remove from book
                     _removeOrderFromLevel(currentOrderId, currentPrice, true);
                     
-                    // Remove from user's order list
+                    // CRITICAL FIX: Remove from user's order list and unreserve margin
                     _removeOrderFromUserList(buyOrder.trader, currentOrderId);
-                    
-                    // Delete order data first
-                    delete orders[currentOrderId];
-                    
-                    // Unreserve margin with error handling
                     if (buyOrder.isMarginOrder) {
-                        try vault.unreserveMargin(buyOrder.trader, bytes32(currentOrderId)) {
-                            // Successfully unreserved
-                        } catch {
-                            // Try safe unreserve as fallback
-                            try ICentralizedVault(address(vault)).safeUnreserveMargin(buyOrder.trader, bytes32(currentOrderId)) returns (bool, uint256) {
-                                // Handled
-                            } catch {
-                                emit MarginUnreserveError(currentOrderId, buyOrder.trader, "Failed to unreserve on fill");
-                            }
-                        }
+                        vault.unreserveMargin(buyOrder.trader, bytes32(currentOrderId));
                     }
+                    
+                    delete orders[currentOrderId];
                 } else {
                     emit OrderPartiallyFilled(currentOrderId, matchAmount, buyOrder.amount);
                 }
@@ -1369,25 +742,13 @@ contract OrderBook {
                     // Order fully filled, remove from book
                     _removeOrderFromLevel(currentOrderId, currentPrice, false);
                     
-                    // Remove from user's order list
+                    // CRITICAL FIX: Remove from user's order list and unreserve margin
                     _removeOrderFromUserList(sellOrder.trader, currentOrderId);
-                    
-                    // Delete order data first
-                    delete orders[currentOrderId];
-                    
-                    // Unreserve margin with error handling
                     if (sellOrder.isMarginOrder) {
-                        try vault.unreserveMargin(sellOrder.trader, bytes32(currentOrderId)) {
-                            // Successfully unreserved
-                        } catch {
-                            // Try safe unreserve as fallback
-                            try ICentralizedVault(address(vault)).safeUnreserveMargin(sellOrder.trader, bytes32(currentOrderId)) returns (bool, uint256) {
-                                // Handled
-                            } catch {
-                                emit MarginUnreserveError(currentOrderId, sellOrder.trader, "Failed to unreserve on fill");
-                            }
-                        }
+                        vault.unreserveMargin(sellOrder.trader, bytes32(currentOrderId));
                     }
+                    
+                    delete orders[currentOrderId];
                 } else {
                     emit OrderPartiallyFilled(currentOrderId, matchAmount, sellOrder.amount);
                 }
@@ -1450,25 +811,13 @@ contract OrderBook {
                     // Order fully filled, remove from book
                     _removeOrderFromLevel(currentOrderId, currentPrice, true);
                     
-                    // Remove from user's order list
+                    // CRITICAL FIX: Remove from user's order list and unreserve margin
                     _removeOrderFromUserList(buyOrder.trader, currentOrderId);
-                    
-                    // Delete order data first
-                    delete orders[currentOrderId];
-                    
-                    // Unreserve margin with error handling
                     if (buyOrder.isMarginOrder) {
-                        try vault.unreserveMargin(buyOrder.trader, bytes32(currentOrderId)) {
-                            // Successfully unreserved
-                        } catch {
-                            // Try safe unreserve as fallback
-                            try ICentralizedVault(address(vault)).safeUnreserveMargin(buyOrder.trader, bytes32(currentOrderId)) returns (bool, uint256) {
-                                // Handled
-                            } catch {
-                                emit MarginUnreserveError(currentOrderId, buyOrder.trader, "Failed to unreserve on fill");
-                            }
-                        }
+                        vault.unreserveMargin(buyOrder.trader, bytes32(currentOrderId));
                     }
+                    
+                    delete orders[currentOrderId];
                 } else {
                     emit OrderPartiallyFilled(currentOrderId, matchAmount, buyOrder.amount);
                 }
@@ -1785,7 +1134,6 @@ contract OrderBook {
         return bestBid != 0 && bestAsk != type(uint256).max && bestBid >= bestAsk;
     }
 
-
     // ============ Trade Execution Functions ============
 
     /**
@@ -1806,8 +1154,8 @@ contract OrderBook {
         bool sellerMargin
     ) internal {
         // Calculate trade value (amount * price converted to USDC decimals)
-        // amount: 18 decimals, price: 6 decimals -> result: 24 decimals, divide by 10^18 to get 6 decimals (USDC format)
-        uint256 tradeValue = (amount * price) / (10**18); // Result in 6 decimals (USDC format)
+        // amount: 18 decimals, price: 6 decimals -> result: 24 decimals, divide by 10^18 to get 6 decimals
+        uint256 tradeValue = (amount * price) / (10**18); // Convert to USDC (6 decimals)
         
         // Calculate trading fees
         uint256 calculatedBuyerFee = 0;
@@ -1833,27 +1181,62 @@ contract OrderBook {
         
         // Handle margin vs spot trades differently for collateral and margin management
         if (buyerMargin || sellerMargin) {
-            // MARGIN TRADES: Create isolated positions automatically
+            // MARGIN TRADES: Update positions with margin requirements
             if (buyerMargin) {
-                // Process buyer's position change
-                _processTradeForIsolatedPosition(buyer, int256(amount), price, oldBuyerPosition);
+                // Calculate how much of this trade is opening vs closing
+                uint256 openingAmount = 0;
+                if (oldBuyerPosition < 0) {
+                    // Currently short, buying to close
+                    int256 absOldPosition = -oldBuyerPosition;
+                    if (int256(amount) > absOldPosition) {
+                        // Closing short and opening long
+                        openingAmount = uint256(int256(amount) - absOldPosition);
+                    }
+                    // else: just closing/reducing short, no new margin needed
+                } else {
+                    // Currently flat or long, buying to open/increase
+                    openingAmount = amount;
+                }
+                
+                // Calculate margin required for the opening portion
+                uint256 marginRequired = openingAmount > 0 ? _calculateExecutionMargin(openingAmount, price) : 0;
+                
+                // Use the atomic update function that handles margin and position together
+                vault.updatePositionWithMargin(buyer, marketId, int256(amount), price, marginRequired);
             }
             
             if (sellerMargin) {
-                // Process seller's position change
-                _processTradeForIsolatedPosition(seller, -int256(amount), price, oldSellerPosition);
+                // Calculate how much of this trade is opening vs closing
+                uint256 openingAmount = 0;
+                if (oldSellerPosition > 0) {
+                    // Currently long, selling to close
+                    if (int256(amount) > oldSellerPosition) {
+                        // Closing long and opening short
+                        openingAmount = uint256(int256(amount) - oldSellerPosition);
+                    }
+                    // else: just closing/reducing long, no new margin needed
+                } else {
+                    // Currently flat or short, selling to open/increase
+                    openingAmount = amount;
+                }
+                
+                // Calculate margin required for the opening portion
+                uint256 marginRequired = openingAmount > 0 ? _calculateExecutionMargin(openingAmount, price) : 0;
+                
+                // Use the atomic update function that handles margin and position together
+                vault.updatePositionWithMargin(seller, marketId, -int256(amount), price, marginRequired);
             }
             
             // SECURITY FIX: Prevent mixing margin and spot trades
             // Both parties must use the same trade type
             require(buyerMargin == sellerMargin, "OrderBook: cannot mix margin and spot trades");
             
-            // Deduct trading fees for margin traders (only if fee amount > 0)
+            // Deduct trading fees for margin traders
             if (tradingFee > 0) {
-                if (buyerMargin && calculatedBuyerFee > 0) {
+                if (buyerMargin) {
                     vault.deductFees(buyer, calculatedBuyerFee, feeRecipient);
                 }
-                if (sellerMargin && calculatedSellerFee > 0) {
+                if (sellerMargin) {
                     vault.deductFees(seller, calculatedSellerFee, feeRecipient);
                 }
             }
@@ -1864,229 +1247,7 @@ contract OrderBook {
         }
         
         // Update last trade price for market data
-        // For market orders hitting multiple levels, track the highest price executed
-        // This ensures lastTradePrice reflects the most favorable execution
-        if (price > lastTradePrice) {
-            lastTradePrice = price;
-        }
-    }
-
-    /**
-     * @dev Process a trade and create/update isolated positions automatically
-     * @param trader Address of the trader
-     * @param sizeDelta Size change from trade (positive for buy, negative for sell)
-     * @param price Execution price
-     * @param oldPosition Previous net position
-     */
-    function _processTradeForIsolatedPosition(
-        address trader,
-        int256 sizeDelta,
-        uint256 price,
-        int256 oldPosition
-    ) internal {
-        // Determine if this trade is opening or closing
-        bool isOpening = false;
-        uint256 openingAmount = 0;
-        uint256 closingAmount = 0;
-        
-        if (sizeDelta > 0) {
-            // Buying
-            if (oldPosition >= 0) {
-                // Was flat or long, now longer - fully opening
-                isOpening = true;
-                openingAmount = uint256(sizeDelta);
-            } else {
-                // Was short
-                uint256 absSizeDelta = uint256(sizeDelta);
-                uint256 absOldPosition = uint256(-oldPosition);
-                
-                if (absSizeDelta <= absOldPosition) {
-                    // Just closing/reducing short
-                    closingAmount = absSizeDelta;
-                } else {
-                    // Closing short and opening long
-                    closingAmount = absOldPosition;
-                    openingAmount = absSizeDelta - absOldPosition;
-                    isOpening = true;
-                }
-            }
-        } else {
-            // Selling
-            uint256 absSizeDelta = uint256(-sizeDelta);
-            
-            if (oldPosition <= 0) {
-                // Was flat or short, now shorter - fully opening
-                isOpening = true;
-                openingAmount = absSizeDelta;
-            } else {
-                // Was long
-                uint256 absOldPosition = uint256(oldPosition);
-                
-                if (absSizeDelta <= absOldPosition) {
-                    // Just closing/reducing long
-                    closingAmount = absSizeDelta;
-                } else {
-                    // Closing long and opening short
-                    closingAmount = absOldPosition;
-                    openingAmount = absSizeDelta - absOldPosition;
-                    isOpening = true;
-                }
-            }
-        }
-        
-        // Handle closing existing positions
-        if (closingAmount > 0) {
-            _closePortionOfIsolatedPositions(trader, closingAmount, price, sizeDelta > 0);
-        }
-        
-        // Handle opening new position
-        if (isOpening && openingAmount > 0) {
-            // Calculate required margin
-            // Short positions require 150% margin due to unlimited risk
-            // Long positions require 100% margin
-            // Note: openingAmount is in 18 decimals (ALU), price is in 6 decimals (USDC)
-            // notionalValue = (openingAmount * price) / 10^18 = openingAmount * price / 10^18
-            // This gives us the notional value in 6 decimals (USDC format)
-            uint256 notionalValue = (openingAmount * price) / 10**18;
-            uint256 marginRequired = sizeDelta < 0 ? 
-                (notionalValue * 150) / 100 :  // 150% for shorts
-                notionalValue;                  // 100% for longs
-            
-            // No need to convert - notionalValue is already in 6 decimals (USDC format)
-            
-            // Create new isolated position
-            uint256 positionId = userNextPositionId[trader]++;
-            
-            // Calculate liquidation price
-            uint256 maintenanceMargin = (marginRequired * MAINTENANCE_MARGIN_BPS) / 10000;
-            
-            // Pass 6-decimal values directly to the liquidation price calculation
-            uint256 liquidationPrice = _calculateLiquidationPrice(
-                sizeDelta > 0 ? int256(openingAmount) : -int256(openingAmount),
-                price,
-                marginRequired,  // 6 decimals
-                maintenanceMargin  // 6 decimals
-            );
-            
-            // Update position in vault to maintain consistency
-            // This ensures the vault tracks the position for portfolio calculations
-            vault.updatePositionWithMargin(
-                trader,
-                marketId,
-                sizeDelta > 0 ? int256(openingAmount) : -int256(openingAmount),
-                price,
-                marginRequired
-            );
-            
-            // Store position
-            userIsolatedPositions[trader][positionId] = IsolatedPosition({
-                positionId: positionId,
-                trader: trader,
-                size: sizeDelta > 0 ? int256(openingAmount) : -int256(openingAmount),
-                entryPrice: price,
-                isolatedMargin: marginRequired,
-                liquidationPrice: liquidationPrice,
-                maintenanceMargin: maintenanceMargin,
-                openTimestamp: block.timestamp,
-                isActive: true
-            });
-            
-            userPositionIds[trader].push(positionId);
-            
-            emit IsolatedPositionOpened(
-                trader,
-                positionId,
-                sizeDelta > 0 ? int256(openingAmount) : -int256(openingAmount),
-                price,
-                marginRequired,
-                liquidationPrice
-            );
-        }
-    }
-
-    /**
-     * @dev Close a portion of isolated positions (FIFO)
-     * @param trader Address of the trader
-     * @param amount Amount to close
-     * @param closePrice Price at which to close
-     * @param isReducingShort True if buying to reduce short, false if selling to reduce long
-     */
-    function _closePortionOfIsolatedPositions(
-        address trader,
-        uint256 amount,
-        uint256 closePrice,
-        bool isReducingShort
-    ) internal {
-        uint256 remainingToClose = amount;
-        uint256[] memory positionIds = userPositionIds[trader];
-        
-        for (uint256 i = 0; i < positionIds.length && remainingToClose > 0; i++) {
-            IsolatedPosition storage position = userIsolatedPositions[trader][positionIds[i]];
-            
-            if (!position.isActive) continue;
-            
-            // Check if position matches the closing direction
-            bool positionIsShort = position.size < 0;
-            if (positionIsShort != !isReducingShort) continue;
-            
-            uint256 positionAbsSize = uint256(position.size > 0 ? position.size : -position.size);
-            uint256 amountToClose = remainingToClose > positionAbsSize ? positionAbsSize : remainingToClose;
-            
-            // Calculate PnL
-            int256 pnl;
-            if (position.size > 0) {
-                // Long position
-                pnl = int256((amountToClose * (closePrice - position.entryPrice)) / 10**18);
-            } else {
-                // Short position
-                pnl = int256((amountToClose * (position.entryPrice - closePrice)) / 10**18);
-            }
-            
-            // Release proportional margin
-            uint256 marginToRelease = (position.isolatedMargin * amountToClose) / positionAbsSize;
-            vault.releaseMargin(trader, marketId, marginToRelease);
-            
-            // Update position in vault (closing/reducing)
-            int256 closingSizeDelta = position.size > 0 ? -int256(amountToClose) : int256(amountToClose);
-            vault.updatePosition(trader, marketId, closingSizeDelta, closePrice);
-            
-            // Update or close position
-            if (amountToClose == positionAbsSize) {
-                // Fully close position
-                position.isActive = false;
-                
-                // Handle PnL
-                if (pnl > 0) {
-                    vault.transferCollateral(address(0), trader, uint256(pnl));
-                } else if (pnl < 0) {
-                    uint256 loss = uint256(-pnl);
-                    if (loss <= marginToRelease) {
-                        // Loss covered by released margin
-                    } else {
-                        // Additional loss from available collateral
-                        vault.transferCollateral(trader, address(0), loss - marginToRelease);
-                    }
-                }
-                
-                emit IsolatedPositionClosed(trader, positionIds[i], closePrice, pnl, "trade");
-            } else {
-                // Partially close position
-                position.size = position.size > 0 
-                    ? position.size - int256(amountToClose)
-                    : position.size + int256(amountToClose);
-                position.isolatedMargin -= marginToRelease;
-                
-                // Handle partial PnL
-                if (pnl > 0) {
-                    vault.transferCollateral(address(0), trader, uint256(pnl));
-                } else if (pnl < 0) {
-                    uint256 loss = uint256(-pnl);
-                    vault.transferCollateral(trader, address(0), loss);
-                }
-            }
-            
-            remainingToClose -= amountToClose;
-        }
+        lastTradePrice = price;
     }
 
     /**
@@ -2097,32 +1258,9 @@ contract OrderBook {
      */
     function _calculateMarginRequired(uint256 amount, uint256 price) internal view returns (uint256) {
         // amount is in 18 decimals, price is in 6 decimals
-        // notionalValue = amount * price / 10^18 (to get value in 6 decimals)
-        // This gives us the notional value in 6 decimals (USDC format)
+        // notionalValue = amount * price / 10^18 (to get USDC value with 6 decimals)
         uint256 notionalValue = (amount * price) / (10**18);
         return (notionalValue * marginRequirementBps) / 10000;
-    }
-
-    /**
-     * @dev Calculate margin required for a trade with different requirements for longs vs shorts
-     * @param amount Trade amount
-     * @param price Trade price
-     * @param isBuy True for buy order (long), false for sell order (short)
-     * @return Margin required for this trade
-     */
-    function _calculateMarginRequiredWithSide(uint256 amount, uint256 price, bool isBuy) internal view returns (uint256) {
-        // amount is in 18 decimals, price is in 6 decimals
-        // notionalValue = amount * price / 10^18 (to get value in 6 decimals)
-        // This gives us the notional value in 6 decimals (USDC format)
-        uint256 notionalValue = (amount * price) / (10**18);
-        
-        if (isBuy) {
-            // Longs: 100% margin requirement
-            return notionalValue;
-        } else {
-            // Shorts: 150% margin requirement
-            return (notionalValue * 150) / 100;
-        }
     }
 
     /**
@@ -2133,9 +1271,6 @@ contract OrderBook {
      */
     function _calculateExecutionMargin(uint256 amount, uint256 executionPrice) internal view returns (uint256) {
         // Calculate margin based on actual execution price
-        // amount is in 18 decimals, executionPrice is in 6 decimals
-        // notionalValue = amount * executionPrice / 10^18 (to get value in 6 decimals)
-        // This gives us the notional value in 6 decimals (USDC format)
         uint256 notionalValue = (amount * executionPrice) / (10**18);
         return (notionalValue * marginRequirementBps) / 10000;
     }
@@ -2191,136 +1326,10 @@ contract OrderBook {
      * @return Fee amount
      */
     function _calculateTradingFee(uint256 amount, uint256 price) internal view returns (uint256) {
-        // amount is in 18 decimals, price is in 18 decimals
-        // notionalValue = amount * price / 10^18 (to get value in 18 decimals)
-        // Then convert to 6 decimals (USDC format)
+        // amount is in 18 decimals, price is in 6 decimals
+        // notionalValue = amount * price / 10^18 (to get USDC value with 6 decimals)
         uint256 notionalValue = (amount * price) / (10**18);
-        notionalValue = scaleFrom18Decimals(notionalValue, 6);
         return (notionalValue * tradingFee) / 10000;
-    }
-    
-    /**
-     * @dev Calculate liquidation price for an isolated position
-     * @param size Position size (positive for long, negative for short)
-     * @param entryPrice Entry price
-     * @param isolatedMargin Isolated margin amount
-     * @param maintenanceMargin Maintenance margin requirement
-     * @return Liquidation price
-     */
-    function _calculateLiquidationPrice(
-        int256 size,
-        uint256 entryPrice,
-        uint256 isolatedMargin,
-        uint256 maintenanceMargin
-    ) internal pure returns (uint256) {
-        uint256 absSize = uint256(size > 0 ? size : -size);
-        
-        if (size > 0) {
-            // Long position: liquidation when price drops
-            // Formula: P_liq = EP - (M - MMR * EP * Q) / Q
-            // Where M is isolated margin, MMR is maintenance margin ratio
-            // Simplified: P_liq = EP - (availableForLoss) / Q
-            
-            // Both isolatedMargin and maintenanceMargin are in 6 decimals
-            uint256 availableForLoss = isolatedMargin - maintenanceMargin;
-            
-            // Convert availableForLoss to 18 decimals for calculation with position size
-            uint256 availableForLoss18 = availableForLoss * (10**12);
-            
-            // Calculate loss per unit (in 18 decimals)
-            uint256 lossPerUnit18 = availableForLoss18 / absSize;
-            
-            // Convert back to 6 decimals for comparison with entry price
-            uint256 lossPerUnit = lossPerUnit18 / (10**12);
-            
-            if (lossPerUnit >= entryPrice) {
-                return 0; // Position can go to zero
-            }
-            return entryPrice - lossPerUnit;
-        } else {
-            // Short position: liquidation when price rises
-            // Formula: P_liq = (M + (EP * Q)) / (Q * (1 + MMR))
-            // Where:
-            // - EP = entry price of the short position (6 decimals)
-            // - Q = position size (18 decimals)
-            // - M = isolated margin (6 decimals)
-            // - MMR = maintenance margin ratio (as a decimal)
-            
-            // Handle edge case
-            if (isolatedMargin == 0) {
-                return type(uint256).max; // Cannot liquidate if no margin
-            }
-            
-            // Convert entry price from 6 decimals to 18 decimals for calculation
-            uint256 entryPrice18 = entryPrice * (10**12); // 6 to 18 decimals
-            
-            // Calculate MMR as a decimal (maintenanceMargin / isolatedMargin)
-            // Both are in 6 decimals, so result is a pure decimal
-            uint256 mmrDecimal = (maintenanceMargin * AMOUNT_SCALE) / isolatedMargin;
-            
-            // Calculate (1 + MMR) scaled by 1e18
-            uint256 onePlusMMR = AMOUNT_SCALE + mmrDecimal;
-            
-            // Calculate (EP * Q) - the notional value of the position (in 18 decimals)
-            uint256 positionNotional = (entryPrice18 * absSize) / AMOUNT_SCALE;
-            
-            // Convert isolated margin from 6 to 18 decimals
-            uint256 isolatedMargin18 = isolatedMargin * (10**12);
-            
-            // Calculate numerator: M + (EP * Q) (both in 18 decimals)
-            uint256 numerator = isolatedMargin18 + positionNotional;
-            
-            // Calculate denominator: Q * (1 + MMR) (both in 18 decimals)
-            uint256 denominator = (absSize * onePlusMMR) / AMOUNT_SCALE;
-            
-            // Final liquidation price: numerator / denominator (result in 18 decimals)
-            // Convert back to 6 decimals for USDC format
-            uint256 liquidationPrice18 = (numerator * AMOUNT_SCALE) / denominator;
-            return liquidationPrice18 / (10**12); // Convert from 18 to 6 decimals
-        }
-    }
-    
-    /**
-     * @dev Get liquidation price for a specific isolated position
-     * @param trader Trader address
-     * @param positionId Position ID
-     * @return Liquidation price in 6 decimals (USDC format)
-     */
-    function getLiquidationPrice(address trader, uint256 positionId) external view returns (uint256) {
-        IsolatedPosition memory position = userIsolatedPositions[trader][positionId];
-        
-        if (!position.isActive) {
-            return 0; // Position not active
-        }
-        
-        // Calculate liquidation price using the corrected formula
-        return _calculateLiquidationPrice(
-            position.size,
-            position.entryPrice,
-            position.isolatedMargin,
-            position.maintenanceMargin
-        );
-    }
-    
-    /**
-     * @dev Get total position value for a user across all positions
-     * @param user User address
-     * @return Total position value in USDC
-     */
-    function _getUserTotalPositionValue(address user) internal view returns (uint256) {
-        uint256 totalValue = 0;
-        uint256[] memory positionIds = userPositionIds[user];
-        
-        for (uint256 i = 0; i < positionIds.length; i++) {
-            IsolatedPosition memory pos = userIsolatedPositions[user][positionIds[i]];
-            if (pos.isActive) {
-                uint256 absSize = uint256(pos.size > 0 ? pos.size : -pos.size);
-                uint256 posValue = (absSize * pos.entryPrice) / AMOUNT_SCALE;
-                totalValue += posValue;
-            }
-        }
-        
-        return totalValue;
     }
 
     /**
@@ -2932,15 +1941,26 @@ contract OrderBook {
         
         // Priority 3: Use last trade price if available
         if (lastTradePrice > 0) {
+            // Apply bounds if order book is one-sided
+            if (bestBid > 0 && bestAsk == type(uint256).max) {
+                // Only bid exists - ensure mark price isn't too far above bid
+                uint256 maxPrice = bestBid + (bestBid / 20); // Max 5% above bid
+                return lastTradePrice > maxPrice ? maxPrice : lastTradePrice;
+            }
+            if (bestBid == 0 && bestAsk < type(uint256).max) {
+                // Only ask exists - ensure mark price isn't too far below ask
+                uint256 minPrice = bestAsk - (bestAsk / 20); // Max 5% below ask
+                return lastTradePrice < minPrice ? minPrice : lastTradePrice;
+            }
             return lastTradePrice;
         }
         
         // Priority 4: Fallback to single-sided order book
         if (bestBid > 0 && bestAsk == type(uint256).max) {
-            return bestBid; // Use bid price directly
+            return bestBid + (bestBid / 100); // 1% premium
         }
         if (bestBid == 0 && bestAsk < type(uint256).max) {
-            return bestAsk; // Use ask price directly
+            return bestAsk - (bestAsk / 100); // 1% discount
         }
         
         // Priority 5: No trades and no orders - return default price
@@ -3043,35 +2063,6 @@ contract OrderBook {
         return (leverageEnabled, maxLeverage, marginRequirementBps, leverageController);
     }
 
-    // ============ Decimal Scaling Functions ============
-    
-    /**
-     * @dev Scale amount to 18 decimals
-     * @param amount Amount to scale
-     * @param decimals Current decimal precision
-     * @return Scaled amount in 18 decimals
-     */
-    function scaleTo18Decimals(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        return amount * (10 ** (18 - decimals));
-    }
-
-    /**
-     * @dev Scale amount from 18 decimals to target decimals
-     * @param amount Amount in 18 decimals
-     * @param decimals Target decimal precision
-     * @return Scaled amount in target decimals
-     */
-    function scaleFrom18Decimals(uint256 amount, uint8 decimals) internal pure returns (uint256) {
-        if (decimals == 18) return amount;
-        
-        uint256 divisor = 10 ** (18 - decimals);
-        
-        // Use rounding instead of truncation to prevent small amounts from becoming 0
-        // Add half the divisor before dividing to round to nearest value
-        return (amount + divisor / 2) / divisor;
-    }
-
     // ============ Internal Helper Functions ============
 
     /**
@@ -3090,70 +2081,5 @@ contract OrderBook {
                 break;
             }
         }
-    }
-    
-    // ============ View Functions for Isolated Positions ============
-    
-    /**
-     * @dev Get user's active isolated positions
-     * @param trader Trader address
-     * @return positions Array of position IDs
-     */
-    function getUserPositions(address trader) external view returns (uint256[] memory) {
-        return userPositionIds[trader];
-    }
-    
-    /**
-     * @dev Get detailed position information
-     * @param trader Trader address
-     * @param positionId Position ID
-     * @return position The isolated position details
-     */
-    function getPosition(address trader, uint256 positionId) external view returns (IsolatedPosition memory) {
-        return userIsolatedPositions[trader][positionId];
-    }
-    
-    /**
-     * @dev Check if a position is at risk of liquidation
-     * @param trader Trader address
-     * @param positionId Position ID
-     * @return atRisk Whether position is at risk
-     * @return healthPercentage Position health (100% = liquidation price)
-     */
-    function checkPositionHealth(address trader, uint256 positionId) external view returns (bool atRisk, uint256 healthPercentage) {
-        IsolatedPosition memory position = userIsolatedPositions[trader][positionId];
-        if (!position.isActive) {
-            return (false, 0);
-        }
-        
-        uint256 currentPrice = calculateMarkPrice();
-        
-        if (position.size > 0) {
-            // Long position
-            if (currentPrice <= position.liquidationPrice) {
-                return (true, 100); // At or past liquidation
-            }
-            healthPercentage = ((currentPrice - position.liquidationPrice) * 10000) / (position.entryPrice - position.liquidationPrice);
-        } else {
-            // Short position
-            if (currentPrice >= position.liquidationPrice) {
-                return (true, 100); // At or past liquidation
-            }
-            healthPercentage = ((position.liquidationPrice - currentPrice) * 10000) / (position.liquidationPrice - position.entryPrice);
-        }
-        
-        // Consider at risk if health < 150%
-        atRisk = healthPercentage < 15000;
-        
-        return (atRisk, healthPercentage);
-    }
-    
-    
-    /**
-     * @dev Get total system shortfall
-     * @return Total shortfall amount pending socialization
-     */
-    function getTotalShortfall() external view returns (uint256) {
-        return totalShortfall;
     }
 }

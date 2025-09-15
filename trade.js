@@ -60,21 +60,52 @@ class OrderModifier {
   }
 
   async initialize() {
-    if (this.initialized || !contractUtils) return;
+    if (this.initialized) return;
 
     try {
       console.log(
         colorText("🔧 Initializing contract connections...", colors.yellow)
       );
 
-      this.contracts.mockUSDC = await contractUtils.getContract("MOCK_USDC");
-      this.contracts.vault = await contractUtils.getContract(
-        "CENTRALIZED_VAULT"
-      );
-      this.contracts.orderBook = await contractUtils.getContract(
-        "ALUMINUM_ORDERBOOK"
-      );
-      this.contracts.router = await contractUtils.getContract("TRADING_ROUTER");
+      // Try to use contractUtils first (Hardhat mode)
+      if (contractUtils) {
+        this.contracts.mockUSDC = await contractUtils.getContract("MOCK_USDC");
+        this.contracts.vault = await contractUtils.getContract(
+          "CENTRALIZED_VAULT"
+        );
+        this.contracts.orderBook = await contractUtils.getContract(
+          "ALUMINUM_ORDERBOOK"
+        );
+        this.contracts.router = await contractUtils.getContract(
+          "TRADING_ROUTER"
+        );
+      } else {
+        // Fallback: Use Hardhat's ethers directly (works better than manual provider)
+        console.log(
+          colorText("⚠️ Using Hardhat ethers directly...", colors.yellow)
+        );
+
+        // Load deployment addresses
+        const deployment = require("./deployments/localhost-deployment.json");
+
+        // Use Hardhat's ethers which automatically connects to localhost
+        this.contracts.mockUSDC = await ethers.getContractAt(
+          "MockUSDC",
+          deployment.contracts.MOCK_USDC
+        );
+        this.contracts.vault = await ethers.getContractAt(
+          "CentralizedVault",
+          deployment.contracts.CENTRALIZED_VAULT
+        );
+        this.contracts.orderBook = await ethers.getContractAt(
+          "OrderBook",
+          deployment.contracts.ALUMINUM_ORDERBOOK
+        );
+        this.contracts.router = await ethers.getContractAt(
+          "TradingRouter",
+          deployment.contracts.TRADING_ROUTER
+        );
+      }
 
       this.initialized = true;
       console.log(
@@ -728,7 +759,7 @@ class OrderModifier {
   }
 
   /**
-   * @dev Display enhanced order book with trader information
+   * @dev Display enhanced order book with trader information, mark price, and last traded price
    */
   async displayEnhancedOrderBook() {
     if (!this.initialized) {
@@ -737,7 +768,7 @@ class OrderModifier {
 
     console.log(
       colorText(
-        "\n📊 ENHANCED ORDER BOOK - ALU/USDC (with Traders)",
+        "\n📊 ENHANCED ORDER BOOK - ALU/USDC (with Traders, Mark Price & Last Trade)",
         colors.brightYellow
       )
     );
@@ -748,9 +779,90 @@ class OrderModifier {
       const bestBid = await this.contracts.orderBook.bestBid();
       const bestAsk = await this.contracts.orderBook.bestAsk();
 
+      // Fetch mark price and last traded price
+      const markPrice = await this.contracts.orderBook.getMarkPrice();
+      const lastTradePrice = await this.contracts.orderBook.lastTradePrice();
+
+      // Format prices for display
+      const markPriceFormatted = Number(
+        ethers.formatUnits(markPrice, 6)
+      ).toFixed(4);
+      const lastTradePriceFormatted =
+        lastTradePrice > 0
+          ? Number(ethers.formatUnits(lastTradePrice, 6)).toFixed(4)
+          : "N/A";
+
       console.log(
         colorText(
           "┌─────────────────────────────────────────────────────────────────────────────┐",
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          "│                        MARKET PRICE INFORMATION                             │",
+          colors.bright
+        )
+      );
+      console.log(
+        colorText(
+          "├─────────────────────────────────────────────────────────────────────────────┤",
+          colors.white
+        )
+      );
+
+      // Display mark price and last traded price prominently
+      console.log(
+        colorText(
+          `│ Mark Price: ${colorText(
+            "$" + markPriceFormatted,
+            colors.brightCyan
+          ).padEnd(20)} Last Trade: ${colorText(
+            "$" + lastTradePriceFormatted,
+            colors.brightYellow
+          ).padEnd(20)} │`,
+          colors.white
+        )
+      );
+
+      // Calculate spread if both bid and ask exist
+      const bestBidPrice =
+        bestBid > 0 ? Number(ethers.formatUnits(bestBid, 6)) : 0;
+      const bestAskPrice =
+        bestAsk < ethers.MaxUint256
+          ? Number(ethers.formatUnits(bestAsk, 6))
+          : 0;
+      const spread =
+        bestBidPrice > 0 && bestAskPrice > 0 ? bestAskPrice - bestBidPrice : 0;
+      const spreadFormatted = spread > 0 ? spread.toFixed(4) : "N/A";
+
+      console.log(
+        colorText(
+          `│ Best Bid: ${colorText(
+            bestBidPrice > 0 ? "$" + bestBidPrice.toFixed(4) : "N/A",
+            colors.green
+          ).padEnd(20)} Best Ask: ${colorText(
+            bestAskPrice > 0 ? "$" + bestAskPrice.toFixed(4) : "N/A",
+            colors.red
+          ).padEnd(20)} │`,
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          `│ Spread: ${colorText("$" + spreadFormatted, colors.magenta).padEnd(
+            20
+          )} Active Orders: ${colorText(
+            buyCount + " buys, " + sellCount + " sells",
+            colors.cyan
+          ).padEnd(20)} │`,
+          colors.white
+        )
+      );
+
+      console.log(
+        colorText(
+          "├─────────────────────────────────────────────────────────────────────────────┤",
           colors.white
         )
       );
@@ -855,38 +967,36 @@ class OrderModifier {
           colors.white
         )
       );
-
-      const bestBidPrice =
-        bestBid > 0
-          ? Number(ethers.formatUnits(bestBid, 6)).toFixed(4)
-          : "0.0000";
-      const bestAskPrice =
-        bestAsk < ethers.MaxUint256
-          ? Number(ethers.formatUnits(bestAsk, 6)).toFixed(4)
-          : "∞";
-
-      console.log(
-        colorText(
-          `│ Best Bid: ${colorText("$" + bestBidPrice, colors.green).padEnd(
-            25
-          )} Best Ask: ${colorText("$" + bestAskPrice, colors.red).padEnd(
-            25
-          )} │`,
-          colors.white
-        )
-      );
-      console.log(
-        colorText(
-          `│ Active Orders: ${colorText(
-            buyCount + " buys",
-            colors.green
-          )}, ${colorText(sellCount + " sells", colors.red)}${" ".repeat(35)}│`,
-          colors.white
-        )
-      );
       console.log(
         colorText(
           "└─────────────────────────────────────────────────────────────────────────────┘",
+          colors.white
+        )
+      );
+
+      // Add helpful legend
+      console.log(colorText("\n📋 PRICE LEGEND:", colors.brightCyan));
+      console.log(
+        colorText(
+          "   • Mark Price: Current fair value used for PnL calculations and liquidations",
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          "   • Last Trade: Price of the most recent executed trade",
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          "   • Best Bid/Ask: Highest buy order and lowest sell order prices",
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          "   • Spread: Difference between best ask and best bid",
           colors.white
         )
       );
@@ -1509,12 +1619,61 @@ async function main() {
   }
 
   if (args.includes("--list-orders")) {
-    await listUserOrders();
+    // Use Hardhat network for proper contract access
+    const { spawn } = require("child_process");
+    const scriptPath = path.join(__dirname, "show-orderbook-simple.js");
+    const hardhatProcess = spawn(
+      "npx",
+      ["hardhat", "run", scriptPath, "--network", "localhost"],
+      {
+        stdio: "inherit",
+        shell: true,
+      }
+    );
+
+    hardhatProcess.on("close", (code) => {
+      console.log(
+        colorText(`\n✨ Order list completed with code ${code}`, colors.green)
+      );
+    });
+
+    hardhatProcess.on("error", (error) => {
+      console.error(
+        colorText("❌ Failed to list orders:", colors.red),
+        error.message
+      );
+    });
     return;
   }
 
   if (args.includes("--show-book")) {
-    await showEnhancedOrderBook();
+    // Use Hardhat network for proper contract access
+    const { spawn } = require("child_process");
+    const scriptPath = path.join(__dirname, "show-orderbook-simple.js");
+    const hardhatProcess = spawn(
+      "npx",
+      ["hardhat", "run", scriptPath, "--network", "localhost"],
+      {
+        stdio: "inherit",
+        shell: true,
+      }
+    );
+
+    hardhatProcess.on("close", (code) => {
+      console.log(
+        colorText(
+          `\n✨ Order book view completed with code ${code}`,
+          colors.green
+        )
+      );
+    });
+
+    hardhatProcess.on("error", (error) => {
+      console.error(
+        colorText("❌ Failed to show order book:", colors.red),
+        error.message
+      );
+    });
     return;
   }
 

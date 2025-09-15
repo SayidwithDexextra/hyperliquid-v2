@@ -914,7 +914,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
   async displayOrderBook() {
     console.log(
       colorText(
-        "\n📊 LIVE ORDER BOOK - ALU/USDC (with Traders)",
+        "\n📊 LIVE ORDER BOOK - ALU/USDC (with Traders, Mark Price & Last Trade)",
         colors.brightYellow
       )
     );
@@ -925,9 +925,93 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       const bestBid = await this.contracts.orderBook.bestBid();
       const bestAsk = await this.contracts.orderBook.bestAsk();
 
+      // Fetch mark price and last traded price
+      const markPrice = await this.contracts.orderBook.getMarkPrice();
+      const lastTradePrice = await this.contracts.orderBook.lastTradePrice();
+
+      // Format prices for display (prices are in 6 decimals)
+      const markPriceFormatted = formatPriceWithValidation(
+        markPrice,
+        6,
+        4,
+        false
+      );
+      const lastTradePriceFormatted =
+        lastTradePrice > 0
+          ? formatPriceWithValidation(lastTradePrice, 6, 4, false)
+          : "N/A";
+
       console.log(
         colorText(
           "┌─────────────────────────────────────────────────────────────────────────────┐",
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          "│                        MARKET PRICE INFORMATION                             │",
+          colors.bright
+        )
+      );
+      console.log(
+        colorText(
+          "├─────────────────────────────────────────────────────────────────────────────┤",
+          colors.white
+        )
+      );
+
+      // Display mark price and last traded price prominently
+      console.log(
+        colorText(
+          `│ Mark Price: ${colorText(
+            "$" + markPriceFormatted,
+            colors.brightCyan
+          ).padEnd(20)} Last Trade: ${colorText(
+            "$" + lastTradePriceFormatted,
+            colors.brightYellow
+          ).padEnd(20)} │`,
+          colors.white
+        )
+      );
+
+      // Calculate spread if both bid and ask exist (prices are in 6 decimals)
+      const bestBidPrice =
+        bestBid > 0 ? Number(ethers.formatUnits(bestBid, 6)) : 0;
+      const bestAskPrice =
+        bestAsk < ethers.MaxUint256
+          ? Number(ethers.formatUnits(bestAsk, 6))
+          : 0;
+      const spread =
+        bestBidPrice > 0 && bestAskPrice > 0 ? bestAskPrice - bestBidPrice : 0;
+      const spreadFormatted = spread > 0 ? spread.toFixed(4) : "N/A";
+
+      console.log(
+        colorText(
+          `│ Best Bid: ${colorText(
+            bestBidPrice > 0 ? "$" + bestBidPrice.toFixed(4) : "N/A",
+            colors.green
+          ).padEnd(20)} Best Ask: ${colorText(
+            bestAskPrice > 0 ? "$" + bestAskPrice.toFixed(4) : "N/A",
+            colors.red
+          ).padEnd(20)} │`,
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          `│ Spread: ${colorText("$" + spreadFormatted, colors.magenta).padEnd(
+            20
+          )} Active Orders: ${colorText(
+            buyCount + " buys, " + sellCount + " sells",
+            colors.cyan
+          ).padEnd(20)} │`,
+          colors.white
+        )
+      );
+
+      console.log(
+        colorText(
+          "├─────────────────────────────────────────────────────────────────────────────┤",
           colors.white
         )
       );
@@ -1030,28 +1114,34 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       );
       console.log(
         colorText(
-          `│ Best Bid: ${colorText(
-            "$" + formatPriceWithValidation(bestBid, 6, 4, false),
-            colors.green
-          ).padEnd(25)} Best Ask: ${colorText(
-            "$" + formatPriceWithValidation(bestAsk, 6, 4, false),
-            colors.red
-          ).padEnd(25)} │`,
-          colors.white
-        )
-      );
-      console.log(
-        colorText(
-          `│ Active Orders: ${colorText(
-            buyCount + " buys",
-            colors.green
-          )}, ${colorText(sellCount + " sells", colors.red)}${" ".repeat(35)}│`,
-          colors.white
-        )
-      );
-      console.log(
-        colorText(
           "└─────────────────────────────────────────────────────────────────────────────┘",
+          colors.white
+        )
+      );
+
+      // Add helpful legend
+      console.log(colorText("\n📋 PRICE LEGEND:", colors.brightCyan));
+      console.log(
+        colorText(
+          "   • Mark Price: Current fair value used for PnL calculations and liquidations",
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          "   • Last Trade: Price of the most recent executed trade",
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          "   • Best Bid/Ask: Highest buy order and lowest sell order prices",
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          "   • Spread: Difference between best ask and best bid",
           colors.white
         )
       );
@@ -1162,50 +1252,132 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
   async displayMenu() {
     // Quick position summary before menu
     try {
-      const positions = await this.contracts.vault.getUserPositions(
+      // Get isolated positions from OrderBook (these have liquidation prices)
+      const positionIds = await this.contracts.orderBook.getUserPositions(
         this.currentUser.address
       );
 
-      if (positions.length > 0) {
+      if (positionIds.length > 0) {
         console.log(
           colorText("\n🎯 QUICK POSITION SUMMARY", colors.brightYellow)
         );
         console.log(
-          colorText("┌─────────────────────────────────────────┐", colors.cyan)
+          colorText(
+            "┌─────────────────────────────────────────────────────────┐",
+            colors.cyan
+          )
         );
 
-        for (const position of positions) {
+        // Group positions by entry price and side
+        const positionGroups = new Map();
+
+        for (const positionId of positionIds) {
           try {
-            const marketIdStr = (
-              await safeDecodeMarketId(position.marketId, this.contracts)
-            ).substring(0, 8);
-            const positionSize = BigInt(position.size.toString());
-            const absSize = positionSize >= 0n ? positionSize : -positionSize;
+            const isolatedPos = await this.contracts.orderBook.getPosition(
+              this.currentUser.address,
+              positionId
+            );
+            const positionSize = BigInt(isolatedPos.size.toString());
+            const entryPrice = BigInt(isolatedPos.entryPrice.toString());
+            const liquidationPrice = BigInt(
+              isolatedPos.liquidationPrice.toString()
+            );
+
+            // Create a key for grouping (side + entry price + liquidation price)
             const side = positionSize >= 0n ? "LONG" : "SHORT";
-            const sideColor = positionSize >= 0n ? colors.green : colors.red;
+            const groupKey = `${side}_${entryPrice}_${liquidationPrice}`;
+
+            if (!positionGroups.has(groupKey)) {
+              positionGroups.set(groupKey, {
+                side: side,
+                sideColor: positionSize >= 0n ? colors.green : colors.red,
+                entryPrice: entryPrice,
+                liquidationPrice: liquidationPrice,
+                totalSize: 0n,
+                positionCount: 0,
+              });
+            }
+
+            const group = positionGroups.get(groupKey);
+            group.totalSize +=
+              positionSize >= 0n ? positionSize : -positionSize;
+            group.positionCount++;
+          } catch (error) {
+            console.log(
+              colorText(
+                "│ Position data error                                         │",
+                colors.red
+              )
+            );
+            console.error("Debug - Position error:", error.message);
+          }
+        }
+
+        // Display grouped positions
+        for (const [groupKey, group] of positionGroups) {
+          try {
+            const marketIdStr = "ALU-USD"; // Simplified for this interface
 
             // Use high-precision formatting functions for accuracy
-            const size = formatAmount(absSize, 18, 3); // 3 decimals for position size
+            const size = formatAmount(group.totalSize, 18, 3); // 3 decimals for position size
             const entryPrice = formatPriceWithValidation(
-              BigInt(position.entryPrice.toString()),
+              group.entryPrice,
               6,
               4, // 4 decimals for higher price precision
               false // Don't show warnings in quick summary
             );
 
+            // Get liquidation price
+            const liquidationPrice = formatPriceWithValidation(
+              group.liquidationPrice,
+              6,
+              4, // 4 decimals for liquidation price precision
+              false
+            );
+
+            // Get current mark price to show liquidation risk
+            const markPrice = await this.contracts.orderBook.getMarkPrice();
+            const currentPrice = formatPriceWithValidation(
+              markPrice,
+              6,
+              4,
+              false
+            );
+
+            // Determine liquidation risk status
+            const isAtRisk =
+              group.side === "LONG"
+                ? markPrice <= (group.liquidationPrice * 110n) / 100n // Long: at risk if price <= 110% of liquidation price
+                : markPrice >= (group.liquidationPrice * 90n) / 100n; // Short: at risk if price >= 90% of liquidation price
+
+            const riskIndicator = isAtRisk ? "⚠️ " : "✅ ";
+            const riskColor = isAtRisk ? colors.red : colors.green;
+
+            // Show position count if more than 1
+            const positionCountText =
+              group.positionCount > 1
+                ? ` (${group.positionCount} positions)`
+                : "";
+
             console.log(
               colorText(
                 `│ ${marketIdStr}: ${colorText(
-                  side,
-                  sideColor
-                )} ${size} ALU @ $${entryPrice}  │`,
+                  group.side,
+                  group.sideColor
+                )} ${size} ALU @ $${entryPrice}${positionCountText}  │`,
                 colors.white
+              )
+            );
+            console.log(
+              colorText(
+                `│ ${riskIndicator}Liq: $${liquidationPrice} | Current: $${currentPrice}  │`,
+                riskColor
               )
             );
           } catch (error) {
             console.log(
               colorText(
-                "│ Position data error                     │",
+                "│ Position data error                                         │",
                 colors.red
               )
             );
@@ -1214,7 +1386,10 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         }
 
         console.log(
-          colorText("└─────────────────────────────────────────┘", colors.cyan)
+          colorText(
+            "└─────────────────────────────────────────────────────────┘",
+            colors.cyan
+          )
         );
       }
     } catch (error) {
@@ -1874,7 +2049,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
               ? colorText("BUY ", colors.green)
               : colorText("SELL", colors.red);
 
-            // Enhanced price formatting with validation
+            // Enhanced price formatting with validation (ALU prices are in 18 decimals)
             const price = formatPriceWithValidation(order.price, 6, 4, false); // 4 decimals for higher precision
             const originalAmount = formatAmount(order.amount + filled, 18, 6); // More precision for amounts
             const remainingAmount = formatAmount(order.amount, 18, 6);
@@ -1914,7 +2089,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             const priceValidation = validatePriceAccuracy(
               order.price,
               price,
-              6
+              18
             );
             const priceDisplay = priceValidation.isAccurate
               ? ("$" + price).padStart(12)
@@ -2578,7 +2753,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             const sizeSign = positionSize >= 0n ? "LONG " : "SHORT";
 
             const entryPrice = parseFloat(
-              ethers.formatUnits(BigInt(position.entryPrice.toString()), 6)
+              ethers.formatUnits(BigInt(position.entryPrice.toString()), 18)
             );
             const marginLocked = parseFloat(
               ethers.formatUnits(BigInt(position.marginLocked.toString()), 6)
@@ -2750,40 +2925,59 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     console.log(boxText("🔍 VIEW OPEN POSITIONS", colors.cyan));
 
     try {
-      // Get positions directly from vault
-      const positions = await this.contracts.vault.getUserPositions(
+      // Get regular margin position
+      const marginPosition = await this.contracts.orderBook.getUserPosition(
         this.currentUser.address
       );
 
-      if (!positions || positions.length === 0) {
+      // Get isolated positions from OrderBook
+      const positionIds = await this.contracts.orderBook.getUserPositions(
+        this.currentUser.address
+      );
+
+      // Check if we have any positions (regular margin or isolated)
+      const hasMarginPosition = marginPosition !== 0n;
+      const hasIsolatedPositions = positionIds && positionIds.length > 0;
+
+      if (!hasMarginPosition && !hasIsolatedPositions) {
         console.log(colorText("\n💤 No open positions found", colors.yellow));
         await this.pause(2000);
         return;
       }
 
+      let totalPositions = 0;
+      if (hasMarginPosition) totalPositions++;
+      if (hasIsolatedPositions) totalPositions += positionIds.length;
+
       console.log(
         colorText(
-          `\n📊 Found ${positions.length} open position(s)\n`,
+          `\n📊 Found ${totalPositions} open position(s)\n`,
           colors.cyan
         )
+      );
+
+      // Get current mark price once for all positions
+      const currentMarkPrice = await this.contracts.orderBook.getMarkPrice();
+      const markPriceFloat = parseFloat(
+        ethers.formatUnits(currentMarkPrice, 18)
       );
 
       // Display positions table
       console.log(
         colorText(
-          "┌─────────────────────────────────────────────────────────────────────────────────┐",
+          "┌─────────────────────────────────────────────────────────────────────────────────────────────┐",
           colors.cyan
         )
       );
       console.log(
         colorText(
-          "│ Market ID  │ Side     │ Size (ALU) │ Entry Price │ Margin     │ Mark    │ P&L   │",
+          "│ Market ID           │ Side     │ Size (ALU) │ Entry Price │ Margin     │ Mark    │ P&L   │",
           colors.bright
         )
       );
       console.log(
         colorText(
-          "├─────────────────────────────────────────────────────────────────────────────────┤",
+          "├─────────────────────────────────────────────────────────────────────────────────────────────┤",
           colors.cyan
         )
       );
@@ -2791,80 +2985,138 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       let totalMarginLocked = 0;
       let totalUnrealizedPnL = 0;
 
-      for (const position of positions) {
+      // Group positions by entry price and side (like in quick position summary)
+      const positionGroups = new Map();
+
+      // Handle regular margin position first
+      if (hasMarginPosition) {
+        const positionSize = BigInt(marginPosition.toString());
+        const absSize = positionSize < 0n ? -positionSize : positionSize;
+        const side = positionSize >= 0n ? "LONG" : "SHORT";
+
+        // For regular margin positions, we don't have entry price or liquidation price
+        // Use current price as entry price and calculate liquidation threshold
+        const entryPrice = BigInt(currentMarkPrice.toString());
+        const liquidationPrice = BigInt(currentMarkPrice.toString()); // Will be calculated properly in production
+
+        const groupKey = `MARGIN_${side}_${entryPrice}`;
+
+        positionGroups.set(groupKey, {
+          side: side,
+          sideColor: positionSize >= 0n ? colors.green : colors.red,
+          entryPrice: entryPrice,
+          liquidationPrice: liquidationPrice,
+          totalSize: absSize,
+          totalMargin: 0n, // Regular margin positions don't have isolated margin
+          positionCount: 1,
+          isMarginPosition: true,
+        });
+      }
+
+      // Handle isolated positions
+      if (hasIsolatedPositions) {
+        for (const positionId of positionIds) {
+          try {
+            const isolatedPos = await this.contracts.orderBook.getPosition(
+              this.currentUser.address,
+              positionId
+            );
+
+            // Skip inactive (liquidated/closed) positions
+            if (!isolatedPos.isActive) {
+              continue;
+            }
+
+            const positionSize = BigInt(isolatedPos.size.toString());
+            const entryPrice = BigInt(isolatedPos.entryPrice.toString());
+            const liquidationPrice = BigInt(
+              isolatedPos.liquidationPrice.toString()
+            );
+
+            // Create a key for grouping (side + entry price + liquidation price)
+            const side = positionSize >= 0n ? "LONG" : "SHORT";
+            const groupKey = `ISOLATED_${side}_${entryPrice}_${liquidationPrice}`;
+
+            if (!positionGroups.has(groupKey)) {
+              positionGroups.set(groupKey, {
+                side: side,
+                sideColor: positionSize >= 0n ? colors.green : colors.red,
+                entryPrice: entryPrice,
+                liquidationPrice: liquidationPrice,
+                totalSize: 0n,
+                totalMargin: 0n,
+                positionCount: 0,
+                isMarginPosition: false,
+              });
+            }
+
+            const group = positionGroups.get(groupKey);
+            group.totalSize +=
+              positionSize >= 0n ? positionSize : -positionSize;
+            group.totalMargin += BigInt(isolatedPos.isolatedMargin.toString());
+            group.positionCount++;
+          } catch (positionError) {
+            console.log(
+              colorText(
+                `│ ERROR     │ Cannot parse position data                                      │`,
+                colors.red
+              )
+            );
+            console.error(
+              "Debug - ViewOpenPositions error:",
+              positionError.message
+            );
+          }
+        }
+      }
+
+      // Display grouped positions
+      for (const [groupKey, group] of positionGroups) {
         try {
-          const marketIdStr = position.marketId
-            ? position.marketId.slice(0, 10)
-            : "Unknown";
-          const positionSize = BigInt(position.size.toString());
-          const absSize = positionSize < 0n ? -positionSize : positionSize;
+          const marketIdStr = group.isMarginPosition
+            ? "ALU-USD (MARGIN)"
+            : "ALU-USD (ISOLATED)";
 
-          const side = positionSize >= 0n ? "LONG" : "SHORT";
-          const sizeColor = positionSize >= 0n ? colors.green : colors.red;
-
-          const size = parseFloat(ethers.formatUnits(absSize, 18));
+          const size = parseFloat(ethers.formatUnits(group.totalSize, 18));
           const entryPrice = parseFloat(
-            ethers.formatUnits(BigInt(position.entryPrice.toString()), 6)
+            ethers.formatUnits(group.entryPrice, 18)
           );
           const marginLocked = parseFloat(
-            ethers.formatUnits(BigInt(position.marginLocked.toString()), 6)
+            ethers.formatUnits(group.totalMargin, 6)
           );
 
           totalMarginLocked += marginLocked;
 
-          // Get current mark price (simplified - would need oracle in real implementation)
-          const entryPriceNum = parseFloat(entryPrice);
-          let markPrice = entryPriceNum; // Fallback to entry price
-          try {
-            const bestBid = await this.contracts.orderBook.bestBid();
-            const bestAsk = await this.contracts.orderBook.bestAsk();
-            if (bestBid > 0 && bestAsk > 0) {
-              const bidStr = formatPriceWithValidation(bestBid, 6, 4, false);
-              const askStr = formatPriceWithValidation(bestAsk, 6, 4, false);
-              const bidPrice = parseFloat(bidStr);
-              const askPrice = parseFloat(askStr);
+          // Use the actual mark price from the contract
+          const markPrice = markPriceFloat;
 
-              // Check for valid prices (not NaN, ERROR, or ∞)
-              if (
-                !isNaN(bidPrice) &&
-                !isNaN(askPrice) &&
-                bidStr !== "ERROR" &&
-                askStr !== "ERROR" &&
-                bidStr !== "∞" &&
-                askStr !== "∞" &&
-                bidPrice > 0 &&
-                askPrice > 0
-              ) {
-                markPrice = (bidPrice + askPrice) / 2;
-              }
-            }
-          } catch (priceError) {
-            // Use entry price as fallback
-          }
-
-          // Calculate unrealized P&L
-          const priceDiff = markPrice - entryPriceNum;
+          // Calculate unrealized P&L correctly
+          const priceDiff = markPrice - entryPrice;
           const positionPnL =
-            positionSize >= 0n
-              ? priceDiff * size // Long position
-              : -priceDiff * size; // Short position
+            group.side === "LONG"
+              ? priceDiff * size // Long position: profit when price goes up
+              : -priceDiff * size; // Short position: profit when price goes down
 
           totalUnrealizedPnL += positionPnL;
 
           const pnlColor = positionPnL >= 0 ? colors.green : colors.red;
           const pnlSign = positionPnL >= 0 ? "+" : "";
 
+          // Show position count if more than 1
+          const positionCountText =
+            group.positionCount > 1 ? ` (${group.positionCount})` : "";
+
           console.log(
             colorText(
-              `│ ${marketIdStr.padEnd(10)} │ ${colorText(
-                side.padEnd(8),
-                sizeColor
+              `│ ${marketIdStr.padEnd(20)} │ ${colorText(
+                (group.side + positionCountText).padEnd(8),
+                group.sideColor
               )} │ ${size.toFixed(4).padStart(11)} │ $${entryPrice
-                .toFixed(2)
+                .toFixed(4)
                 .padStart(10)} │ ${marginLocked
                 .toFixed(2)
-                .padStart(10)} │ ${markPrice
-                .toFixed(2)
+                .padStart(10)} │ $${markPrice
+                .toFixed(4)
                 .padStart(8)} │ ${colorText(
                 (pnlSign + positionPnL.toFixed(2)).padStart(6),
                 pnlColor
@@ -2872,17 +3124,14 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
               colors.white
             )
           );
-        } catch (positionError) {
+        } catch (groupError) {
           console.log(
             colorText(
-              `│ ERROR     │ Cannot parse position data                                      │`,
+              `│ ERROR     │ Cannot parse grouped position data                              │`,
               colors.red
             )
           );
-          console.error(
-            "Debug - ViewOpenPositions error:",
-            positionError.message
-          );
+          console.error("Debug - Grouped position error:", groupError.message);
         }
       }
 
@@ -2911,7 +3160,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
 
       console.log(
         colorText(
-          "└─────────────────────────────────────────────────────────────────────────────────┘",
+          "└─────────────────────────────────────────────────────────────────────────────────────────────┘",
           colors.cyan
         )
       );
@@ -3242,12 +3491,11 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           )
         );
 
-        // Place market order to close
-        const tx = await this.contracts.tradingRouter.placeMarginMarketOrder(
-          absSize,
-          isBuy,
-          1000 // 10% slippage for market orders
-        );
+        // Place market order to close directly via OrderBook
+        // absSize is 18 decimals, isBuy closes by taking opposite side
+        const tx = await this.contracts.orderBook
+          .connect(this.currentUser)
+          .placeMarginMarketOrder(absSize, isBuy);
 
         console.log(
           colorText(`   ⏳ Transaction sent: ${tx.hash}`, colors.dim)
@@ -4037,7 +4285,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             else sellCount++;
 
             const amount = Number(ethers.formatUnits(trade.amount, 18));
-            const price = Number(ethers.formatUnits(trade.price, 6));
+            const price = Number(ethers.formatUnits(trade.price, 18));
             const tradeValue = Number(ethers.formatUnits(trade.tradeValue, 6));
             const userFee = Number(
               ethers.formatUnits(isBuyer ? trade.buyerFee : trade.sellerFee, 6)
@@ -4347,7 +4595,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             const buyerShort = trade.buyer.substring(0, 8) + "...";
             const sellerShort = trade.seller.substring(0, 8) + "...";
             const amount = Number(ethers.formatUnits(trade.amount, 18));
-            const price = Number(ethers.formatUnits(trade.price, 6));
+            const price = Number(ethers.formatUnits(trade.price, 18));
             const timestamp = new Date(Number(trade.timestamp) * 1000);
             const timeStr = timestamp.toLocaleString();
 
@@ -4461,7 +4709,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     try {
       // Get all signers
       const signers = await ethers.getSigners();
-      const users = signers.slice(1, 4); // User1, User2, User3
+      const users = signers; // Include deployer and all users
 
       // Step 1: Cancel all orders
       console.log(
@@ -4469,46 +4717,66 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       );
       for (let i = 0; i < users.length; i++) {
         const user = users[i];
-        console.log(colorText(`   User ${i + 1}: ${user.address}`, colors.dim));
+        const userName = i === 0 ? "Deployer" : `User ${i}`;
+        console.log(colorText(`   ${userName}: ${user.address}`, colors.dim));
 
         try {
-          // Get user's buy orders
-          const buyOrders = await this.contracts.orderBook.getUserBuyOrders(
+          // Get all user orders
+          const userOrderIds = await this.contracts.orderBook.getUserOrders(
             user.address
           );
-          for (const order of buyOrders) {
-            if (order.isActive) {
-              await this.contracts.orderBook
-                .connect(user)
-                .cancelOrder(order.orderId);
-              console.log(
-                colorText(
-                  `     ✅ Cancelled buy order #${order.orderId}`,
-                  colors.green
-                )
-              );
-            }
-          }
 
-          // Get user's sell orders
-          const sellOrders = await this.contracts.orderBook.getUserSellOrders(
-            user.address
+          const userName = i === 0 ? "Deployer" : `User ${i}`;
+          console.log(
+            colorText(
+              `     Found ${userOrderIds.length} orders to cancel`,
+              colors.cyan
+            )
           );
-          for (const order of sellOrders) {
-            if (order.isActive) {
-              await this.contracts.orderBook
-                .connect(user)
-                .cancelOrder(order.orderId);
+
+          for (const orderId of userOrderIds) {
+            try {
+              // Get order details to check if it's still active
+              const order = await this.contracts.orderBook.getOrder(orderId);
+
+              if (order.amount > 0) {
+                // Order is still active
+                await this.contracts.orderBook
+                  .connect(user)
+                  .cancelOrder(orderId);
+                console.log(
+                  colorText(
+                    `     ✅ Cancelled order #${orderId} (${
+                      order.isBuy ? "BUY" : "SELL"
+                    })`,
+                    colors.green
+                  )
+                );
+              } else {
+                console.log(
+                  colorText(
+                    `     ⚠️  Order #${orderId} already filled/empty`,
+                    colors.yellow
+                  )
+                );
+              }
+            } catch (orderError) {
               console.log(
                 colorText(
-                  `     ✅ Cancelled sell order #${order.orderId}`,
-                  colors.green
+                  `     ❌ Failed to cancel order #${orderId}: ${orderError.message}`,
+                  colors.red
                 )
               );
             }
           }
         } catch (error) {
-          // Skip if user has no orders
+          const userName = i === 0 ? "Deployer" : `User ${i}`;
+          console.log(
+            colorText(
+              `     ⚠️  No orders found for ${userName}: ${error.message}`,
+              colors.yellow
+            )
+          );
         }
       }
 
@@ -4516,6 +4784,9 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       console.log(
         colorText("\n📊 Step 2: Closing all positions...", colors.yellow)
       );
+
+      // First, get all positions for all users
+      const allPositions = [];
       for (let i = 0; i < users.length; i++) {
         const user = users[i];
         try {
@@ -4524,42 +4795,127 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           );
           for (const position of positions) {
             if (position.size !== 0n) {
-              const size = position.size;
-              const absSize = size < 0n ? -size : size;
-              const isLong = size > 0n;
-
-              console.log(
-                colorText(
-                  `   User ${i + 1} has ${
-                    isLong ? "LONG" : "SHORT"
-                  } ${ethers.formatUnits(absSize, 18)} ALU`,
-                  colors.cyan
-                )
-              );
-
-              // Place opposite order to close position
-              const closePrice = ethers.parseUnits("10", 6); // Use $10 as a fair closing price
-              await this.contracts.orderBook
-                .connect(user)
-                .placeMarginLimitOrder(
-                  closePrice,
-                  absSize,
-                  !isLong // Opposite direction to close
-                );
-
-              // Have another user take the opposite side
-              const counterparty = users[(i + 1) % users.length];
-              await this.contracts.orderBook
-                .connect(counterparty)
-                .placeMarginLimitOrder(closePrice, absSize, isLong);
-
-              console.log(
-                colorText(`     ✅ Position closed at $10`, colors.green)
-              );
+              allPositions.push({
+                user: user,
+                userIndex: i + 1,
+                position: position,
+                size: position.size,
+                absSize: position.size < 0n ? -position.size : position.size,
+                isLong: position.size > 0n,
+              });
             }
           }
         } catch (error) {
-          // Skip if user has no positions
+          const userName = i === 0 ? "Deployer" : `User ${i}`;
+          console.log(
+            colorText(
+              `   ${userName}: No positions or error - ${error.message}`,
+              colors.yellow
+            )
+          );
+        }
+      }
+
+      if (allPositions.length === 0) {
+        console.log(
+          colorText("   ✅ No positions found to close", colors.green)
+        );
+      } else {
+        console.log(
+          colorText(
+            `   Found ${allPositions.length} positions to close`,
+            colors.cyan
+          )
+        );
+
+        // Group positions by direction for efficient closing
+        const longPositions = allPositions.filter((p) => p.isLong);
+        const shortPositions = allPositions.filter((p) => !p.isLong);
+
+        // Close long positions by placing sell orders
+        for (const pos of longPositions) {
+          try {
+            const userName =
+              pos.userIndex === 1 ? "Deployer" : `User ${pos.userIndex - 1}`;
+            console.log(
+              colorText(
+                `   ${userName}: Closing LONG ${ethers.formatUnits(
+                  pos.absSize,
+                  18
+                )} ALU`,
+                colors.cyan
+              )
+            );
+
+            // Use a fair closing price
+            const closePrice = ethers.parseUnits("10", 6);
+
+            // Place sell order to close long position
+            await this.contracts.orderBook
+              .connect(pos.user)
+              .placeMarginLimitOrder(closePrice, pos.absSize, false);
+
+            // Find a counterparty to take the opposite side
+            const counterparty =
+              users.find((u) => u.address !== pos.user.address) || users[0];
+            await this.contracts.orderBook
+              .connect(counterparty)
+              .placeMarginLimitOrder(closePrice, pos.absSize, true);
+
+            console.log(
+              colorText(`     ✅ LONG position closed at $10`, colors.green)
+            );
+          } catch (error) {
+            console.log(
+              colorText(
+                `     ❌ Failed to close LONG position: ${error.message}`,
+                colors.red
+              )
+            );
+          }
+        }
+
+        // Close short positions by placing buy orders
+        for (const pos of shortPositions) {
+          try {
+            const userName =
+              pos.userIndex === 1 ? "Deployer" : `User ${pos.userIndex - 1}`;
+            console.log(
+              colorText(
+                `   ${userName}: Closing SHORT ${ethers.formatUnits(
+                  pos.absSize,
+                  18
+                )} ALU`,
+                colors.cyan
+              )
+            );
+
+            // Use a fair closing price
+            const closePrice = ethers.parseUnits("10", 6);
+
+            // Place buy order to close short position
+            await this.contracts.orderBook
+              .connect(pos.user)
+              .placeMarginLimitOrder(closePrice, pos.absSize, true);
+
+            // Find a counterparty to take the opposite side
+            const counterparty =
+              users.find((u) => u.address !== pos.user.address) || users[0];
+            await this.contracts.orderBook
+              .connect(counterparty)
+              .placeMarginLimitOrder(closePrice, pos.absSize, false);
+
+            console.log(
+              colorText(`     ✅ SHORT position closed at $10`, colors.green)
+            );
+          } catch (error) {
+            console.log(
+              colorText(
+                `     ❌ Failed to close SHORT position: ${error.message}`,
+                colors.red
+              )
+            );
+          }
         }
       }
 
@@ -4581,6 +4937,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       for (let i = 0; i < users.length; i++) {
         const user = users[i];
         try {
+          const userName = i === 0 ? "Deployer" : `User ${i}`;
           const marginSummary = await this.contracts.vault.getMarginSummary(
             user.address
           );
@@ -4609,7 +4966,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
 
             console.log(
               colorText(
-                `   User ${i + 1}: Deposited ${ethers.formatUnits(
+                `   ${userName}: Deposited ${ethers.formatUnits(
                   toDeposit,
                   6
                 )} USDC`,
@@ -4625,7 +4982,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
 
             console.log(
               colorText(
-                `   User ${i + 1}: Withdrew ${ethers.formatUnits(
+                `   ${userName}: Withdrew ${ethers.formatUnits(
                   toWithdraw,
                   6
                 )} USDC`,
@@ -4634,7 +4991,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             );
           } else {
             console.log(
-              colorText(`   User ${i + 1}: Already has 5000 USDC`, colors.green)
+              colorText(`   ${userName}: Already has 5000 USDC`, colors.green)
             );
           }
 
@@ -4652,20 +5009,138 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             )
           );
         } catch (error) {
+          const userName = i === 0 ? "Deployer" : `User ${i}`;
           console.log(
-            colorText(`   User ${i + 1}: Error - ${error.message}`, colors.red)
+            colorText(`   ${userName}: Error - ${error.message}`, colors.red)
           );
         }
       }
 
+      // Step 4: Verify reset was successful
+      console.log(colorText("\n🔍 Step 4: Verifying reset...", colors.yellow));
+
+      let totalOrdersRemaining = 0;
+      let totalPositionsRemaining = 0;
+
+      // Check remaining orders
+      for (let i = 0; i < users.length; i++) {
+        const user = users[i];
+        try {
+          const userOrderIds = await this.contracts.orderBook.getUserOrders(
+            user.address
+          );
+          let activeOrders = 0;
+
+          for (const orderId of userOrderIds) {
+            const order = await this.contracts.orderBook.getOrder(orderId);
+            if (order.amount > 0) {
+              activeOrders++;
+            }
+          }
+
+          totalOrdersRemaining += activeOrders;
+          if (activeOrders > 0) {
+            const userName = i === 0 ? "Deployer" : `User ${i}`;
+            console.log(
+              colorText(
+                `   ${userName}: ${activeOrders} orders still active`,
+                colors.yellow
+              )
+            );
+          }
+        } catch (error) {
+          // User has no orders
+        }
+      }
+
+      // Check remaining positions
+      for (let i = 0; i < users.length; i++) {
+        const user = users[i];
+        try {
+          const positions = await this.contracts.vault.getUserPositions(
+            user.address
+          );
+          let activePositions = 0;
+
+          for (const position of positions) {
+            if (position.size !== 0n) {
+              activePositions++;
+            }
+          }
+
+          totalPositionsRemaining += activePositions;
+          if (activePositions > 0) {
+            const userName = i === 0 ? "Deployer" : `User ${i}`;
+            console.log(
+              colorText(
+                `   ${userName}: ${activePositions} positions still open`,
+                colors.yellow
+              )
+            );
+          }
+        } catch (error) {
+          // User has no positions
+        }
+      }
+
+      // Check order book status
+      const [buyOrderCount, sellOrderCount] =
+        await this.contracts.orderBook.getActiveOrdersCount();
+      const totalOrderBookOrders =
+        Number(buyOrderCount) + Number(sellOrderCount);
+
       console.log(colorText("\n✅ RESET COMPLETE!", colors.brightGreen));
       console.log(colorText("\n📊 Final Status:", colors.brightCyan));
-      console.log(colorText("  • All orders cancelled", colors.green));
-      console.log(colorText("  • All positions closed", colors.green));
+
+      if (totalOrdersRemaining === 0) {
+        console.log(colorText("  • All orders cancelled ✅", colors.green));
+      } else {
+        console.log(
+          colorText(
+            `  • ${totalOrdersRemaining} orders still active ⚠️`,
+            colors.yellow
+          )
+        );
+      }
+
+      if (totalPositionsRemaining === 0) {
+        console.log(colorText("  • All positions closed ✅", colors.green));
+      } else {
+        console.log(
+          colorText(
+            `  • ${totalPositionsRemaining} positions still open ⚠️`,
+            colors.yellow
+          )
+        );
+      }
+
+      if (totalOrderBookOrders === 0) {
+        console.log(colorText("  • Order book is empty ✅", colors.green));
+      } else {
+        console.log(
+          colorText(
+            `  • Order book has ${totalOrderBookOrders} active orders ⚠️`,
+            colors.yellow
+          )
+        );
+      }
+
       console.log(
-        colorText("  • Each user has 5000 USDC collateral", colors.green)
+        colorText("  • Each user has 5000 USDC collateral ✅", colors.green)
       );
-      console.log(colorText("  • Order book is empty", colors.green));
+
+      if (
+        totalOrdersRemaining > 0 ||
+        totalPositionsRemaining > 0 ||
+        totalOrderBookOrders > 0
+      ) {
+        console.log(
+          colorText(
+            "\n⚠️  Some orders/positions may still be active. You may need to manually cancel them.",
+            colors.yellow
+          )
+        );
+      }
     } catch (error) {
       console.log(colorText("\n❌ Reset failed: " + error.message, colors.red));
       console.error("Debug - Full error:", error);

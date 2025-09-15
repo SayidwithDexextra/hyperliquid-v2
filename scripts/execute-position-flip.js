@@ -36,10 +36,8 @@ async function main() {
 
   try {
     // Get contracts
-    const orderBook = await ethers.getContractAt(
-      "OrderBook",
-      "0x2b961E3959b79326A8e7F64Ef0d2d825707669b5"
-    );
+    const { getContract } = require("../config/contracts");
+    const orderBook = await getContract("ALUMINUM_ORDERBOOK");
     const [deployer, user1, user2] = await ethers.getSigners();
 
     // Get current mark price

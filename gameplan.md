@@ -183,15 +183,7 @@ Alternative to pure socialization:
 
 ### Phase 6: Safety Mechanisms
 
-#### 6.1 Circuit Breakers
-```solidity
-Implement automatic trading halts:
-- 20% price movement in 5 minutes: 1-minute pause
-- 50% price movement in 1 hour: 5-minute pause
-- 100% price movement in 1 hour: Require admin review
-```
-
-#### 6.2 Position Limits
+#### 6.1 Position Limits
 ```solidity
 Dynamic limits based on:
 1. User's total collateral
@@ -262,7 +254,6 @@ Show warnings when:
 - Full liquidation scenarios
 - Gap market simulations
 - Multi-user socializations
-- Circuit breaker triggers
 
 ### 8.3 Stress Tests
 - 1000+ positions

@@ -141,6 +141,7 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
     event MarginReserved(address indexed user, bytes32 indexed orderId, bytes32 indexed marketId, uint256 amount);
     event MarginUnreserved(address indexed user, bytes32 indexed orderId, uint256 amount);
     event PositionMarginRecalculated(address indexed user, bytes32 indexed marketId, uint256 oldMargin, uint256 newMargin);
+    event GhostReservationsReconciled(address indexed user, uint256 totalReconciled, uint256 remainingOrders);
 
     // Position events
     event PositionUpdated(
@@ -419,6 +420,42 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
         require(found, "CentralizedVault: order not found in pending orders");
         
         emit MarginUnreserved(user, orderId, reservedAmount);
+    }
+    
+    /**
+     * @dev Safe unreserve margin that doesn't revert if order not found (for cleanup operations)
+     * @param user User address
+     * @param orderId Order identifier
+     * @return success Whether the unreserve was successful
+     * @return amount Amount that was unreserved (0 if not found)
+     */
+    function safeUnreserveMargin(
+        address user,
+        bytes32 orderId
+    ) 
+        external 
+        onlyRole(ORDERBOOK_ROLE) 
+        validAddress(user)
+        returns (bool success, uint256 amount)
+    {
+        PendingOrder[] storage orders = userPendingOrders[user];
+        
+        // Find and remove the order
+        for (uint256 i = 0; i < orders.length; i++) {
+            if (orders[i].orderId == orderId) {
+                amount = orders[i].marginReserved;
+                
+                // Remove by swapping with last element
+                orders[i] = orders[orders.length - 1];
+                orders.pop();
+                
+                emit MarginUnreserved(user, orderId, amount);
+                return (true, amount);
+            }
+        }
+        
+        // Not found - return false but don't revert
+        return (false, 0);
     }
     
     /**
@@ -1574,6 +1611,61 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
 
     // ============ Emergency Cleanup Functions ============
 
+    /**
+     * @dev Reconcile pending orders with OrderBook (called by OrderBook or Admin)
+     * @param user User address to reconcile
+     * @param activeOrderIds Array of order IDs that are actually active in OrderBook
+     */
+    function reconcilePendingOrders(
+        address user,
+        bytes32[] calldata activeOrderIds
+    ) external {
+        require(
+            hasRole(ORDERBOOK_ROLE, msg.sender) || hasRole(DEFAULT_ADMIN_ROLE, msg.sender),
+            "CentralizedVault: caller must have ORDERBOOK_ROLE or ADMIN_ROLE"
+        );
+        
+        PendingOrder[] storage orders = userPendingOrders[user];
+        uint256 totalReconciled = 0;
+        
+        // Build a temporary mapping of active orders for efficient lookup
+        // Note: We'll check each order ID individually since we can't declare mappings in functions
+        
+        // Check each pending order against active orders
+        uint256 i = 0;
+        while (i < orders.length) {
+            bytes32 orderId = orders[i].orderId;
+            bool isActive = false;
+            
+            // Check if this order ID is in the active list
+            for (uint256 j = 0; j < activeOrderIds.length; j++) {
+                if (activeOrderIds[j] == orderId) {
+                    isActive = true;
+                    break;
+                }
+            }
+            
+            // If order is not in active list, it's a ghost reservation
+            if (!isActive) {
+                uint256 reservedAmount = orders[i].marginReserved;
+                totalReconciled += reservedAmount;
+                
+                // Remove by swapping with last element
+                orders[i] = orders[orders.length - 1];
+                orders.pop();
+                
+                emit MarginUnreserved(user, orderId, reservedAmount);
+                // Don't increment i since we just moved an element here
+            } else {
+                i++;
+            }
+        }
+        
+        if (totalReconciled > 0) {
+            emit GhostReservationsReconciled(user, totalReconciled, orders.length);
+        }
+    }
+    
     /**
      * @dev Emergency cleanup function to remove ghost margin reservations
      * @param user User address to clean up
