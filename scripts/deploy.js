@@ -127,13 +127,12 @@ async function main() {
     const startPrice = ethers.parseUnits("2500", 6);
     const dataSource = "London Metal Exchange";
     const tags = ["COMMODITIES", "METALS", "ALUMINUM"];
-    const marginRequirementBps = 10000; // 100% margin (1:1 ratio)
     const tradingFee = 10; // 0.1%
 
     console.log("  📊 Market Parameters:");
     console.log(`     Symbol: ${marketSymbol}`);
     console.log(`     Start Price: $${ethers.formatUnits(startPrice, 6)}`);
-    console.log(`     Margin Requirement: ${marginRequirementBps / 100}%`);
+    console.log("     Margin Requirements: 100% (longs), 150% (shorts)");
     console.log(`     Trading Fee: ${tradingFee / 100}%`);
 
     // Check and pay creation fee
@@ -154,7 +153,6 @@ async function main() {
       startPrice,
       dataSource,
       tags,
-      marginRequirementBps,
       tradingFee
     );
 
@@ -317,7 +315,7 @@ async function main() {
     console.log("\n🏭 ALUMINUM MARKET:");
     console.log("  • Symbol: ALU-USD");
     console.log("  • Start Price: $2,500");
-    console.log("  • Margin Requirement: 100% (1:1 ratio)");
+    console.log("  • Margin Requirements: 100% for longs, 150% for shorts");
     console.log("  • Trading Fee: 0.1%");
     console.log("  • All authorizations configured ✅");
 
@@ -367,10 +365,8 @@ async function updateContractsFile(contracts) {
     marketId: ethers.keccak256(ethers.toUtf8Bytes("ALU-USD")),
     name: "Aluminum Futures",
     orderBook: "${contracts.ALUMINUM_ORDERBOOK}",
-    leverageEnabled: false,
-    maxLeverage: "1x",
-    marginRequirement: "100%",
-    defaultMargin: "100%",
+    marginRequirementLong: "100%",
+    marginRequirementShort: "150%",
     riskLevel: "LOW",
     collateralRatio: "1:1",
     features: {

@@ -36,10 +36,10 @@ contract FuturesMarketFactory {
     address public admin;
     address public feeRecipient;
     
-    // Default trading parameters - Conservative defaults (1:1 margin, no leverage)
-    uint256 public defaultMarginRequirementBps = 10000; // 100% margin requirement (1:1)
+    // Default trading parameters - Fixed margin requirements
+    uint256 public constant MARGIN_REQUIREMENT_LONG_BPS = 10000; // 100% margin for longs
+    uint256 public constant MARGIN_REQUIREMENT_SHORT_BPS = 15000; // 150% margin for shorts
     uint256 public defaultTradingFee = 10; // 0.1%
-    bool public defaultLeverageEnabled = false; // Leverage disabled by default
     
     // Futures market tracking
     mapping(bytes32 => address) public marketToOrderBook;
@@ -90,7 +90,7 @@ contract FuturesMarketFactory {
         uint256 startPrice
     );
     event FuturesMarketDeactivated(address indexed orderBook, bytes32 indexed marketId, address indexed creator);
-    event DefaultParametersUpdated(uint256 marginRequirement, uint256 tradingFee);
+    event DefaultParametersUpdated(uint256 tradingFee);
     event MarketCreationFeeUpdated(uint256 oldFee, uint256 newFee);
     event PublicMarketCreationToggled(bool enabled);
     event AdminUpdated(address indexed oldAdmin, address indexed newAdmin);
@@ -159,7 +159,6 @@ contract FuturesMarketFactory {
      * @param startPrice Initial price for the metric (with 6 USDC decimals)
      * @param dataSource Data source category (e.g., "NASDAQ", "COINBASE", "CUSTOM")
      * @param tags Array of tags for market discovery
-     * @param marginRequirementBps Margin requirement in basis points (optional, uses default if 0)
      * @param tradingFee Trading fee in basis points (optional, uses default if 0)
      * @return orderBook Address of the created OrderBook
      * @return marketId Generated market ID
@@ -171,7 +170,6 @@ contract FuturesMarketFactory {
         uint256 startPrice,
         string memory dataSource,
         string[] memory tags,
-        uint256 marginRequirementBps,
         uint256 tradingFee
     ) external 
         canCreateMarket 
@@ -191,16 +189,12 @@ contract FuturesMarketFactory {
         marketId = keccak256(abi.encodePacked(marketSymbol, metricUrl, msg.sender, block.timestamp, block.number));
         require(!marketExists[marketId], "FuturesMarketFactory: market ID collision");
         
-        // Use default parameters if not specified
-        if (marginRequirementBps == 0) {
-            marginRequirementBps = defaultMarginRequirementBps;
-        }
+        // Use default trading fee if not specified
         if (tradingFee == 0) {
             tradingFee = defaultTradingFee;
         }
         
-        // Validate parameters - Allow up to 100% margin requirement for conservative markets
-        require(marginRequirementBps >= 1000 && marginRequirementBps <= 10000, "FuturesMarketFactory: invalid margin requirement"); // 10% to 100%
+        // Validate trading fee
         require(tradingFee <= 1000, "FuturesMarketFactory: trading fee too high"); // Max 10%
         
         // Deploy new OrderBook
@@ -214,11 +208,9 @@ contract FuturesMarketFactory {
         vault.registerOrderBook(orderBook);
         vault.assignMarketToOrderBook(marketId, orderBook);
         
-        // Update trading parameters if different from defaults
-        if (marginRequirementBps != defaultMarginRequirementBps || 
-            tradingFee != defaultTradingFee) {
+        // Update trading fee if different from default
+        if (tradingFee != defaultTradingFee) {
             OrderBook(orderBook).updateTradingParameters(
-                marginRequirementBps,
                 tradingFee,
                 feeRecipient
             );
@@ -436,21 +428,15 @@ contract FuturesMarketFactory {
     // ============ Administrative Functions ============
     
     /**
-     * @dev Update default trading parameters for new OrderBooks
-     * @param marginRequirementBps Default margin requirement in basis points
+     * @dev Update default trading fee for new OrderBooks
      * @param tradingFee Default trading fee in basis points
      */
     function updateDefaultParameters(
-        uint256 marginRequirementBps,
         uint256 tradingFee
     ) external onlyAdmin {
-        require(marginRequirementBps >= 1000 && marginRequirementBps <= 10000, "FuturesMarketFactory: invalid default margin requirement");
         require(tradingFee <= 1000, "FuturesMarketFactory: trading fee too high");
-        
-        defaultMarginRequirementBps = marginRequirementBps;
         defaultTradingFee = tradingFee;
-        
-        emit DefaultParametersUpdated(marginRequirementBps, tradingFee);
+        emit DefaultParametersUpdated(tradingFee);
     }
     
     /**
@@ -552,12 +538,11 @@ contract FuturesMarketFactory {
     }
     
     /**
-     * @dev Get default trading parameters
-     * @return marginRequirement Default margin requirement in basis points
+     * @dev Get default trading fee
      * @return fee Default trading fee in basis points
      */
-    function getDefaultParameters() external view returns (uint256 marginRequirement, uint256 fee) {
-        return (defaultMarginRequirementBps, defaultTradingFee);
+    function getDefaultParameters() external view returns (uint256 fee) {
+        return defaultTradingFee;
     }
     
     /**
@@ -1203,113 +1188,4 @@ contract FuturesMarketFactory {
         return keccak256(abi.encodePacked(a)) == keccak256(abi.encodePacked(b));
     }
 
-    // ============ Leverage Management Functions ============
-
-    /**
-     * @dev Enable leverage for a specific market
-     * @param marketId Market identifier
-     * @param maxLeverage Maximum leverage allowed (e.g., 10 for 10x)
-     * @param marginRequirementBps New margin requirement in basis points
-     */
-    function enableMarketLeverage(
-        bytes32 marketId,
-        uint256 maxLeverage,
-        uint256 marginRequirementBps
-    ) external onlyAdmin {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        require(maxLeverage > 1 && maxLeverage <= 100, "FuturesMarketFactory: invalid max leverage");
-        require(marginRequirementBps >= 100 && marginRequirementBps <= 10000, "FuturesMarketFactory: invalid margin requirement");
-        require(marginRequirementBps <= (10000 / maxLeverage), "FuturesMarketFactory: margin requirement too low for max leverage");
-        
-        address orderBookAddress = marketToOrderBook[marketId];
-        OrderBook orderBook = OrderBook(orderBookAddress);
-        
-        // Enable leverage on the OrderBook
-        orderBook.enableLeverage(maxLeverage, marginRequirementBps);
-        
-        emit MarketLeverageEnabled(marketId, maxLeverage, marginRequirementBps);
-    }
-
-    /**
-     * @dev Disable leverage for a specific market (revert to 1:1 margin)
-     * @param marketId Market identifier
-     */
-    function disableMarketLeverage(bytes32 marketId) external onlyAdmin {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        
-        address orderBookAddress = marketToOrderBook[marketId];
-        OrderBook orderBook = OrderBook(orderBookAddress);
-        
-        // Disable leverage on the OrderBook
-        orderBook.disableLeverage();
-        
-        emit MarketLeverageDisabled(marketId);
-    }
-
-    /**
-     * @dev Set leverage controller for a specific market
-     * @param marketId Market identifier
-     * @param controller New leverage controller address
-     */
-    function setMarketLeverageController(
-        bytes32 marketId,
-        address controller
-    ) external onlyAdmin {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        require(controller != address(0), "FuturesMarketFactory: invalid controller address");
-        
-        address orderBookAddress = marketToOrderBook[marketId];
-        OrderBook orderBook = OrderBook(orderBookAddress);
-        
-        // Update leverage controller on the OrderBook
-        orderBook.setLeverageController(controller);
-        
-        emit MarketLeverageControllerUpdated(marketId, controller);
-    }
-
-    /**
-     * @dev Get leverage information for a market
-     * @param marketId Market identifier
-     * @return enabled Whether leverage is enabled
-     * @return maxLeverage Maximum leverage allowed
-     * @return marginRequirement Current margin requirement in basis points
-     * @return controller Current leverage controller
-     */
-    function getMarketLeverageInfo(bytes32 marketId) external view returns (
-        bool enabled,
-        uint256 maxLeverage,
-        uint256 marginRequirement,
-        address controller
-    ) {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        
-        address orderBookAddress = marketToOrderBook[marketId];
-        OrderBook orderBook = OrderBook(orderBookAddress);
-        
-        return orderBook.getLeverageInfo();
-    }
-
-    /**
-     * @dev Update default leverage settings for new markets
-     * @param _defaultMarginRequirementBps New default margin requirement
-     * @param _defaultLeverageEnabled Whether leverage should be enabled by default for new markets
-     */
-    function updateDefaultLeverageSettings(
-        uint256 _defaultMarginRequirementBps,
-        bool _defaultLeverageEnabled
-    ) external onlyAdmin {
-        require(_defaultMarginRequirementBps >= 1000 && _defaultMarginRequirementBps <= 10000, "FuturesMarketFactory: invalid default margin requirement");
-        
-        defaultMarginRequirementBps = _defaultMarginRequirementBps;
-        defaultLeverageEnabled = _defaultLeverageEnabled;
-        
-        emit DefaultLeverageSettingsUpdated(_defaultMarginRequirementBps, _defaultLeverageEnabled);
-    }
-
-    // ============ Additional Events for Leverage Management ============
-    
-    event MarketLeverageEnabled(bytes32 indexed marketId, uint256 maxLeverage, uint256 marginRequirement);
-    event MarketLeverageDisabled(bytes32 indexed marketId);
-    event MarketLeverageControllerUpdated(bytes32 indexed marketId, address indexed controller);
-    event DefaultLeverageSettingsUpdated(uint256 defaultMarginRequirement, bool defaultLeverageEnabled);
 }

@@ -336,6 +336,44 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
     }
 
     /**
+     * @dev Consume locked margin without crediting it back to user (used to pay losses during liquidation)
+     * @param user User address
+     * @param marketId Market identifier
+     * @param amount Amount of locked margin to consume
+     */
+    function consumeLockedMargin(
+        address user,
+        bytes32 marketId,
+        uint256 amount
+    )
+        external
+        onlyRole(ORDERBOOK_ROLE)
+        validAddress(user)
+        positiveAmount(amount)
+    {
+        require(
+            userMarginByMarket[user][marketId] >= amount,
+            string(abi.encodePacked(
+                "CentralizedVault: insufficient locked margin to consume. User: ",
+                Strings.toHexString(user),
+                ", Market: ",
+                Strings.toHexString(uint256(marketId)),
+                ", Requested: ",
+                amount.toString(),
+                ", Locked: ",
+                userMarginByMarket[user][marketId].toString()
+            ))
+        );
+
+        // Reduce locked margin and global total. This does not change userCollateral.
+        userMarginByMarket[user][marketId] -= amount;
+        totalMarginLocked -= amount;
+
+        // Reuse MarginReleased event to indicate locked margin decreased; totalLocked reflects remaining.
+        emit MarginReleased(user, marketId, amount, userMarginByMarket[user][marketId]);
+    }
+
+    /**
      * @dev Reserve margin for a pending order (called by OrderBook)
      * @param user User address
      * @param orderId Order identifier

@@ -88,7 +88,6 @@ contract TradingRouterTest is Test {
             TradingRouter.OrderSide.BUY,
             100e18,     // 100 ALU
             2_000_000,  // $2.00 price
-            1,          // 1x leverage
             0           // No expiry
         );
         
@@ -170,7 +169,6 @@ contract TradingRouterTest is Test {
             TradingRouter.OrderSide.SELL,
             100e18,     // 100 ALU
             2_000_000,  // $2.00 price
-            1,          // 1x leverage
             0           // No expiry
         );
         vm.stopPrank();
@@ -198,7 +196,6 @@ contract TradingRouterTest is Test {
             TradingRouter.OrderSide.BUY,
             100e18,     // 100 ALU
             2_000_000,  // $2.00 price
-            1,          // 1x leverage
             0           // No expiry
         );
         
@@ -215,7 +212,6 @@ contract TradingRouterTest is Test {
             TradingRouter.OrderSide.BUY,
             100e18,     // 100 ALU
             2_000_000,  // $2.00 price
-            1,          // 1x leverage
             0           // No expiry
         );
         

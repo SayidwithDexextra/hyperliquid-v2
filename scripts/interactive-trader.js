@@ -1459,7 +1459,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     );
     console.log(
       colorText(
-        "💡 1:1 margin ($100 position = $100 collateral) | Size in ALU tokens or USDC value",
+        "💡 Fixed margin: 100% for longs, 150% for shorts | Size in ALU tokens or USDC value",
         colors.cyan
       )
     );
@@ -1522,15 +1522,14 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     console.clear();
     console.log(
       boxText(
-        `🎯 PLACE ${isBuy ? "BUY" : "SELL"} LIMIT ORDER (1:1 MARGIN)`,
+        `🎯 PLACE ${isBuy ? "BUY" : "SELL"} LIMIT ORDER (${
+          isBuy ? "100%" : "150%"
+        } MARGIN)`,
         isBuy ? colors.green : colors.red
       )
     );
     console.log(
-      colorText(
-        "💡 1:1 Margin: $100 position requires $100 collateral",
-        colors.cyan
-      )
+      colorText("💡 Fixed margin: 100% for longs, 150% for shorts", colors.cyan)
     );
 
     try {
@@ -1601,7 +1600,9 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       console.log(colorText("\n📝 Order Summary:", colors.brightYellow));
       console.log(
         colorText(
-          `   Type: ${isBuy ? "BUY" : "SELL"} LIMIT ORDER (1:1 MARGIN)`,
+          `   Type: ${isBuy ? "BUY" : "SELL"} LIMIT ORDER (${
+            isBuy ? "100%" : "150%"
+          } MARGIN)`,
           isBuy ? colors.green : colors.red
         )
       );
@@ -1612,7 +1613,9 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       );
       console.log(
         colorText(
-          `   Collateral Required: $${totalValue} USDC (1:1 ratio)`,
+          `   Collateral Required: $${
+            isBuy ? totalValue : (totalValue * 1.5).toFixed(2)
+          } USDC (${isBuy ? "100%" : "150%"} margin)`,
           colors.brightCyan
         )
       );
@@ -1655,13 +1658,15 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     console.clear();
     console.log(
       boxText(
-        `🛒 PLACE ${isBuy ? "BUY" : "SELL"} MARKET ORDER (1:1 MARGIN)`,
+        `🛒 PLACE ${isBuy ? "BUY" : "SELL"} MARKET ORDER (${
+          isBuy ? "100%" : "150%"
+        } MARGIN)`,
         isBuy ? colors.brightGreen : colors.brightRed
       )
     );
     console.log(
       colorText(
-        "💡 1:1 Margin: Collateral reserved based on execution price",
+        "💡 Fixed margin: 100% for longs, 150% for shorts (based on execution price)",
         colors.cyan
       )
     );
@@ -1792,7 +1797,9 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       console.log(colorText("\n📝 Market Order Summary:", colors.brightYellow));
       console.log(
         colorText(
-          `   Type: ${isBuy ? "BUY" : "SELL"} MARKET ORDER (1:1 MARGIN)`,
+          `   Type: ${isBuy ? "BUY" : "SELL"} MARKET ORDER (${
+            isBuy ? "100%" : "150%"
+          } MARGIN)`,
           isBuy ? colors.brightGreen : colors.brightRed
         )
       );
@@ -2959,7 +2966,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       // Get current mark price once for all positions
       const currentMarkPrice = await this.contracts.orderBook.getMarkPrice();
       const markPriceFloat = parseFloat(
-        ethers.formatUnits(currentMarkPrice, 18)
+        ethers.formatUnits(currentMarkPrice, 6) // Prices are in 6 decimals (USDC)
       );
 
       // Display positions table
@@ -3079,7 +3086,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
 
           const size = parseFloat(ethers.formatUnits(group.totalSize, 18));
           const entryPrice = parseFloat(
-            ethers.formatUnits(group.entryPrice, 18)
+            ethers.formatUnits(group.entryPrice, 6) // Prices are in 6 decimals (USDC)
           );
           const marginLocked = parseFloat(
             ethers.formatUnits(group.totalMargin, 6)
@@ -3289,20 +3296,13 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           )
         );
 
-        // Calculate leverage
-        const leverage = marginLocked > 0 ? positionValue / marginLocked : 1;
-        const leverageColor =
-          leverage > 5
-            ? colors.red
-            : leverage > 2
-            ? colors.yellow
-            : colors.green;
+        // Show margin requirement
+        const isLong = positionSize >= 0n;
+        const marginRequirement = isLong ? "100%" : "150%";
+        const marginColor = colors.cyan;
         console.log(
           colorText(
-            `⚡ Leverage:         ${colorText(
-              leverage.toFixed(2) + "x",
-              leverageColor
-            )}`,
+            `🔒 Margin Required:  ${colorText(marginRequirement, marginColor)}`,
             colors.white
           )
         );
