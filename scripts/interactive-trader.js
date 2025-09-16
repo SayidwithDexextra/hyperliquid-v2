@@ -376,6 +376,11 @@ class InteractiveTrader {
     this.currentUser = null;
     this.currentUserIndex = 0;
     this.isRunning = true;
+
+    // Position caching for better performance and real-time updates
+    this.cachedPositions = null;
+    this.lastPositionRefresh = 0;
+    this.positionCacheTimeout = 5000; // 5 seconds
   }
 
   async initialize() {
@@ -429,6 +434,9 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       this.contracts.router = await getContract("TRADING_ROUTER");
       this.contracts.factory = await getContract("FUTURES_MARKET_FACTORY");
 
+      // Set up liquidation event listeners for real-time position updates
+      this.setupLiquidationEventListeners();
+
       console.log(
         colorText("✅ All contracts loaded successfully!", colors.brightGreen)
       );
@@ -438,6 +446,116 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         colorText("❌ Failed to load contracts: " + error.message, colors.red)
       );
       process.exit(1);
+    }
+  }
+
+  setupLiquidationEventListeners() {
+    try {
+      // Listen for liquidation events to refresh position data
+      this.contracts.vault.on(
+        "LiquidationExecuted",
+        (user, marketId, liquidator, penalty, remainingCollateral) => {
+          if (
+            this.currentUser &&
+            user.toLowerCase() === this.currentUser.address.toLowerCase()
+          ) {
+            console.log(
+              colorText(
+                "\n🚨 Your position has been liquidated!",
+                colors.brightRed
+              )
+            );
+            console.log(
+              colorText(
+                `💰 Liquidation penalty: $${ethers.formatUnits(penalty, 6)}`,
+                colors.red
+              )
+            );
+            console.log(
+              colorText(
+                `💰 Remaining collateral: $${ethers.formatUnits(
+                  remainingCollateral,
+                  6
+                )}`,
+                colors.yellow
+              )
+            );
+
+            // Clear cached position data to force refresh
+            this.clearPositionCache();
+
+            console.log(colorText("🔄 Position data refreshed", colors.cyan));
+          }
+        }
+      );
+
+      // Listen for position updates
+      this.contracts.vault.on(
+        "PositionUpdated",
+        (user, marketId, oldSize, newSize, entryPrice, marginLocked) => {
+          if (
+            this.currentUser &&
+            user.toLowerCase() === this.currentUser.address.toLowerCase()
+          ) {
+            // Clear cached data when positions change
+            this.clearPositionCache();
+          }
+        }
+      );
+
+      // Listen for active trader removal
+      this.contracts.orderBook.on("ActiveTraderRemoved", (trader) => {
+        if (
+          this.currentUser &&
+          trader.toLowerCase() === this.currentUser.address.toLowerCase()
+        ) {
+          console.log(
+            colorText("📊 Removed from active traders list", colors.cyan)
+          );
+        }
+      });
+    } catch (error) {
+      console.log(
+        colorText(
+          "⚠️ Could not set up event listeners: " + error.message,
+          colors.yellow
+        )
+      );
+    }
+  }
+
+  clearPositionCache() {
+    this.cachedPositions = null;
+    this.lastPositionRefresh = 0;
+  }
+
+  async getPositionsWithCache() {
+    const now = Date.now();
+
+    // Return cached positions if they're still fresh
+    if (
+      this.cachedPositions &&
+      now - this.lastPositionRefresh < this.positionCacheTimeout
+    ) {
+      return this.cachedPositions;
+    }
+
+    // Fetch fresh position data
+    try {
+      const positions = await this.contracts.vault.getUserPositions(
+        this.currentUser.address
+      );
+      this.cachedPositions = positions;
+      this.lastPositionRefresh = now;
+      return positions;
+    } catch (error) {
+      console.log(
+        colorText(
+          "⚠️ Could not fetch positions: " + error.message,
+          colors.yellow
+        )
+      );
+      return [];
     }
   }
 
@@ -1028,6 +1146,29 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           colors.white
         )
       );
+
+      // Get and display mark price
+      let markPriceDisplay = "N/A";
+      try {
+        const markPriceWei =
+          await this.contracts.orderBook.calculateMarkPrice();
+        const markPrice = parseFloat(ethers.formatUnits(markPriceWei, 6));
+        markPriceDisplay = "$" + markPrice.toFixed(4);
+      } catch (error) {
+        console.log(colorText("⚠️ Could not fetch mark price", colors.yellow));
+      }
+
+      console.log(
+        colorText(
+          `│ Mark Price: ${colorText(markPriceDisplay, colors.cyan).padEnd(
+            32
+          )} Spread: ${colorText(
+            "$" + formatPriceWithValidation(bestAsk - bestBid, 6, 4, false),
+            colors.yellow
+          ).padEnd(25)} │`,
+          colors.white
+        )
+      );
       console.log(
         colorText(
           `│ Best Bid: ${colorText(
@@ -1159,6 +1300,48 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     return colorText(traderAddress.substring(2, 6), colors.dim);
   }
 
+  /**
+   * Calculate liquidation price for a position
+   * @param {Object} position - Position object with size, entryPrice, etc.
+   * @returns {string|null} - Formatted liquidation price or null if not applicable
+   */
+  calculateLiquidationPrice(position) {
+    try {
+      const positionSize = BigInt(position.size.toString());
+      const entryPrice = parseFloat(ethers.formatUnits(position.entryPrice, 6));
+
+      if (positionSize === 0n) {
+        return null;
+      }
+
+      if (positionSize > 0n) {
+        // Long position: liquidates at P=0 (practically never)
+        return "0.00";
+      } else {
+        // Short position: Calculate using the formula
+        // For shorts with 150% initial margin and 10% maintenance margin:
+        // Liquidation occurs when equity = maintenance_margin * mark_price
+        // equity = (collateral + entry_price - mark_price) * position_size
+        // At liquidation: (1.5 * entry_price + entry_price - liq_price) = 0.1 * liq_price
+        // Solving: liq_price = (2.5 * entry_price) / 1.1 ≈ 2.27 * entry_price
+
+        const maintenanceMarginRatio = 0.1; // 10% maintenance margin
+        const initialMarginRatio = 1.5; // 150% initial margin
+
+        // Liquidation price formula for shorts:
+        // liq_price = entry_price * (1 + initial_margin_ratio) / (1 + maintenance_margin_ratio)
+        const liquidationPrice =
+          (entryPrice * (1 + initialMarginRatio)) /
+          (1 + maintenanceMarginRatio);
+
+        return liquidationPrice.toFixed(4);
+      }
+    } catch (error) {
+      console.error("Error calculating liquidation price:", error);
+      return null;
+    }
+  }
+
   async displayMenu() {
     // Quick position summary before menu
     try {
@@ -1193,12 +1376,17 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
               false // Don't show warnings in quick summary
             );
 
+            // Calculate liquidation price
+            const liquidationPrice = this.calculateLiquidationPrice(position);
+            const liqPriceStr =
+              liquidationPrice === null ? "N/A" : `$${liquidationPrice}`;
+
             console.log(
               colorText(
                 `│ ${marketIdStr}: ${colorText(
                   side,
                   sideColor
-                )} ${size} ALU @ $${entryPrice}  │`,
+                )} ${size} ALU @ $${entryPrice} | Liq: ${liqPriceStr}  │`,
                 colors.white
               )
             );
@@ -2771,19 +2959,19 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       // Display positions table
       console.log(
         colorText(
-          "┌─────────────────────────────────────────────────────────────────────────────────┐",
+          "┌─────────────────────────────────────────────────────────────────────────────────────────┐",
           colors.cyan
         )
       );
       console.log(
         colorText(
-          "│ Market ID  │ Side     │ Size (ALU) │ Entry Price │ Margin     │ Mark    │ P&L   │",
+          "│ Market ID  │ Side     │ Size (ALU) │ Entry Price │ Margin     │ Mark    │ P&L   │ Liq Price │",
           colors.bright
         )
       );
       console.log(
         colorText(
-          "├─────────────────────────────────────────────────────────────────────────────────┤",
+          "├─────────────────────────────────────────────────────────────────────────────────────────┤",
           colors.cyan
         )
       );
@@ -2854,6 +3042,11 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           const pnlColor = positionPnL >= 0 ? colors.green : colors.red;
           const pnlSign = positionPnL >= 0 ? "+" : "";
 
+          // Calculate liquidation price
+          const liquidationPrice = this.calculateLiquidationPrice(position);
+          const liqPriceStr =
+            liquidationPrice === null ? "N/A" : `$${liquidationPrice}`;
+
           console.log(
             colorText(
               `│ ${marketIdStr.padEnd(10)} │ ${colorText(
@@ -2868,7 +3061,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
                 .padStart(8)} │ ${colorText(
                 (pnlSign + positionPnL.toFixed(2)).padStart(6),
                 pnlColor
-              )} │`,
+              )} │ ${liqPriceStr.padStart(9)} │`,
               colors.white
             )
           );
@@ -2911,7 +3104,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
 
       console.log(
         colorText(
-          "└─────────────────────────────────────────────────────────────────────────────────┘",
+          "└─────────────────────────────────────────────────────────────────────────────────────────┘",
           colors.cyan
         )
       );

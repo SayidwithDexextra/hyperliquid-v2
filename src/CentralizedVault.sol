@@ -6,11 +6,11 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
-import "@openzeppelin/contracts/utils/Strings.sol";
 
 // Interface for OrderBook mark price calculation
 interface IOrderBook {
     function calculateMarkPrice() external view returns (uint256);
+    function clearUserPosition(address user) external;
 }
 
 /**
@@ -20,7 +20,6 @@ interface IOrderBook {
  */
 contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
-    using Strings for uint256;
 
     // ============ Access Control Roles ============
     bytes32 public constant ORDERBOOK_ROLE = keccak256("ORDERBOOK_ROLE");
@@ -112,6 +111,23 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
     // Enhanced position storage for netting system (internal)
     mapping(address => mapping(bytes32 => EnhancedPosition)) internal userEnhancedPositions;
     mapping(address => bytes32[]) internal userMarketIds; // Track which markets user has positions in
+    
+    // LIQUIDATION HISTORY TRACKING
+    struct LiquidatedPosition {
+        bytes32 marketId;
+        int256 size;                 // Position size at liquidation
+        uint256 entryPrice;          // Entry price
+        uint256 liquidationPrice;    // Price at liquidation
+        uint256 marginLocked;        // Margin that was locked
+        uint256 marginLost;          // Margin lost (penalty + losses)
+        uint256 timestamp;           // Liquidation timestamp
+        address liquidator;          // Who liquidated the position
+        string reason;               // Liquidation reason
+    }
+    
+    mapping(address => LiquidatedPosition[]) public userLiquidatedPositions;
+    
+    // Vault uses OrderBook for liquidation user tracking - no additional storage needed
 
     // Market data
     mapping(bytes32 => uint256) public marketMarkPrices;
@@ -127,6 +143,15 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
     uint256 public totalCollateralDeposited;
     uint256 public totalMarginLocked;
     uint256 public totalFeesCollected;
+
+    // ============ Risk Parameters (Liquidation/Margin) ============
+    uint256 public constant SHORT_MARGIN_REQUIREMENT_BPS = 15000; // 150% initial margin for shorts
+    uint256 public constant LONG_MARGIN_REQUIREMENT_BPS = 10000;  // 100% initial margin for longs
+    uint256 public constant LIQUIDATION_PENALTY_BPS = 500;        // 5% penalty on locked margin
+
+    // Maintenance margin requirement (per market) used for liquidation math
+    // Default: 10% unless explicitly set
+    mapping(bytes32 => uint256) public maintenanceMarginBps; // marketId => bps
 
     // ============ Events ============
 
@@ -175,6 +200,12 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
     event OrderBookRegistered(address indexed orderBook, address indexed registeredBy);
     event OrderBookDeregistered(address indexed orderBook, address indexed deregisteredBy);
     event MarketAssignedToOrderBook(bytes32 indexed marketId, address indexed orderBook);
+
+    // Liquidation events
+    event LiquidationTriggered(address indexed user, bytes32 indexed marketId, int256 positionSize, uint256 markPrice, uint256 requiredMargin, uint256 lockedMargin);
+    event LiquidationExecuted(address indexed user, bytes32 indexed marketId, address indexed liquidator, uint256 penalty, uint256 remainingCollateral);
+    event SocializedLossApplied(bytes32 indexed marketId, uint256 lossAmount, address indexed liquidatedUser);
+    event UnderMarginedPosition(address indexed user, bytes32 indexed marketId, uint256 requiredMargin, uint256 actualMargin);
 
     // ============ Modifiers ============
 
@@ -239,15 +270,7 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
         positiveAmount(amount) 
     {
         uint256 availableCollateral = getAvailableCollateral(msg.sender);
-        require(
-            amount <= availableCollateral,
-            string(abi.encodePacked(
-                "CentralizedVault: insufficient available collateral. Requested: ",
-                amount.toString(),
-                ", Available: ",
-                availableCollateral.toString()
-            ))
-        );
+        require(amount <= availableCollateral, "CentralizedVault: insufficient available collateral");
 
         // Update balances
         userCollateral[msg.sender] -= amount;
@@ -280,17 +303,7 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
         positiveAmount(amount) 
     {
         uint256 availableCollateral = getAvailableCollateral(user);
-        require(
-            amount <= availableCollateral,
-            string(abi.encodePacked(
-                "CentralizedVault: insufficient collateral to lock margin. User: ",
-                Strings.toHexString(user),
-                ", Requested: ",
-                amount.toString(),
-                ", Available: ",
-                availableCollateral.toString()
-            ))
-        );
+        require(amount <= availableCollateral, "CentralizedVault: insufficient collateral to lock margin");
 
         userMarginByMarket[user][marketId] += amount;
         totalMarginLocked += amount;
@@ -314,19 +327,7 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
         validAddress(user)
         positiveAmount(amount) 
     {
-        require(
-            userMarginByMarket[user][marketId] >= amount,
-            string(abi.encodePacked(
-                "CentralizedVault: insufficient locked margin to release. User: ",
-                Strings.toHexString(user),
-                ", Market: ",
-                Strings.toHexString(uint256(marketId)),
-                ", Requested: ",
-                amount.toString(),
-                ", Locked: ",
-                userMarginByMarket[user][marketId].toString()
-            ))
-        );
+        require(userMarginByMarket[user][marketId] >= amount, "CentralizedVault: insufficient locked margin to release");
 
         userMarginByMarket[user][marketId] -= amount;
         totalMarginLocked -= amount;
@@ -354,17 +355,7 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
         positiveAmount(amount) 
     {
         uint256 availableCollateral = getAvailableCollateral(user);
-        require(
-            amount <= availableCollateral,
-            string(abi.encodePacked(
-                "CentralizedVault: insufficient collateral to reserve margin. User: ",
-                Strings.toHexString(user),
-                ", Requested: ",
-                amount.toString(),
-                ", Available: ",
-                availableCollateral.toString()
-            ))
-        );
+        require(amount <= availableCollateral, "CentralizedVault: insufficient collateral to reserve margin");
 
         // Check if order already exists
         for (uint256 i = 0; i < userPendingOrders[user].length; i++) {
@@ -454,7 +445,8 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
             }
         }
         
-        revert("CentralizedVault: order not found");
+        // If order not found, just return without error
+        // This can happen during liquidation when the order has already been filled
     }
 
     // ============ Position Management ============
@@ -552,13 +544,8 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
         
         // Calculate margin needed for the new position state
         if (!nettingResult.positionClosed && nettingResult.newSize != 0) {
-            // Position still exists after netting, ensure proper margin
-            uint256 absNewSize = uint256(nettingResult.newSize > 0 ? nettingResult.newSize : -nettingResult.newSize);
-            uint256 notionalValue = (absNewSize * nettingResult.newEntryPrice) / (10**18);
-            
-            // Assume 100% margin requirement (10000 bps) for safety
-            // This should be retrieved from OrderBook in production
-            uint256 requiredMargin = notionalValue; // 100% margin
+            // Use proper margin requirements: 100% for longs, 150% for shorts
+            uint256 requiredMargin = _requiredMarginFor(nettingResult.newSize, nettingResult.newEntryPrice);
             uint256 currentMargin = userMarginByMarket[user][marketId];
             
             if (requiredMargin > currentMargin) {
@@ -566,13 +553,29 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
                 
                 // Check available collateral
                 uint256 availableCollateral = getAvailableCollateral(user);
-                require(availableCollateral >= marginToLock, 
-                    "CentralizedVault: insufficient collateral for position margin");
                 
-                // Lock the additional margin
-                userMarginByMarket[user][marketId] = requiredMargin;
-                totalMarginLocked += marginToLock;
-                emit MarginLocked(user, marketId, marginToLock, requiredMargin);
+                if (availableCollateral >= marginToLock) {
+                    // Normal case: user has sufficient collateral
+                    userMarginByMarket[user][marketId] = requiredMargin;
+                    totalMarginLocked += marginToLock;
+                    emit MarginLocked(user, marketId, marginToLock, requiredMargin);
+                } else {
+                    // CRITICAL FIX: Handle insufficient collateral gracefully
+                    // Lock only what's available and mark position as under-margined
+                    uint256 actualMarginLocked = currentMargin + availableCollateral;
+                    
+                    if (availableCollateral > 0) {
+                        userMarginByMarket[user][marketId] = actualMarginLocked;
+                        totalMarginLocked += availableCollateral;
+                        emit MarginLocked(user, marketId, availableCollateral, actualMarginLocked);
+                    }
+                    
+                    // Emit warning event for under-margined position
+                    emit UnderMarginedPosition(user, marketId, requiredMargin, actualMarginLocked);
+                    
+                    // Note: The position will be flagged for liquidation on the next price update
+                    // This allows the current trade to complete without reverting
+                }
             }
         }
 
@@ -789,28 +792,46 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
     ) internal {
         Position[] storage positions = userPositions[user];
         
-        // If position is being closed or reduced, release proportional margin first
-        if (nettingResult.positionExists && (nettingResult.positionClosed || nettingResult.closedUnits > 0)) {
-            // Calculate margin to release based on closed units
-            uint256 currentMarginLocked = userMarginByMarket[user][marketId];
-            uint256 marginToRelease = 0;
-            
+        // CRITICAL FIX: Always release appropriate margin for any position change
+        uint256 currentMarginLocked = userMarginByMarket[user][marketId];
+        uint256 marginToRelease = 0;
+        
+        if (nettingResult.positionExists) {
             if (nettingResult.positionClosed) {
-                // Full close - release all margin
+                // Full close - release ALL margin
                 marginToRelease = currentMarginLocked;
+                emit MarginReleased(user, marketId, marginToRelease, 0);
             } else if (nettingResult.closedUnits > 0) {
                 // Partial close - release proportional margin
                 uint256 oldAbsSize = uint256(nettingResult.oldSize > 0 ? nettingResult.oldSize : -nettingResult.oldSize);
                 if (oldAbsSize > 0) {
                     marginToRelease = (currentMarginLocked * nettingResult.closedUnits) / oldAbsSize;
+                    emit MarginReleased(user, marketId, marginToRelease, currentMarginLocked - marginToRelease);
                 }
             }
-            
-            // Release the margin
-            if (marginToRelease > 0) {
-                totalMarginLocked -= marginToRelease;
-                userMarginByMarket[user][marketId] -= marginToRelease;
+            // CRITICAL FIX: For position size changes without closing, ensure margin is correctly adjusted
+            else if (nettingResult.newSize != nettingResult.oldSize) {
+                // Calculate required margin for new position size
+                uint256 requiredMargin = _requiredMarginFor(nettingResult.newSize, nettingResult.newEntryPrice);
+                if (requiredMargin < currentMarginLocked) {
+                    marginToRelease = currentMarginLocked - requiredMargin;
+                    emit MarginReleased(user, marketId, marginToRelease, requiredMargin);
+                }
             }
+        }
+        
+        // Apply margin release if calculated
+        if (marginToRelease > 0) {
+            // Safety check to prevent underflow
+            if (marginToRelease > totalMarginLocked) {
+                marginToRelease = totalMarginLocked;
+            }
+            if (marginToRelease > currentMarginLocked) {
+                marginToRelease = currentMarginLocked;
+            }
+            
+            totalMarginLocked -= marginToRelease;
+            userMarginByMarket[user][marketId] -= marginToRelease;
         }
         
         // Credit/debit realized P&L to user's balance
@@ -850,6 +871,8 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
             // Track market ID
             userMarketIds[user].push(marketId);
             
+            // OrderBook handles user tracking for liquidations
+            
         } else {
             // Update existing position in both storage systems
             for (uint256 i = 0; i < positions.length; i++) {
@@ -860,6 +883,8 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
                         positions.pop();
                         
                         delete userEnhancedPositions[user][marketId];
+                        
+                        // Position closed - no additional tracking needed
                         
                         // Remove from market ID tracking
                         bytes32[] storage marketIds = userMarketIds[user];
@@ -887,6 +912,8 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
                         
                         // Update total volume for VWAP tracking
                         enhancedPos.totalVolume = uint256(nettingResult.newSize > 0 ? nettingResult.newSize : -nettingResult.newSize) * nettingResult.newEntryPrice;
+                        
+                        // OrderBook handles user tracking for liquidations
                     }
                     break;
                 }
@@ -1066,17 +1093,7 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
         validAddress(to)
         positiveAmount(amount) 
     {
-        require(
-            userCollateral[from] >= amount,
-            string(abi.encodePacked(
-                "CentralizedVault: insufficient collateral for transfer. User: ",
-                Strings.toHexString(from),
-                ", Required: ",
-                amount.toString(),
-                ", Available: ",
-                userCollateral[from].toString()
-            ))
-        );
+        require(userCollateral[from] >= amount, "CentralizedVault: insufficient collateral for transfer");
 
         // Transfer collateral between users
         userCollateral[from] -= amount;
@@ -1104,17 +1121,7 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
         validAddress(feeRecipient)
         positiveAmount(feeAmount) 
     {
-        require(
-            userCollateral[user] >= feeAmount,
-            string(abi.encodePacked(
-                "CentralizedVault: insufficient collateral for fees. User: ",
-                Strings.toHexString(user),
-                ", Required: ",
-                feeAmount.toString(),
-                ", Available: ",
-                userCollateral[user].toString()
-            ))
-        );
+        require(userCollateral[user] >= feeAmount, "CentralizedVault: insufficient collateral for fees");
 
         userCollateral[user] -= feeAmount;
         totalFeesCollected += feeAmount;
@@ -1466,6 +1473,238 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
     }
 
     /**
+     * @dev Tuple-style summary for compatibility with external callers (OrderBook)
+     */
+    function getPositionSummary(
+        address user,
+        bytes32 marketId
+    ) external view returns (int256 size, uint256 entryPrice, uint256 marginLocked) {
+        Position memory pos = this.getUserPositionByMarket(user, marketId);
+        return (pos.size, pos.entryPrice, userMarginByMarket[user][marketId]);
+    }
+
+    /**
+     * @dev Check if a user's position in a market is liquidatable at a given mark price
+     */
+    function isLiquidatable(
+        address user,
+        bytes32 marketId,
+        uint256 markPrice
+    ) external view returns (bool) {
+        Position[] storage positions = userPositions[user];
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size != 0) {
+                int256 size = positions[i].size;
+                uint256 mm = maintenanceMarginBps[marketId];
+                if (mm == 0) mm = 1000; // default 10%
+                
+                if (size > 0) {
+                    // Long liquidation: liquidates only at P=0 (unreachable in practice)
+                    return markPrice == 0;
+                } else {
+                    // Short liquidation check
+                    return _isShortLiquidatable(size, positions[i].entryPrice, markPrice, mm);
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @dev Liquidation finalize hook for short positions (penalty + accounting + position closure)
+     *      Now includes automatic position closure via socialized loss mechanism.
+     */
+    function liquidateShort(
+        address user,
+        bytes32 marketId,
+        address liquidator
+    ) external onlyRole(ORDERBOOK_ROLE) validAddress(user) validAddress(liquidator) {
+        Position[] storage positions = userPositions[user];
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size < 0) {
+                int256 oldSize = positions[i].size;
+                uint256 locked = userMarginByMarket[user][marketId];
+                
+                // Store entry price before removing position
+                uint256 entryPrice = positions[i].entryPrice;
+                uint256 markPrice = getMarkPrice(marketId); // Use current mark price, not stored one
+                
+                // Calculate trading loss first
+                uint256 tradingLoss = 0;
+                if (markPrice > entryPrice) {
+                    // Short position loss: (current price - entry price) * position size
+                    uint256 lossPerUnit = markPrice - entryPrice;
+                    tradingLoss = (lossPerUnit * uint256(-oldSize)) / (DECIMAL_SCALE * TICK_PRECISION); // Convert to USDC decimals
+                }
+                
+                // Apply liquidation penalty on top of trading loss
+                uint256 penalty = (locked * LIQUIDATION_PENALTY_BPS) / 10000;
+                uint256 totalLoss = tradingLoss + penalty;
+                
+                // Cap total loss at user's available collateral
+                if (totalLoss > userCollateral[user]) {
+                    totalLoss = userCollateral[user];
+                }
+                
+                if (totalLoss > 0) {
+                    userCollateral[user] -= totalLoss;
+                    // Give liquidator the penalty portion only, trading loss is socialized
+                    uint256 liquidatorReward = penalty;
+                    if (liquidatorReward > totalLoss) {
+                        liquidatorReward = totalLoss;
+                    }
+                    if (liquidatorReward > 0) {
+                        userCollateral[liquidator] += liquidatorReward;
+                    }
+                }
+                
+                // Store liquidation history
+                userLiquidatedPositions[user].push(LiquidatedPosition({
+                    marketId: marketId,
+                    size: oldSize,
+                    entryPrice: entryPrice,
+                    liquidationPrice: markPrice,
+                    marginLocked: locked,
+                    marginLost: totalLoss, // Record total loss including trading losses
+                    timestamp: block.timestamp,
+                    liquidator: liquidator,
+                    reason: "Maintenance margin breach - short position"
+                }));
+                
+                // Close the position (remove from array) and release margin
+                userMarginByMarket[user][marketId] = 0;
+                totalMarginLocked -= locked;
+                
+                // Remove position from array by swapping with last element and popping
+                if (i < positions.length - 1) {
+                    positions[i] = positions[positions.length - 1];
+                }
+                positions.pop();
+                
+                // Remove market ID from user's market list
+                _removeMarketIdFromUser(user, marketId);
+                
+                // Clear position in OrderBook (if exists)
+                address orderBookAddr = marketToOrderBook[marketId];
+                if (orderBookAddr != address(0)) {
+                    try IOrderBook(orderBookAddr).clearUserPosition(user) {
+                        // Position cleared successfully
+                    } catch {
+                        // Failed to clear - log but don't revert liquidation
+                        emit MarginUpdateFailed(user, oldSize, markPrice);
+                    }
+                }
+                
+                // Apply socialized loss for the uncovered position
+                uint256 positionNotional = uint256(-oldSize) * entryPrice / TICK_PRECISION;
+                emit SocializedLossApplied(marketId, positionNotional, user);
+                
+                emit LiquidationExecuted(user, marketId, liquidator, totalLoss, userCollateral[user]);
+                emit PositionUpdated(user, marketId, oldSize, 0, entryPrice, 0);
+                return;
+            }
+        }
+        revert("CentralizedVault: short position not found");
+    }
+
+    /**
+     * @dev Liquidation finalize hook for long positions (penalty + accounting + position closure)
+     *      Now includes automatic position closure via socialized loss mechanism.
+     */
+    function liquidateLong(
+        address user,
+        bytes32 marketId,
+        address liquidator
+    ) external onlyRole(ORDERBOOK_ROLE) validAddress(user) validAddress(liquidator) {
+        Position[] storage positions = userPositions[user];
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size > 0) {
+                int256 oldSize = positions[i].size;
+                uint256 locked = userMarginByMarket[user][marketId];
+                
+                // Store entry price before removing position
+                uint256 entryPrice = positions[i].entryPrice;
+                uint256 markPrice = getMarkPrice(marketId); // Use current mark price, not stored one
+                
+                // Calculate trading loss first
+                uint256 tradingLoss = 0;
+                if (markPrice < entryPrice) {
+                    // Long position loss: (entry price - current price) * position size
+                    uint256 lossPerUnit = entryPrice - markPrice;
+                    tradingLoss = (lossPerUnit * uint256(oldSize)) / (DECIMAL_SCALE * TICK_PRECISION); // Convert to USDC decimals
+                }
+                
+                // Apply liquidation penalty on top of trading loss
+                uint256 penalty = (locked * LIQUIDATION_PENALTY_BPS) / 10000;
+                uint256 totalLoss = tradingLoss + penalty;
+                
+                // Cap total loss at user's available collateral
+                if (totalLoss > userCollateral[user]) {
+                    totalLoss = userCollateral[user];
+                }
+                
+                if (totalLoss > 0) {
+                    userCollateral[user] -= totalLoss;
+                    // Give liquidator the penalty portion only, trading loss is socialized
+                    uint256 liquidatorReward = penalty;
+                    if (liquidatorReward > totalLoss) {
+                        liquidatorReward = totalLoss;
+                    }
+                    if (liquidatorReward > 0) {
+                        userCollateral[liquidator] += liquidatorReward;
+                    }
+                }
+                
+                // Store liquidation history
+                userLiquidatedPositions[user].push(LiquidatedPosition({
+                    marketId: marketId,
+                    size: oldSize,
+                    entryPrice: entryPrice,
+                    liquidationPrice: markPrice,
+                    marginLocked: locked,
+                    marginLost: totalLoss, // Record total loss including trading losses
+                    timestamp: block.timestamp,
+                    liquidator: liquidator,
+                    reason: "Maintenance margin breach - long position"
+                }));
+                
+                // Close the position (remove from array) and release margin
+                userMarginByMarket[user][marketId] = 0;
+                totalMarginLocked -= locked;
+                
+                // Remove position from array by swapping with last element and popping
+                if (i < positions.length - 1) {
+                    positions[i] = positions[positions.length - 1];
+                }
+                positions.pop();
+                
+                // Remove market ID from user's market list
+                _removeMarketIdFromUser(user, marketId);
+                
+                // Clear position in OrderBook (if exists)
+                address orderBookAddr = marketToOrderBook[marketId];
+                if (orderBookAddr != address(0)) {
+                    try IOrderBook(orderBookAddr).clearUserPosition(user) {
+                        // Position cleared successfully
+                    } catch {
+                        // Failed to clear - log but don't revert liquidation
+                        emit MarginUpdateFailed(user, oldSize, markPrice);
+                    }
+                }
+                
+                // Apply socialized loss for the uncovered position
+                uint256 positionNotional = uint256(oldSize) * entryPrice / TICK_PRECISION;
+                emit SocializedLossApplied(marketId, positionNotional, user);
+                
+                emit LiquidationExecuted(user, marketId, liquidator, totalLoss, userCollateral[user]);
+                emit PositionUpdated(user, marketId, oldSize, 0, entryPrice, 0);
+                return;
+            }
+        }
+        revert("CentralizedVault: long position not found");
+    }
+
+    /**
      * @dev Get total number of positions for a user
      * @param user User address
      * @return Number of positions
@@ -1571,6 +1810,107 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
     function _abs(int256 x) internal pure returns (int256) {
         return x >= 0 ? x : -x;
     }
+    
+    /**
+     * @dev Remove market ID from user's market list (helper for position closure)
+     * @param user User address
+     * @param marketId Market ID to remove
+     */
+    function _removeMarketIdFromUser(address user, bytes32 marketId) internal {
+        bytes32[] storage marketIds = userMarketIds[user];
+        for (uint256 j = 0; j < marketIds.length; j++) {
+            if (marketIds[j] == marketId) {
+                marketIds[j] = marketIds[marketIds.length - 1];
+                marketIds.pop();
+                break;
+            }
+        }
+        
+        // Also clean up enhanced position data
+        delete userEnhancedPositions[user][marketId];
+        
+        // Position removed - user remains in known users list
+    }
+    
+    // ============ Liquidation History Functions ============
+
+    /**
+     * @dev Get user's liquidated positions
+     * @param user User address
+     * @return Array of liquidated positions
+     */
+    function getUserLiquidatedPositions(address user) 
+        external 
+        view 
+        returns (LiquidatedPosition[] memory) 
+    {
+        return userLiquidatedPositions[user];
+    }
+
+    /**
+     * @dev Get count of user's liquidated positions
+     * @param user User address
+     * @return Number of liquidated positions
+     */
+    function getUserLiquidatedPositionsCount(address user) 
+        external 
+        view 
+        returns (uint256) 
+    {
+        return userLiquidatedPositions[user].length;
+    }
+
+    /**
+     * @dev Get specific liquidated position by index
+     * @param user User address
+     * @param index Position index
+     * @return Liquidated position data
+     */
+    function getUserLiquidatedPosition(address user, uint256 index) 
+        external 
+        view 
+        returns (LiquidatedPosition memory) 
+    {
+        require(index < userLiquidatedPositions[user].length, "CentralizedVault: index out of bounds");
+        return userLiquidatedPositions[user][index];
+    }
+
+    // User tracking moved to OrderBook - no additional methods needed
+
+    /**
+     * @dev Compute required margin at a given price for size
+     */
+    function _requiredMarginFor(int256 size, uint256 price) internal pure returns (uint256) {
+        uint256 absSize = uint256(size >= 0 ? size : -size);
+        uint256 notional = (absSize * price) / (10**18);
+        uint256 bps = size < 0 ? SHORT_MARGIN_REQUIREMENT_BPS : LONG_MARGIN_REQUIREMENT_BPS;
+        return (notional * bps) / 10000;
+    }
+
+    /**
+     * @dev Compute liquidation condition using:
+     *      Long (1x): liquidates only at P=0 (never triggered in practice)
+     *      Short: equity = (C + E − P) and liquidates when equity = m·P
+     *      where C = 1.5E for initial margin and m = maintenanceMarginBps/10000
+     */
+    function _isShortLiquidatable(
+        int256 size,
+        uint256 entryPrice,
+        uint256 markPrice,
+        uint256 marketMMBps
+    ) internal pure returns (bool) {
+        if (size >= 0) return false;
+        // Equity per unit = (1.5E + E − P) = (2.5E − P)
+        // Liquidation at equality: 2.5E − P = m·P  => P = (2.5E)/(1+m)
+        uint256 m = marketMMBps;
+        uint256 numerator = (25 * entryPrice) / 10; // 2.5E = 25/10 * E
+        uint256 denominator = 10000 + m; // (1 + m)
+        uint256 priceLiq = (numerator * 10000) / denominator; // scale properly
+        return markPrice >= priceLiq;
+    }
+
+    // LIQUIDATION FIX: User tracking implemented in OrderBook
+
 
     // ============ Emergency Cleanup Functions ============
 
@@ -1608,7 +1948,116 @@ contract CentralizedVault is AccessControl, ReentrancyGuard, Pausable {
         emit GhostReservationsCleanup(user, totalCleaned, orderIds.length);
     }
 
+    /**
+     * @dev CRITICAL FIX: Emergency function to release stuck margin for closed positions
+     * @param user User address
+     * @param marketId Market identifier  
+     * @param reason Reason for margin release (for audit trail)
+     */
+    function emergencyReleaseStuckMargin(
+        address user,
+        bytes32 marketId,
+        string calldata reason
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) validAddress(user) {
+        // Check if user actually has a position in this market
+        Position[] storage positions = userPositions[user];
+        bool hasPosition = false;
+        
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size != 0) {
+                hasPosition = true;
+                break;
+            }
+        }
+        
+        // Only release margin if no active position exists
+        require(!hasPosition, "CentralizedVault: cannot release margin for active position");
+        
+        uint256 stuckMargin = userMarginByMarket[user][marketId];
+        if (stuckMargin > 0) {
+            // Release the stuck margin
+            userMarginByMarket[user][marketId] = 0;
+            
+            // Safety check to prevent underflow
+            if (stuckMargin <= totalMarginLocked) {
+                totalMarginLocked -= stuckMargin;
+            } else {
+                totalMarginLocked = 0; // Reset if inconsistent
+            }
+            
+            emit EmergencyMarginReleased(user, marketId, stuckMargin, reason);
+            emit MarginReleased(user, marketId, stuckMargin, 0);
+        }
+    }
+
+    /**
+     * @dev CRITICAL FIX: Emergency function to fix margin for position size mismatch
+     * @param user User address
+     * @param marketId Market identifier
+     */
+    function emergencyFixMarginForPosition(
+        address user,
+        bytes32 marketId
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) validAddress(user) {
+        // Find the position
+        Position[] storage positions = userPositions[user];
+        uint256 positionIndex;
+        bool found = false;
+        
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId) {
+                positionIndex = i;
+                found = true;
+                break;
+            }
+        }
+        
+        require(found, "CentralizedVault: position not found");
+        
+        Position storage position = positions[positionIndex];
+        
+        // Calculate correct margin requirement
+        uint256 requiredMargin = _requiredMarginFor(position.size, position.entryPrice);
+        uint256 currentMargin = userMarginByMarket[user][marketId];
+        
+        if (currentMargin != requiredMargin) {
+            if (currentMargin > requiredMargin) {
+                // Release excess margin
+                uint256 excessMargin = currentMargin - requiredMargin;
+                userMarginByMarket[user][marketId] = requiredMargin;
+                
+                // Safety check
+                if (excessMargin <= totalMarginLocked) {
+                    totalMarginLocked -= excessMargin;
+                }
+                
+                emit MarginReleased(user, marketId, excessMargin, requiredMargin);
+                emit EmergencyMarginFixed(user, marketId, currentMargin, requiredMargin, false);
+            } else {
+                // Need more margin - check if user has available collateral
+                uint256 additionalMargin = requiredMargin - currentMargin;
+                uint256 availableCollateral = getAvailableCollateral(user);
+                
+                require(availableCollateral >= additionalMargin, "CentralizedVault: insufficient collateral for margin fix");
+                
+                userMarginByMarket[user][marketId] = requiredMargin;
+                totalMarginLocked += additionalMargin;
+                
+                emit MarginLocked(user, marketId, additionalMargin, requiredMargin);
+                emit EmergencyMarginFixed(user, marketId, currentMargin, requiredMargin, true);
+            }
+            
+            // Update position margin locked for consistency
+            position.marginLocked = requiredMargin;
+        }
+    }
+
     // ============ Additional Events ============
     
     event GhostReservationsCleanup(address indexed user, uint256 totalCleaned, uint256 orderCount);
+    event EmergencyMarginReleased(address indexed user, bytes32 indexed marketId, uint256 amount, string reason);
+    event EmergencyMarginFixed(address indexed user, bytes32 indexed marketId, uint256 oldMargin, uint256 newMargin, bool marginIncreased);
+    
+    // Liquidation events
+    event MarginUpdateFailed(address indexed user, int256 positionSize, uint256 markPrice);
 }

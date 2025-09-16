@@ -19,8 +19,6 @@ interface ICentralizedVault {
     function transferCollateral(address from, address to, uint256 amount) external;
     function getAvailableCollateral(address user) external view returns (uint256);
     
-    // Interface updated - vault methods not needed for OrderBook-based tracking
-    
     // Position information for better margin management
     function getPositionNettingSummary(
         address user,
@@ -110,13 +108,6 @@ contract OrderBook {
     address[] public activeTraders;
     mapping(address => bool) public isActiveTrader;
     
-    // LIQUIDATION FIX: Enhanced user tracking - all users who ever traded
-    address[] public allKnownUsers;
-    mapping(address => bool) public isKnownUser;
-    
-    // Recursion guard to prevent infinite liquidation loops
-    bool private liquidationInProgress;
-    
     /**
      * @dev Create a market buy order for liquidation (on behalf of target user)
      * @param traderAddress Address of the user being liquidated (buyer to cover short)
@@ -188,115 +179,80 @@ contract OrderBook {
     }
 
     function _checkPositionsForLiquidation(uint256 markPrice) internal {
-        // CRITICAL FIX: Prevent infinite recursion during liquidation
-        if (liquidationInProgress) {
-            return; // Skip liquidation check if already in progress
-        }
+        // No throttle in current design; always proceed
         
-        // ============ LIQUIDATION ARCHITECTURAL FIX ============
-        // 
-        // PROBLEM SOLVED: Previously, liquidations only checked users in the 
-        // OrderBook's local `activeTraders` array. This created a critical
-        // synchronization bug where:
-        // 1. OrderBook maintained activeTraders based on local position data
-        // 2. Vault maintained the authoritative position data  
-        // 3. When these got out of sync, liquidatable users became "invisible"
-        // 4. Result: Liquidatable positions were never liquidated!
-        //
-        // SOLUTION: Query the vault directly for users with positions.
-        // The vault is the single source of truth for positions and maintains
-        // its own user tracking system that is always synchronized.
-        // 
-        // This ensures ALL users with liquidatable positions are checked,
-        // regardless of any synchronization issues with OrderBook state.
-        //
-        // LIQUIDATION FIX: Use recent traders from trade history plus active traders
-        address[] memory recentTraders = _getRecentUniqueTraders();
-        uint256 tradersLength = recentTraders.length;
-        
+        // Create a snapshot of active traders to avoid modification during iteration
+        uint256 tradersLength = activeTraders.length;
         if (tradersLength == 0) {
-            emit LiquidationCheckCompleted(0, 0);
             return;
         }
-        
-        // Set recursion guard
-        liquidationInProgress = true;
         
         uint256 startIndex = lastCheckedIndex;
         uint256 endIndex = Math.min(startIndex + MAX_POSITIONS_TO_CHECK, tradersLength);
         uint256 liquidationsTriggered = 0;
         
-        // Process liquidations one by one to avoid array allocation issues
+        // Create array of traders to liquidate to avoid modifying activeTraders during iteration
+        address[] memory tradersToLiquidate = new address[](endIndex - startIndex);
+        uint256 liquidatableCount = 0;
+        
         for (uint256 i = startIndex; i < endIndex; i++) {
-            if (i >= recentTraders.length) break; // Safety check
+            if (i >= activeTraders.length) break; // Safety check
+            address trader = activeTraders[i];
             
-            address trader = recentTraders[i];
-            
-            // Check if trader is liquidatable
-            bool isLiquidatable = false;
-            try vault.isLiquidatable(trader, marketId, markPrice) returns (bool liquidatable) {
-                isLiquidatable = liquidatable;
+            try vault.isLiquidatable(trader, marketId, markPrice) returns (bool isLiquidatable) {
+                if (isLiquidatable) {
+                    tradersToLiquidate[liquidatableCount] = trader;
+                    liquidatableCount++;
+                }
             } catch {
-                // Skip failed liquidation checks
+                // Skip failed checks and continue
                 continue;
             }
+        }
+        
+        // Now liquidate the identified traders (market order first, socialized loss backup)
+        for (uint256 i = 0; i < liquidatableCount && i < 1; i++) { // Only liquidate 1 position per call
+            address trader = tradersToLiquidate[i];
             
-            if (!isLiquidatable) {
-                continue;
-            }
-            
-            // Attempt liquidation
-            bool liquidationCompleted = false;
-            try vault.getPositionSummary(trader, marketId) returns (int256 size, uint256, uint256) {
-                if (size == 0) {
-                    // Position already closed, skip this user (vault tracking handles this)
-                    continue;
-                }
-                
-                // Try market order liquidation first
-                bool marketOrderSuccess = false;
-                if (size < 0) {
-                    // Short liquidation: Create market BUY order
-                    marketOrderSuccess = _executeLiquidationMarketOrder(trader, uint256(-size), true, markPrice);
-                } else {
-                    // Long liquidation: Create market SELL order
-                    marketOrderSuccess = _executeLiquidationMarketOrder(trader, uint256(size), false, markPrice);
-                }
-                
-                // If market order failed, use socialized loss as backup
-                if (!marketOrderSuccess) {
-                    if (size > 0) {
-                        // Try long liquidation
-                        try vault.liquidateLong(trader, marketId, address(this)) {
-                            liquidationCompleted = true;
-                        } catch {
-                            // Long liquidation failed - skip this trader
-                            continue;
-                        }
+            try vault.getPositionSummary(trader, marketId) returns (int256 size, uint256 entryPrice, uint256) {
+                if (size != 0) {
+                    bool liquidationSuccessful = false;
+                    
+                    // Step 1: Try to execute real market order against order book liquidity
+                    if (size < 0) {
+                        // Short liquidation: Create market BUY order to cover the short
+                        liquidationSuccessful = _executeLiquidationMarketOrder(trader, uint256(-size), true, markPrice);
                     } else {
-                        // Try short liquidation
-                        try vault.liquidateShort(trader, marketId, address(this)) {
-                            liquidationCompleted = true;
-                        } catch {
-                            // Short liquidation failed - skip this trader
-                            continue;
+                        // Long liquidation: Create market SELL order to close the long
+                        liquidationSuccessful = _executeLiquidationMarketOrder(trader, uint256(size), false, markPrice);
+                    }
+                    
+                    // Step 2: If market order failed, fall back to socialized loss
+                    if (!liquidationSuccessful) {
+                        if (size > 0) {
+                            vault.liquidateLong(trader, marketId, address(this));
+                        } else {
+                            vault.liquidateShort(trader, marketId, address(this));
                         }
                     }
-                } else {
-                    liquidationCompleted = true;
-                }
-                
-                if (liquidationCompleted) {
+                    
+                    // Step 3: Clean up active trader list if position is fully closed
+                    try vault.getPositionSummary(trader, marketId) returns (int256 newSize, uint256, uint256) {
+                        if (newSize == 0) {
+                            // For now, just remove from active traders when this market position is closed
+                            // TODO: Check all markets when vault interface is updated
+                            _updateActiveTrader(trader, false);
+                        }
+                    } catch {
+                        // If position query fails, assume it's closed and remove from active traders
+                        _updateActiveTrader(trader, false);
+                    }
+                    
                     liquidationsTriggered++;
                     emit AutoLiquidationTriggered(trader, marketId, size, markPrice);
-                    
-                    // Position liquidated successfully - vault tracking handles user list updates
-                    
-                    // Only liquidate one position per call to avoid gas issues
-                    break;
                 }
             } catch {
-                // Failed to get position summary - skip this trader
+                // Skip failed liquidations
                 continue;
             }
         }
@@ -304,9 +260,6 @@ contract OrderBook {
         // Update tracking
         lastCheckedIndex = endIndex >= tradersLength ? 0 : endIndex;
         lastLiquidationCheck = block.timestamp;
-        
-        // Clear recursion guard
-        liquidationInProgress = false;
         
         emit LiquidationCheckCompleted(endIndex - startIndex, liquidationsTriggered);
     }
@@ -325,21 +278,8 @@ contract OrderBook {
         bool isBuy,
         uint256 markPrice
     ) internal returns (bool success) {
-        // Validate inputs
-        if (amount == 0 || markPrice == 0) {
-            return false;
-        }
-        
-        // Check if there's any liquidity available
-        if (isBuy && bestAsk == 0) {
-            return false; // No asks available for buy order
-        }
-        if (!isBuy && bestBid == 0) {
-            return false; // No bids available for sell order
-        }
-        
-        // Calculate maximum acceptable slippage (15% from mark price for liquidations)
-        uint256 liquidationSlippageBps = 1500; // 15% - more generous for liquidations
+        // Calculate maximum acceptable slippage (10% from mark price)
+        uint256 liquidationSlippageBps = 1000; // 10%
         uint256 maxPrice;
         uint256 minPrice;
         
@@ -349,35 +289,32 @@ contract OrderBook {
                 type(uint256).max;
             minPrice = isBuy ? 
                 0 : 
-                (markPrice > liquidationSlippageBps * markPrice / 10000) ? 
-                    (markPrice * (10000 - liquidationSlippageBps)) / 10000 : 0;
+                (markPrice * (10000 - liquidationSlippageBps)) / 10000;
         }
         
-        // Create liquidation order - use OrderBook as trader to avoid margin conflicts
+        // Create liquidation order directly - use OrderBook as trader to avoid margin update conflicts
         Order memory liquidationOrder = Order({
             orderId: nextOrderId++,
-            trader: address(this),
+            trader: address(this), // CRITICAL FIX: Use OrderBook as trader for liquidation orders
             price: isBuy ? maxPrice : minPrice,
             amount: amount,
             isBuy: isBuy,
             timestamp: block.timestamp,
             nextOrderId: 0,
             marginRequired: 0,
-            isMarginOrder: true
+            isMarginOrder: true // CRITICAL FIX: Liquidation orders should not use margin logic
         });
         
-        uint256 remainingAmount = amount; // Default to no fill
-        
-        // Execute the matching - these functions are designed to not revert
+        uint256 remainingAmount;
         if (isBuy) {
             remainingAmount = _matchBuyOrderWithSlippage(liquidationOrder, amount, maxPrice);
         } else {
             remainingAmount = _matchSellOrderWithSlippage(liquidationOrder, amount, minPrice);
         }
         
-        // Return true if order was filled at least 50% (more lenient for liquidations)
+        // Return true if order was fully or mostly filled (>80% filled)
         uint256 filledAmount = amount - remainingAmount;
-        return filledAmount >= (amount * 50) / 100;
+        return filledAmount >= (amount * 80) / 100;
     }
     
     /**
@@ -409,51 +346,22 @@ contract OrderBook {
         if (isActive && !isActiveTrader[trader]) {
             activeTraders.push(trader);
             isActiveTrader[trader] = true;
-            emit ActiveTraderAdded(trader);
         } else if (!isActive && isActiveTrader[trader]) {
             // Remove from active traders
-            _removeFromActiveTraders(trader);
+            if (activeTraders.length > 0) {
+                for (uint256 i = 0; i < activeTraders.length; i++) {
+                    if (activeTraders[i] == trader) {
+                        // Only swap if not the last element
+                        if (i < activeTraders.length - 1) {
+                            activeTraders[i] = activeTraders[activeTraders.length - 1];
+                        }
+                        activeTraders.pop();
+                        break;
+                    }
+                }
+            }
+            isActiveTrader[trader] = false;
         }
-    }
-    
-    /**
-     * @dev LIQUIDATION FIX: Track all users who ever trade
-     */
-    function _trackKnownUser(address user) internal {
-        if (!isKnownUser[user]) {
-            isKnownUser[user] = true;
-            allKnownUsers.push(user);
-        }
-    }
-    
-    /**
-     * @dev LIQUIDATION FIX: Get recent unique traders - simple approach using active traders + known users
-     */
-    function _getRecentUniqueTraders() internal view returns (address[] memory) {
-        // Simple approach: combine activeTraders with allKnownUsers
-        uint256 maxSize = activeTraders.length + allKnownUsers.length;
-        address[] memory tempTraders = new address[](maxSize);
-        uint256 count = 0;
-        
-        // Add all active traders first
-        for (uint256 i = 0; i < activeTraders.length; i++) {
-            tempTraders[count] = activeTraders[i];
-            count++;
-        }
-        
-        // Add known users (will include some duplicates, but that's ok for liquidation checking)
-        for (uint256 i = 0; i < allKnownUsers.length; i++) {
-            tempTraders[count] = allKnownUsers[i];
-            count++;
-        }
-        
-        // Create properly sized result array
-        address[] memory result = new address[](count);
-        for (uint256 i = 0; i < count; i++) {
-            result[i] = tempTraders[i];
-        }
-        
-        return result;
     }
     
     // Events
@@ -468,14 +376,6 @@ contract OrderBook {
         uint256 positionsChecked,
         uint256 liquidationsTriggered
     );
-
-    event MarginUpdateFailed(
-        address indexed user,
-        int256 amount,
-        uint256 price
-    );
-    
-    event ActiveTraderAdded(address indexed trader);
     
     event ActiveTraderRemoved(
         address indexed trader
@@ -547,6 +447,7 @@ contract OrderBook {
     event OrderPartiallyFilled(uint256 indexed orderId, uint256 filledAmount, uint256 remainingAmount);
     event PositionUpdated(address indexed trader, int256 oldPosition, int256 newPosition);
     event MarginOrderPlaced(uint256 indexed orderId, address indexed trader, uint256 marginRequired);
+    event DebugMarginRelease(address indexed user, uint256 orderId, uint256 executionPrice, uint256 amount, bool isMarginOrder);
     
     // Leverage control events
     event LeverageEnabled(address indexed controller, uint256 maxLeverage, uint256 newMarginRequirement);
@@ -786,19 +687,6 @@ contract OrderBook {
     }
 
     /**
-     * @dev Clear user's position (called during liquidation)
-     * @param user User address to clear position for
-     */
-    function clearUserPosition(address user) 
-        external 
-        onlyAdmin 
-    {
-        userPositions[user] = 0;
-        _updateActiveTrader(user, false); // Remove from active traders
-        emit PositionUpdated(user, userPositions[user], 0);
-    }
-
-    /**
      * @dev Internal function to place market orders with slippage protection
      */
     function _placeMarketOrder(uint256 amount, bool isBuy, bool isMarginOrder, uint256 slippageBps) 
@@ -913,6 +801,7 @@ contract OrderBook {
         uint256 remainingAmount
     ) private {
         if (buyOrder.isMarginOrder && currentPrice < buyOrder.price && buyOrder.price != type(uint256).max) {
+            emit DebugMarginRelease(buyOrder.trader, buyOrder.orderId, currentPrice, matchAmount, true);
             
             // Calculate required margin at execution price (buy order = positive amount = long position)
             uint256 requiredMarginAtExecution = _calculateExecutionMargin(int256(matchAmount), currentPrice);
@@ -1112,6 +1001,7 @@ contract OrderBook {
                 // Release excess margin if buy order executes at better price
                 // Do this BEFORE trade execution to ensure order still exists
                 if (buyOrder.isMarginOrder && currentPrice < buyOrder.price && buyOrder.price != type(uint256).max) {
+                    emit DebugMarginRelease(buyOrder.trader, buyOrder.orderId, currentPrice, matchAmount, true);
                     
                     // Calculate required margin at execution price (buy order = positive amount = long position)
                     uint256 requiredMarginAtExecution = _calculateExecutionMargin(int256(matchAmount), currentPrice);
@@ -1591,57 +1481,6 @@ contract OrderBook {
         }
     }
 
-
-    /**
-     * @dev Handle margin updates for liquidation trades with safe fallbacks
-     * @param user User address
-     * @param oldPosition Previous position size
-     * @param amount Position size change
-     * @param price Trade price
-     * @param isMargin Whether this is a margin trade
-     * @param isLiquidationTrade Whether this involves the OrderBook contract
-     */
-    function _handleLiquidationMarginUpdate(
-        address user,
-        int256 oldPosition,
-        int256 amount,
-        uint256 price,
-        bool isMargin,
-        bool isLiquidationTrade
-    ) internal {
-        if (!isMargin) return;
-        
-        // Skip margin updates for OrderBook contract (liquidation orders)
-        if (user == address(this)) return;
-        
-        // For liquidation trades, use safe margin updates that don't revert on insufficient collateral
-        if (isLiquidationTrade) {
-            try this._safeMarginUpdate(user, oldPosition, amount, price) {
-                // Margin update succeeded
-            } catch {
-                // Margin update failed - continue liquidation without reverting
-                // The position will still be updated, but margin might not be perfectly calculated
-                emit MarginUpdateFailed(user, amount, price);
-            }
-        } else {
-            // Normal margin updates for regular trades
-            _handleMarginUpdate(user, oldPosition, amount, price, isMargin);
-        }
-    }
-
-    /**
-     * @dev Safe margin update that can be called externally for try/catch
-     */
-    function _safeMarginUpdate(
-        address user,
-        int256 oldPosition,
-        int256 amount,
-        uint256 price
-    ) external {
-        require(msg.sender == address(this), "Only self-calls allowed");
-        _handleMarginUpdate(user, oldPosition, amount, price, true);
-    }
-
     function _executeTrade(
         address buyer,
         address seller,
@@ -1672,24 +1511,16 @@ contract OrderBook {
         _updateActiveTrader(buyer, userPositions[buyer] != 0);
         _updateActiveTrader(seller, userPositions[seller] != 0);
         
-        // LIQUIDATION FIX: Track all users who ever trade
-        _trackKnownUser(buyer);
-        _trackKnownUser(seller);
-        
         // Handle margin updates
         require(buyerMargin == sellerMargin, "OrderBook: cannot mix margin and spot trades");
-        
-        // CRITICAL FIX: Special handling for liquidation trades
-        bool isLiquidationTrade = (buyer == address(this) || seller == address(this));
-        
         if (buyerMargin || sellerMargin) {
-            _handleLiquidationMarginUpdate(buyer, oldBuyerPosition, int256(amount), price, buyerMargin, isLiquidationTrade);
-            _handleLiquidationMarginUpdate(seller, oldSellerPosition, -int256(amount), price, sellerMargin, isLiquidationTrade);
+            _handleMarginUpdate(buyer, oldBuyerPosition, int256(amount), price, buyerMargin);
+            _handleMarginUpdate(seller, oldSellerPosition, -int256(amount), price, sellerMargin);
             
             // Deduct fees
             if (tradingFee > 0) {
-                if (buyerMargin && buyer != address(this)) vault.deductFees(buyer, buyerFee, feeRecipient);
-                if (sellerMargin && seller != address(this)) vault.deductFees(seller, sellerFee, feeRecipient);
+                if (buyerMargin) vault.deductFees(buyer, buyerFee, feeRecipient);
+                if (sellerMargin) vault.deductFees(seller, sellerFee, feeRecipient);
             }
         } else {
             // Allow spot trades only for liquidation (when OrderBook is a participant)
@@ -1703,12 +1534,10 @@ contract OrderBook {
         lastTradePrice = price;
         uint256 currentMark = _calculateMarkPrice();
         
-        // CRITICAL FIX: Only check liquidations if not already in liquidation process
-        // and price has moved significantly (>= 2%) to save gas
-        if (!liquidationInProgress && 
-            (lastLiquidationCheck == 0 || 
+        // Only check liquidations if price has moved significantly (>= 2%) to save gas
+        if (lastLiquidationCheck == 0 || 
             (currentMark > lastMarkPrice && (currentMark - lastMarkPrice) * 100 / lastMarkPrice >= 2) ||
-            (lastMarkPrice > currentMark && (lastMarkPrice - currentMark) * 100 / lastMarkPrice >= 2))) {
+            (lastMarkPrice > currentMark && (lastMarkPrice - currentMark) * 100 / lastMarkPrice >= 2)) {
             _checkPositionsForLiquidation(currentMark);
             lastMarkPrice = currentMark;
         }
@@ -1797,6 +1626,7 @@ contract OrderBook {
                     vault.releaseExcessMargin(user, bytes32(orderId), order.marginRequired);
                 }
                 
+                emit DebugMarginRelease(user, orderId, executionPrice, amount, true);
             }
         }
     }
@@ -2503,5 +2333,18 @@ contract OrderBook {
         }
     }
 
-    
+    /**
+     * @dev Test-only helper to force a liquidation scan
+     */
+    function triggerLiquidationScan() external {
+        uint256 mp = _calculateMarkPrice();
+        _checkPositionsForLiquidation(mp);
+    }
+
+    /**
+     * @dev Test-only helper to manually add a trader to active list
+     */
+    function addToActiveTraders(address trader) external {
+        _updateActiveTrader(trader, true);
+    }
 }

@@ -8,6 +8,13 @@ const config = {
       optimizer: {
         enabled: true,
         runs: 1, // Maximum optimization for deployment size
+        details: {
+          yul: true,
+          yulDetails: {
+            stackAllocation: true,
+            optimizerSteps: "dhfoDgvulfnTUtnIf",
+          },
+        },
       },
       viaIR: true, // Enable Intermediate Representation for better optimization
     },

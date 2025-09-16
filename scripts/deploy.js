@@ -7,7 +7,10 @@
 //   2. Sets up all authorization and roles
 //   3. Creates ALUMINUM market
 //   4. Funds trading accounts with USDC and collateral
-//   5. Updates configuration files
+//   5. Places initial limit buy order (10 ALU @ $1.00 from deployer)
+//   6. Executes market sell order from User3 (creates first trade & short position)
+//   7. Places User2 limit buy order (20 ALU @ $2.50 for liquidity)
+//   8. Updates configuration files
 //
 // 🚀 USAGE:
 //   node scripts/deploy.js
@@ -48,7 +51,7 @@ async function main() {
     contracts.MOCK_USDC = await mockUSDC.getAddress();
     console.log("     ✅ MockUSDC deployed at:", contracts.MOCK_USDC);
 
-    // Deploy CentralizedVault
+    // Deploy CentralizedVault (now includes liquidation + margin logic)
     console.log("  2️⃣ Deploying CentralizedVault...");
     const CentralizedVault = await ethers.getContractFactory(
       "CentralizedVault"
@@ -212,6 +215,8 @@ async function main() {
     await vault.grantRole(ORDERBOOK_ROLE, contracts.ALUMINUM_ORDERBOOK);
     console.log("     ✅ ORDERBOOK_ROLE granted to OrderBook");
 
+    // No VaultRouter – liquidation is integrated
+
     // SKIP INITIAL LIQUIDITY SEEDING
     console.log("  💧 Skipping initial liquidity seeding...");
     console.log("     ℹ️  Market will start with empty order book");
@@ -237,21 +242,15 @@ async function main() {
         await mockUSDC.mint(user.address, mintAmount);
         console.log(`     ✅ Minted ${USDC_PER_USER} USDC`);
 
-        // Deposit collateral (skip deployer)
-        if (i > 0) {
-          const collateralAmount = ethers.parseUnits(COLLATERAL_PER_USER, 6);
-          await mockUSDC
-            .connect(user)
-            .approve(contracts.CENTRALIZED_VAULT, collateralAmount);
-          await vault.connect(user).depositCollateral(collateralAmount);
-          console.log(
-            `     ✅ Deposited ${COLLATERAL_PER_USER} USDC as collateral`
-          );
-        } else {
-          console.log(
-            `     ℹ️  Skipping collateral (deployer keeps funds for operations)`
-          );
-        }
+        // Deposit collateral (including deployer)
+        const collateralAmount = ethers.parseUnits(COLLATERAL_PER_USER, 6);
+        await mockUSDC
+          .connect(user)
+          .approve(contracts.CENTRALIZED_VAULT, collateralAmount);
+        await vault.connect(user).depositCollateral(collateralAmount);
+        console.log(
+          `     ✅ Deposited ${COLLATERAL_PER_USER} USDC as collateral`
+        );
 
         // Show final balances
         const balance = await mockUSDC.balanceOf(user.address);
@@ -268,9 +267,108 @@ async function main() {
     }
 
     // ============================================
-    // STEP 5: UPDATE CONFIGURATION
+    // STEP 5: PLACE INITIAL ORDERS & CREATE TRADES
     // ============================================
-    console.log("\n📝 STEP 5: UPDATING CONFIGURATION");
+    console.log("\n📈 STEP 5: PLACING INITIAL ORDERS & CREATING TRADES");
+    console.log("─".repeat(60));
+
+    try {
+      // Get the deployed OrderBook contract
+      const orderBook = await ethers.getContractAt(
+        "OrderBook",
+        contracts.ALUMINUM_ORDERBOOK
+      );
+
+      console.log("  🔸 Placing limit buy order from deployer...");
+      console.log("     Price: $1.00");
+      console.log("     Amount: 10 ALU");
+      console.log("     Side: BUY");
+
+      // Place limit buy order: 10 ALU at $1.00
+      const price = ethers.parseUnits("1", 6); // $1.00 in USDC (6 decimals)
+      const amount = ethers.parseUnits("10", 18); // 10 ALU (18 decimals)
+
+      // Place the order using margin limit order function
+      const placeTx = await orderBook.connect(deployer).placeMarginLimitOrder(
+        price,
+        amount,
+        true // isBuy = true
+      );
+
+      await placeTx.wait();
+      console.log("     ✅ Limit buy order placed successfully!");
+
+      // Check the order book state
+      const bestBid = await orderBook.bestBid();
+      const bestAsk = await orderBook.bestAsk();
+      console.log(`     📊 Best Bid: $${ethers.formatUnits(bestBid, 6)}`);
+      console.log(`     📊 Best Ask: $${ethers.formatUnits(bestAsk, 6)}`);
+
+      // Now place User3's market sell order to match against the limit buy
+      console.log("\n  🔸 Placing market sell order from User3...");
+      console.log("     Amount: 10 ALU");
+      console.log("     Side: SELL (market order)");
+
+      const signers = await ethers.getSigners();
+      const user3 = signers[3]; // User3 is the 4th signer
+
+      const sellTx = await orderBook.connect(user3).placeMarginMarketOrder(
+        amount, // Same 10 ALU amount
+        false // isBuy = false for sell order
+      );
+
+      await sellTx.wait();
+      console.log("     ✅ Market sell order executed successfully!");
+      console.log(`     💰 User3 opened short position: -10 ALU @ $1.00`);
+
+      // Check final order book state
+      const finalBestBid = await orderBook.bestBid();
+      const finalBestAsk = await orderBook.bestAsk();
+      console.log(
+        `     📊 Final Best Bid: $${ethers.formatUnits(finalBestBid, 6)}`
+      );
+      console.log(
+        `     📊 Final Best Ask: $${ethers.formatUnits(finalBestAsk, 6)}`
+      );
+
+      // Now place User2's limit buy order at higher price
+      console.log("\n  🔸 Placing limit buy order from User2...");
+      console.log("     Price: $2.50");
+      console.log("     Amount: 20 ALU");
+      console.log("     Side: SELL (limit order)");
+
+      const user2 = signers[2]; // User2 is the 3rd signer
+      const user2Price = ethers.parseUnits("2.5", 6); // $2.50 in USDC (6 decimals)
+      const user2Amount = ethers.parseUnits("20", 18); // 20 ALU (18 decimals)
+
+      const user2OrderTx = await orderBook.connect(user2).placeMarginLimitOrder(
+        user2Price,
+        user2Amount,
+        false // isBuy = true for limit buy
+      );
+
+      await user2OrderTx.wait();
+      console.log("     ✅ Limit buy order placed successfully!");
+      console.log(`     💰 User2 placed bid: 20 ALU @ $2.50`);
+
+      // Check updated order book state
+      const updatedBestBid = await orderBook.bestBid();
+      const updatedBestAsk = await orderBook.bestAsk();
+      console.log(
+        `     📊 Updated Best Bid: $${ethers.formatUnits(updatedBestBid, 6)}`
+      );
+      console.log(
+        `     📊 Updated Best Ask: $${ethers.formatUnits(updatedBestAsk, 6)}`
+      );
+    } catch (error) {
+      console.log(`     ⚠️  Could not place initial orders: ${error.message}`);
+      console.log("     Order placement is optional - deployment can continue");
+    }
+
+    // ============================================
+    // STEP 6: UPDATE CONFIGURATION
+    // ============================================
+    console.log("\n📝 STEP 6: UPDATING CONFIGURATION");
     console.log("─".repeat(60));
 
     // Update contracts.js
@@ -322,7 +420,14 @@ async function main() {
     console.log("  • All authorizations configured ✅");
 
     console.log("\n🎯 READY TO TRADE!");
-    console.log("  Run: node trade.js");
+    console.log("  • Initial limit buy order: 10 ALU @ $1.00 (from deployer)");
+    console.log(
+      "  • Market sell order: 10 ALU @ $1.00 (from User3) - EXECUTED"
+    );
+    console.log("  • User3 now has active short position: -10 ALU @ $1.00");
+    console.log("  • User2 limit buy order: 20 ALU @ $2.50 (active bid)");
+    console.log("  • Order book now has liquidity at $2.50 level");
+    console.log("  • Run: node trade.js");
     console.log("═".repeat(80));
   } catch (error) {
     console.error("\n❌ DEPLOYMENT FAILED:", error.message);

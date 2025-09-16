@@ -51,17 +51,17 @@ const { ethers } = require("hardhat");
 //
 const CONTRACT_ADDRESSES = {
   // Core contracts - PRODUCTION MARGIN RELEASE DEPLOYMENT
-  TRADING_ROUTER: "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
-  CENTRALIZED_VAULT: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-  FUTURES_MARKET_FACTORY: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+  TRADING_ROUTER: "0xfbC22278A96299D91d41C453234d97b4F5Eb9B2d",
+  CENTRALIZED_VAULT: "0xD84379CEae14AA33C123Af12424A37803F885889",
+  FUTURES_MARKET_FACTORY: "0x2B0d36FACD61B71CC05ab8F3D2355ec3631C0dd5",
 
   // Market-specific contracts (populated during deployment)
-  ORDERBOOK: "0x75537828f2ce51be7289709686A69CbFDbB714F1", // BTC-USD market
+  ORDERBOOK: "0xaE4a7d39A9A09545d3e2542d75e0e64A63df9E59", // BTC-USD market
   BTC_ORDERBOOK: "0x413b1AfCa96a3df5A686d8BFBF93d30688a7f7D9",
-  ALUMINUM_ORDERBOOK: "0x75537828f2ce51be7289709686A69CbFDbB714F1", // Temporary - using same as BTC
+  ALUMINUM_ORDERBOOK: "0xaE4a7d39A9A09545d3e2542d75e0e64A63df9E59", // Temporary - using same as BTC
 
   // Mock contracts
-  MOCK_USDC: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  MOCK_USDC: "0xBEc49fA140aCaA83533fB00A2BB19bDdd0290f25",
 };
 
 // 📋 CONTRACT NAMES - Maps to hardhat artifacts
@@ -96,9 +96,10 @@ const MARKET_INFO = {
   },
   ALUMINUM: {
     symbol: "ALU-USD",
-    marketId: ethers.keccak256(ethers.toUtf8Bytes("ALU-USD")),
+    marketId:
+      "0x7c17d3052a0f2728087b3dcbd87e9fe522e1beec898038b2d887af77b23d610f",
     name: "Aluminum Futures",
-    orderBook: "0xB54cA5001EF6C89E3A576a098b8951CD8eFf2378",
+    orderBook: "0x3fA4E6e03Fbd434A577387924aF39efd3b4b50F2",
     leverageEnabled: false,
     maxLeverage: "1x",
     marginRequirement: "100%",
