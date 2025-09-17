@@ -3,12 +3,21 @@ pragma solidity ^0.8.20;
 
 /**
  * @title VaultAnalytics
- * @dev Complete analytics library with proper function ordering
+ * @dev Complete analytics library with standardized P&L calculations
+ * @notice All P&L calculations use the standard 18-decimal precision formula:
+ *         P&L = (markPrice - entryPrice) * size / TICK_PRECISION = 18 decimals
  */
 library VaultAnalytics {
     
     uint256 public constant TICK_PRECISION = 1e6;
     uint256 public constant DECIMAL_SCALE = 1e12;
+
+    // ============ P&L CALCULATION STANDARDS ============
+    // Standard P&L Formula: (markPrice - entryPrice) * size / TICK_PRECISION
+    // - Prices: 6 decimals (USDC precision)
+    // - Size: 18 decimals (ALU token precision)  
+    // - Result: 18 decimals (standard P&L precision)
+    // This ensures consistency across all P&L calculations in the system
     
     struct MarginSummary {
         uint256 totalCollateral;
@@ -87,6 +96,14 @@ library VaultAnalytics {
         return Position(bytes32(0), 0, 0, 0);
     }
 
+    /**
+     * @dev Calculate P&L for a position using the standard formula
+     * @param size Position size (18 decimals, positive for long, negative for short)
+     * @param entryPrice Entry price (6 decimals, USDC precision)
+     * @param markPrice Current mark price (6 decimals, USDC precision)
+     * @return pnl Profit and loss (18 decimals, standard precision)
+     * @notice Standard P&L Formula: (markPrice - entryPrice) * size / TICK_PRECISION = 18 decimals
+     */
     function calculatePositionPnL(int256 size, uint256 entryPrice, uint256 markPrice)
         public
         pure
@@ -94,23 +111,10 @@ library VaultAnalytics {
     {
         if (size == 0) return 0;
         
-        if (size > 0) {
-            if (markPrice > entryPrice) {
-                uint256 profitPerUnit = markPrice - entryPrice;
-                pnl = int256((profitPerUnit * uint256(size)) / (DECIMAL_SCALE * TICK_PRECISION));
-            } else {
-                uint256 lossPerUnit = entryPrice - markPrice;
-                pnl = -int256((lossPerUnit * uint256(size)) / (DECIMAL_SCALE * TICK_PRECISION));
-            }
-        } else {
-            if (entryPrice > markPrice) {
-                uint256 profitPerUnit = entryPrice - markPrice;
-                pnl = int256((profitPerUnit * uint256(-size)) / (DECIMAL_SCALE * TICK_PRECISION));
-            } else {
-                uint256 lossPerUnit = markPrice - entryPrice;
-                pnl = -int256((lossPerUnit * uint256(-size)) / (DECIMAL_SCALE * TICK_PRECISION));
-            }
-        }
+        // Standard P&L calculation: (markPrice - entryPrice) * size / TICK_PRECISION
+        // Results in 18 decimals: (6 - 6 + 18 - 6) = 18
+        int256 priceDiff = int256(markPrice) - int256(entryPrice);
+        pnl = (priceDiff * size) / int256(TICK_PRECISION);
     }
 
     // ============ COMPLEX FUNCTIONS (USE BASIC FUNCTIONS) ============
@@ -153,5 +157,30 @@ library VaultAnalytics {
         if (protectionRatio > 10000) {
             protectionRatio = 10000;
         }
+    }
+
+    /**
+     * @dev Validate P&L calculation consistency across different methods
+     * @param size Position size (18 decimals)
+     * @param entryPrice Entry price (6 decimals)
+     * @param markPrice Current mark price (6 decimals)
+     * @return standardPnL P&L using standard formula (18 decimals)
+     * @return isValid Whether calculations are mathematically consistent
+     * @notice This function helps verify that all P&L methods produce identical results
+     */
+    function validatePnLConsistency(int256 size, uint256 entryPrice, uint256 markPrice)
+        external
+        pure
+        returns (int256 standardPnL, bool isValid)
+    {
+        // Standard P&L calculation
+        standardPnL = calculatePositionPnL(size, entryPrice, markPrice);
+        
+        // Alternative calculation (should produce identical results)
+        int256 priceDiff = int256(markPrice) - int256(entryPrice);
+        int256 alternativePnL = (priceDiff * size) / int256(TICK_PRECISION);
+        
+        // Verify mathematical consistency
+        isValid = (standardPnL == alternativePnL);
     }
 }

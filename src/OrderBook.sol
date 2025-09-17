@@ -1434,9 +1434,30 @@ contract OrderBook {
         uint256 matchAmount,
         uint256 remainingAmount
     ) private {
-        // For sell orders at better price: NO margin adjustment needed
-        // When a sell order executes at a higher price, they receive more money
-        // but their margin requirement doesn't change (it's based on the amount, not price received)
+        if (sellOrder.isMarginOrder && sellOrder.marginRequired > 0) {
+            // Calculate margin needed for executed amount at actual execution price
+            uint256 requiredMarginAtExecution = _calculateMarginRequired(matchAmount, currentPrice, false); // false = sell order = short position
+            
+            if (remainingAmount == matchAmount) {
+                // This will be the last fill, total margin = cumulative + this execution
+                uint256 totalMarginUsed = cumulativeMarginUsed[sellOrder.orderId] + requiredMarginAtExecution;
+                vault.releaseExcessMargin(sellOrder.trader, bytes32(sellOrder.orderId), totalMarginUsed);
+            } else {
+                // Partial fill - track cumulative margin and update vault
+                cumulativeMarginUsed[sellOrder.orderId] += requiredMarginAtExecution;
+                
+                // Calculate margin for remaining unfilled amount
+                uint256 remainingAfterMatch = remainingAmount - matchAmount;
+                uint256 marginForRemaining = _calculateMarginRequired(remainingAfterMatch, sellOrder.price, false); // Sell order = short position
+                
+                // Total margin = cumulative used + margin for remaining
+                uint256 newTotalMargin = cumulativeMarginUsed[sellOrder.orderId] + marginForRemaining;
+                
+                vault.releaseExcessMargin(sellOrder.trader, bytes32(sellOrder.orderId), newTotalMargin);
+                // Update the order's margin requirement for future calculations
+                orders[sellOrder.orderId].marginRequired = marginForRemaining;
+            }
+        }
     }
 
     function _matchSellOrderWithSlippage(Order memory sellOrder, uint256 remainingAmount, uint256 minPrice) 

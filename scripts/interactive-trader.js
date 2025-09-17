@@ -341,6 +341,160 @@ function calculateSafeMarkPrice(bestBid, bestAsk, fallbackPrice, decimals = 6) {
   }
 }
 
+/**
+ * Helper function to calculate total real-time unrealized P&L across all user positions
+ * @param {Object} contracts - Smart contract instances
+ * @param {string} userAddress - User address
+ * @returns {Promise<number>} Total unrealized P&L using real-time mark prices
+ */
+async function getTotalRealTimeUnrealizedPnL(contracts, userAddress) {
+  try {
+    const positions = await contracts.vault.getUserPositions(userAddress);
+    let totalUnrealizedPnL = 0;
+
+    for (const position of positions) {
+      try {
+        const { pnl } = await getMarkPriceAndPnL(contracts, position);
+        totalUnrealizedPnL += pnl;
+      } catch (error) {
+        console.error(
+          `Error calculating P&L for position ${position.marketId.substring(
+            0,
+            8
+          )}:`,
+          error
+        );
+        // Continue with other positions
+      }
+    }
+
+    return totalUnrealizedPnL;
+  } catch (error) {
+    console.error("Error getting total real-time unrealized P&L:", error);
+    return 0;
+  }
+}
+
+/**
+ * Helper function to get mark price and calculate P&L from smart contracts
+ * Uses real-time mark price calculation from OrderBook for consistency
+ * @param {Object} contracts - Smart contract instances
+ * @param {Object} position - Position object with marketId, size, entryPrice
+ * @returns {Promise<{markPrice: number, pnl: number}>}
+ */
+async function getMarkPriceAndPnL(contracts, position) {
+  try {
+    // Get real-time mark price from OrderBook (consistent with order book display)
+    let markPriceBigInt = 0n;
+
+    try {
+      // Try to get the OrderBook address for this market
+      const orderBookAddress = await contracts.vault.marketToOrderBook(
+        position.marketId
+      );
+
+      if (orderBookAddress && orderBookAddress !== ethers.ZeroAddress) {
+        // Create OrderBook contract instance for this specific market
+        const OrderBook = await ethers.getContractFactory("OrderBook");
+        const orderBook = OrderBook.attach(orderBookAddress);
+
+        // Get real-time calculated mark price
+        markPriceBigInt = await orderBook.calculateMarkPrice();
+      } else {
+        // Fallback to default OrderBook if market-specific one not found
+        markPriceBigInt = await contracts.orderBook.calculateMarkPrice();
+      }
+    } catch (error) {
+      // Fallback to default OrderBook if market mapping fails
+      console.log(
+        `Using default OrderBook for market ${position.marketId.substring(
+          0,
+          8
+        )}...`
+      );
+      markPriceBigInt = await contracts.orderBook.calculateMarkPrice();
+    }
+
+    if (markPriceBigInt > 0) {
+      const markPrice = parseFloat(
+        formatPriceWithValidation(markPriceBigInt, 6, 4, false)
+      );
+
+      // Calculate P&L using the same formula as the smart contract
+      // Formula: (markPrice - entryPrice) * size / TICK_PRECISION
+      // Result: 6-decimal prices × 18-decimal size ÷ 1e6 = 18-decimal result
+      const positionSize = BigInt(position.size.toString());
+      const entryPriceBigInt = BigInt(position.entryPrice.toString());
+      const priceDiffBigInt = markPriceBigInt - entryPriceBigInt;
+      const pnlBigInt = (priceDiffBigInt * positionSize) / BigInt(1e6); // TICK_PRECISION = 1e6
+      const pnl = parseFloat(ethers.formatUnits(pnlBigInt, 18)); // Result is in 18 decimals
+
+      return { markPrice, pnl };
+    } else {
+      // Fallback: calculate manually using order book data
+      const bestBid = await contracts.orderBook.bestBid();
+      const bestAsk = await contracts.orderBook.bestAsk();
+
+      if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
+        const bidPrice = parseFloat(ethers.formatUnits(bestBid, 6));
+        const askPrice = parseFloat(ethers.formatUnits(bestAsk, 6));
+
+        if (
+          !isNaN(bidPrice) &&
+          !isNaN(askPrice) &&
+          bidPrice > 0 &&
+          askPrice > 0
+        ) {
+          const markPrice = (bidPrice + askPrice) / 2;
+          const entryPrice = parseFloat(
+            formatPriceWithValidation(
+              BigInt(position.entryPrice.toString()),
+              6,
+              4,
+              false
+            )
+          );
+          const size = parseFloat(
+            ethers.formatUnits(
+              BigInt(position.size.toString()).toString().replace("-", ""),
+              18
+            )
+          );
+          const priceDiff = markPrice - entryPrice;
+          const pnl =
+            BigInt(position.size.toString()) >= 0n
+              ? priceDiff * size
+              : -priceDiff * size;
+
+          return { markPrice, pnl };
+        }
+      }
+
+      // Final fallback
+      const entryPrice = parseFloat(
+        formatPriceWithValidation(
+          BigInt(position.entryPrice.toString()),
+          6,
+          4,
+          false
+        )
+      );
+      return { markPrice: entryPrice, pnl: 0 };
+    }
+  } catch (error) {
+    console.error("Error getting mark price and P&L:", error);
+    const entryPrice = parseFloat(
+      formatPriceWithValidation(
+        BigInt(position.entryPrice.toString()),
+        6,
+        4,
+        false
+      )
+    );
+    return { markPrice: entryPrice, pnl: 0 };
+  }
+}
+
 function formatPriceWithValidation(
   price,
   decimals = 6,
@@ -2141,39 +2295,74 @@ ${colors.brightRed}└───────────────────�
         6
       );
       const marginReserved = formatUSDC(marginSummary.marginReserved); // This appears to always be correct
-      // Handle realizedPnL - it's stored with 24 decimals (price diff * size)
+      // Handle realizedPnL - it's stored with 18 decimals (price×size÷TICK_PRECISION = 24-6=18 decimals)
       const realizedPnLBigInt = BigInt(
         (marginSummary.realizedPnL || 0).toString()
       );
-      // Realized P&L is in 24 decimals (6 decimals price * 18 decimals size)
+      // Realized P&L calculation: (priceDiff×size)/TICK_PRECISION results in 18 decimals
       const realizedPnLStr = parseFloat(
-        ethers.formatUnits(realizedPnLBigInt, 24)
+        ethers.formatUnits(realizedPnLBigInt, 18)
       ).toFixed(2);
       const realizedPnL = parseFloat(realizedPnLStr);
-      // Handle signed int256 for unrealizedPnL
-      let unrealizedPnLBigInt;
-      try {
-        // Check if it's already a BigInt or needs conversion
-        if (typeof marginSummary.unrealizedPnL === "bigint") {
-          unrealizedPnLBigInt = marginSummary.unrealizedPnL;
-        } else {
-          // Convert from string representation, handling potential negative values
-          unrealizedPnLBigInt = BigInt(
-            (marginSummary.unrealizedPnL || 0).toString()
-          );
-        }
-      } catch (e) {
-        unrealizedPnLBigInt = 0n;
-      }
 
-      const unrealizedPnL = parseFloat(
-        ethers.formatUnits(unrealizedPnLBigInt, 18) // P&L is in 18 decimals (ALU precision)
+      // Get real-time unrealized P&L using unified mark price calculation
+      const unrealizedPnL = await getTotalRealTimeUnrealizedPnL(
+        this.contracts,
+        this.currentUser.address
       );
       // Portfolio value calculation fix: The contract incorrectly mixes decimal precisions
       // It adds collateral + realizedPnL + unrealizedPnL (but with mixed decimals)
       // We need to recalculate it correctly here using our auto-detected values
       const totalCollateralNum = parseFloat(totalCollateral);
-      const portfolioValue = totalCollateralNum + realizedPnL + unrealizedPnL;
+
+      // FIX: Check if this is a liquidated account to avoid double-counting losses
+      const userPositions = await this.contracts.vault.getUserPositions(
+        this.currentUser.address
+      );
+      const hasActivePositions = userPositions.length > 0;
+
+      // For liquidated accounts (no positions + negative realized P&L),
+      // collateral already includes all losses, so don't add realized P&L again
+      const isLiquidatedAccount = !hasActivePositions && realizedPnL < 0;
+      const adjustedRealizedPnL = isLiquidatedAccount ? 0 : realizedPnL;
+
+      const portfolioValue =
+        totalCollateralNum + adjustedRealizedPnL + unrealizedPnL;
+
+      // DEBUG: Portfolio value calculation breakdown
+      console.log(colorText(`\n🔍 PORTFOLIO VALUE DEBUG:`, colors.yellow));
+      console.log(
+        colorText(
+          `   Total Collateral: $${totalCollateralNum.toFixed(2)}`,
+          colors.dim
+        )
+      );
+      console.log(
+        colorText(`   Raw Realized P&L: $${realizedPnL.toFixed(2)}`, colors.dim)
+      );
+      console.log(
+        colorText(
+          `   Adjusted Realized P&L: $${adjustedRealizedPnL.toFixed(2)} ${
+            isLiquidatedAccount ? "(liquidation double-count avoided)" : ""
+          }`,
+          colors.dim
+        )
+      );
+      console.log(
+        colorText(`   Unrealized P&L: $${unrealizedPnL.toFixed(2)}`, colors.dim)
+      );
+      console.log(
+        colorText(
+          `   Portfolio Value: $${portfolioValue.toFixed(2)}`,
+          colors.dim
+        )
+      );
+      console.log(
+        colorText(
+          `   Raw totalCollateral string: "${totalCollateral}"`,
+          colors.dim
+        )
+      );
 
       console.log(
         colorText("\n💰 COMPREHENSIVE PORTFOLIO OVERVIEW", colors.brightYellow)
@@ -2292,7 +2481,7 @@ ${colors.brightRed}└───────────────────�
           `│ Realized P&L:       ${colorText(
             realizedPnLDisplay.padStart(12),
             realizedColor
-          )} USDC                │`,
+          )} USDC (Lifetime)     │`,
           colors.white
         )
       );
@@ -2304,7 +2493,7 @@ ${colors.brightRed}└───────────────────�
           `│ Unrealized P&L:     ${colorText(
             (unrealizedSign + unrealizedPnL.toFixed(2)).padStart(12),
             unrealizedColor
-          )} USDC                │`,
+          )} USDC (Current)      │`,
           colors.white
         )
       );
@@ -3046,6 +3235,9 @@ ${colors.brightRed}└───────────────────�
       )
     );
     console.log(
+      colorText("│ 14. 🔥 View Liquidation History         │", colors.brightRed)
+    );
+    console.log(
       colorText("│ r. 🔄 Refresh Display                  │", colors.white)
     );
     console.log(
@@ -3102,6 +3294,9 @@ ${colors.brightRed}└───────────────────�
         break;
       case "13":
         await this.viewDetailedMarginAnalysis();
+        break;
+      case "14":
+        await this.viewLiquidationHistory();
         break;
       case "r":
         // Refresh - just continue loop
@@ -4200,30 +4395,29 @@ ${colors.brightRed}└───────────────────�
         ethers.formatUnits(realizedPnLBigInt, 24)
       ).toFixed(2);
       const realizedPnL = parseFloat(realizedPnLStr);
-      // Handle signed int256 for unrealizedPnL
-      let unrealizedPnLBigInt;
-      try {
-        // Check if it's already a BigInt or needs conversion
-        if (typeof marginSummary.unrealizedPnL === "bigint") {
-          unrealizedPnLBigInt = marginSummary.unrealizedPnL;
-        } else {
-          // Convert from string representation, handling potential negative values
-          unrealizedPnLBigInt = BigInt(
-            (marginSummary.unrealizedPnL || 0).toString()
-          );
-        }
-      } catch (e) {
-        unrealizedPnLBigInt = 0n;
-      }
-
-      const unrealizedPnL = parseFloat(
-        ethers.formatUnits(unrealizedPnLBigInt, 18) // P&L is in 18 decimals (ALU precision)
+      // Get real-time unrealized P&L using unified mark price calculation
+      const unrealizedPnL = await getTotalRealTimeUnrealizedPnL(
+        this.contracts,
+        this.currentUser.address
       );
       // Portfolio value calculation fix: The contract incorrectly mixes decimal precisions
       // It adds collateral + realizedPnL + unrealizedPnL (but with mixed decimals)
       // We need to recalculate it correctly here using our auto-detected values
       const totalCollateralNum = parseFloat(totalCollateral);
-      const portfolioValue = totalCollateralNum + realizedPnL + unrealizedPnL;
+
+      // FIX: Avoid double-counting liquidation losses (same as in main portfolio display)
+      const currentPositions = await this.contracts.vault.getUserPositions(
+        this.currentUser.address
+      );
+      const hasActivePositionsCheck = currentPositions.length > 0;
+      const isLiquidatedAccountCheck =
+        !hasActivePositionsCheck && realizedPnL < 0;
+      const adjustedRealizedPnLForPortfolio = isLiquidatedAccountCheck
+        ? 0
+        : realizedPnL;
+
+      const portfolioValue =
+        totalCollateralNum + adjustedRealizedPnLForPortfolio + unrealizedPnL;
       const walletBalance = parseFloat(
         ethers.formatUnits(BigInt(balance.toString()), 6)
       );
@@ -4428,28 +4622,11 @@ ${colors.brightRed}└───────────────────�
             const positionValue = size * entryPrice;
             totalPositionValue += positionValue;
 
-            // Try to get current market price for P&L calculation
-            let currentPnL = 0;
-            try {
-              const bestBid = await this.contracts.orderBook.bestBid();
-              const bestAsk = await this.contracts.orderBook.bestAsk();
-              if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
-                const bidPrice = parseFloat(ethers.formatUnits(bestBid, 6));
-                const askPrice = parseFloat(ethers.formatUnits(bestAsk, 6));
-                const markPrice =
-                  !isNaN(bidPrice) &&
-                  !isNaN(askPrice) &&
-                  bidPrice > 0 &&
-                  askPrice > 0
-                    ? (bidPrice + askPrice) / 2
-                    : entryPrice; // Fallback to entry price if no market
-                const priceDiff = markPrice - entryPrice;
-                currentPnL =
-                  positionSize >= 0n ? priceDiff * size : -priceDiff * size;
-              }
-            } catch (priceError) {
-              // Use 0 if can't get prices
-            }
+            // Get current P&L from smart contract
+            const { pnl: currentPnL } = await getMarkPriceAndPnL(
+              this.contracts,
+              position
+            );
 
             const pnlColor = currentPnL >= 0 ? colors.green : colors.red;
             const pnlSign = currentPnL >= 0 ? "+" : "";
@@ -4617,6 +4794,118 @@ ${colors.brightRed}└───────────────────�
     );
   }
 
+  async viewLiquidationHistory() {
+    console.clear();
+    console.log(boxText("📊 LIQUIDATION HISTORY", colors.brightRed));
+
+    try {
+      // Get liquidation events for this user
+      const currentBlock = await this.contracts.vault.provider.getBlockNumber();
+      const fromBlock = Math.max(0, currentBlock - 100000); // Last ~100k blocks
+
+      // Get LiquidationExecuted events
+      const liquidationFilter =
+        this.contracts.vault.filters.LiquidationExecuted(
+          this.currentUser.address
+        );
+      const liquidationEvents = await this.contracts.vault.queryFilter(
+        liquidationFilter,
+        fromBlock
+      );
+
+      // Get MarginConfiscated events
+      const marginFilter = this.contracts.vault.filters.MarginConfiscated(
+        this.currentUser.address
+      );
+      const marginEvents = await this.contracts.vault.queryFilter(
+        marginFilter,
+        fromBlock
+      );
+
+      if (liquidationEvents.length === 0 && marginEvents.length === 0) {
+        console.log(
+          colorText("\n💫 No liquidation history found", colors.yellow)
+        );
+        await this.askQuestion(
+          colorText("\n📱 Press Enter to continue...", colors.dim)
+        );
+        return;
+      }
+
+      console.log(colorText("\n🔥 LIQUIDATION EVENTS:", colors.brightRed));
+      console.log(colorText("═".repeat(70), colors.cyan));
+
+      for (const event of liquidationEvents) {
+        const block = await event.getBlock();
+        const timestamp = new Date(block.timestamp * 1000);
+        const marketId = event.args.marketId;
+        const totalLoss = ethers.formatUnits(event.args.totalLoss, 6);
+        const remainingCollateral = ethers.formatUnits(
+          event.args.remainingCollateral,
+          6
+        );
+
+        console.log(
+          colorText(
+            `\n📅 Date: ${timestamp.toLocaleString()}`,
+            colors.brightYellow
+          )
+        );
+        console.log(
+          colorText(`🏦 Market: ${marketId.substring(0, 10)}...`, colors.dim)
+        );
+        console.log(
+          colorText(`💸 Total Loss: $${totalLoss} USDC`, colors.brightRed)
+        );
+        console.log(
+          colorText(
+            `💰 Remaining Collateral: $${remainingCollateral} USDC`,
+            colors.green
+          )
+        );
+      }
+
+      if (marginEvents.length > 0) {
+        console.log(
+          colorText("\n📊 MARGIN CONFISCATION DETAILS:", colors.cyan)
+        );
+        console.log(colorText("═".repeat(70), colors.cyan));
+
+        for (const event of marginEvents) {
+          const block = await event.getBlock();
+          const timestamp = new Date(block.timestamp * 1000);
+          const marginAmount = ethers.formatUnits(event.args.marginAmount, 6);
+          const penalty = ethers.formatUnits(event.args.penalty, 6);
+
+          console.log(
+            colorText(
+              `\n📅 Date: ${timestamp.toLocaleString()}`,
+              colors.brightYellow
+            )
+          );
+          console.log(
+            colorText(
+              `💸 Margin Confiscated: $${marginAmount} USDC`,
+              colors.red
+            )
+          );
+          console.log(
+            colorText(`🔥 Liquidation Penalty: $${penalty} USDC`, colors.red)
+          );
+        }
+      }
+    } catch (error) {
+      console.log(
+        colorText("⚠️ Error fetching liquidation history:", colors.red)
+      );
+      console.log(colorText(error.message, colors.dim));
+    }
+
+    await this.askQuestion(
+      colorText("\n📱 Press Enter to continue...", colors.dim)
+    );
+  }
+
   async viewOpenPositions() {
     console.clear();
     console.log(boxText("📊 OPEN POSITIONS OVERVIEW", colors.brightCyan));
@@ -4691,7 +4980,7 @@ ${colors.brightRed}└───────────────────�
         );
         console.log(
           colorText(
-            "│  Market    │   Side   │    Size     │ Entry Price │   Margin   │   Mark   │  P&L   │  Liq  │",
+            "│  Market    │   Side   │    Size     │ Av Entry Price │   Margin   │   Mark   │  P&L   │  Liq  │",
             colors.cyan
           )
         );
@@ -4733,47 +5022,11 @@ ${colors.brightRed}└───────────────────�
 
             totalMarginLocked += marginLocked;
 
-            // Get current mark price (simplified - would need oracle in real implementation)
-            const entryPriceNum = parseFloat(entryPrice);
-            let markPrice = entryPriceNum; // Fallback to entry price
-            try {
-              const bestBid = await this.contracts.orderBook.bestBid();
-              const bestAsk = await this.contracts.orderBook.bestAsk();
-              if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
-                const bidStr = formatPriceWithValidation(bestBid, 6, 4, false);
-                const askStr = formatPriceWithValidation(bestAsk, 6, 4, false);
-                const bidPrice = parseFloat(bidStr);
-                const askPrice = parseFloat(askStr);
-
-                // Check for valid prices (not NaN, ERROR, or ∞)
-                if (
-                  !isNaN(bidPrice) &&
-                  !isNaN(askPrice) &&
-                  bidStr !== "ERROR" &&
-                  askStr !== "ERROR" &&
-                  bidStr !== "∞" &&
-                  askStr !== "∞" &&
-                  bidPrice > 0 &&
-                  askPrice > 0
-                ) {
-                  markPrice = (bidPrice + askPrice) / 2;
-                } else {
-                  // Keep entry price as fallback
-                  console.log(
-                    "⚠️ No valid market price available, using entry price"
-                  );
-                }
-              }
-            } catch (priceError) {
-              // Use entry price as fallback
-            }
-
-            // Calculate unrealized P&L
-            const priceDiff = markPrice - entryPriceNum;
-            const positionPnL =
-              positionSize >= 0n
-                ? priceDiff * size // Long position
-                : -priceDiff * size; // Short position
+            // Get current mark price and P&L from smart contract
+            const { markPrice, pnl: positionPnL } = await getMarkPriceAndPnL(
+              this.contracts,
+              position
+            );
 
             totalUnrealizedPnL += positionPnL;
 
@@ -5024,14 +5277,14 @@ ${colors.brightRed}└───────────────────�
             const askPrice = parseFloat(
               formatPriceWithValidation(bestAsk, 6, 4, false)
             );
-            const markPrice =
-              !isNaN(bidPrice) &&
-              !isNaN(askPrice) &&
-              bidPrice > 0 &&
-              askPrice > 0
-                ? (bidPrice + askPrice) / 2
-                : parseFloat(entryPrice); // Fallback to entry price
             const spread = askPrice - bidPrice;
+
+            // Get unified mark price and P&L using our consistent approach
+            const { markPrice, pnl: unrealizedPnL } = await getMarkPriceAndPnL(
+              this.contracts,
+              position
+            );
+            const pnlPercent = (unrealizedPnL / marginLocked) * 100;
 
             console.log(
               colorText(
@@ -5057,12 +5310,6 @@ ${colors.brightRed}└───────────────────�
                 colors.dim
               )
             );
-
-            // Calculate P&L
-            const priceDiff = markPrice - parseFloat(entryPrice);
-            const unrealizedPnL =
-              positionSize >= 0n ? priceDiff * size : -priceDiff * size;
-            const pnlPercent = (unrealizedPnL / marginLocked) * 100;
 
             const pnlColor =
               unrealizedPnL >= 0 ? colors.brightGreen : colors.brightRed;

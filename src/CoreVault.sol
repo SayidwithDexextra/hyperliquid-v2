@@ -35,6 +35,19 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     uint256 public constant DECIMAL_SCALE = 1e12; // 10^(ALU_DECIMALS - USDC_DECIMALS)
     uint256 public constant TICK_PRECISION = 1e6; // Price ticks in USDC precision (6 decimals)
 
+    // ============ P&L CALCULATION STANDARDS ============
+    // Standard P&L Formula: (markPrice - entryPrice) * size / TICK_PRECISION
+    // - markPrice: 6 decimals (USDC precision)
+    // - entryPrice: 6 decimals (USDC precision)
+    // - size: 18 decimals (ALU token precision)
+    // - Result: 18 decimals (standard P&L precision)
+    //
+    // Liquidation Loss Formula: (priceUnit * size) / (DECIMAL_SCALE * TICK_PRECISION)  
+    // - Result: 6 decimals (USDC precision for collateral deduction)
+    // 
+    // Use standard P&L for: position tracking, portfolio analysis, margin health
+    // Use liquidation loss for: actual USDC amounts to confiscate from collateral
+
     // ============ State Variables ============
     IERC20 public immutable collateralToken;
     
@@ -219,11 +232,13 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 uint256 marginToConfiscate = positions[i].marginLocked;
                 uint256 entryPrice = positions[i].entryPrice;
                 
-                // Calculate trading loss
+                // Calculate trading loss for liquidation (USDC amount for collateral deduction)
+                // Note: This differs from standard P&L (18 decimals) as it calculates actual USDC loss
                 uint256 tradingLoss = 0;
                 if ((oldSize > 0 && executionPrice < entryPrice) || (oldSize < 0 && executionPrice > entryPrice)) {
-                    // Position is at a loss
+                    // Position is at a loss - calculate USDC amount to confiscate
                     uint256 lossPerUnit = oldSize > 0 ? (entryPrice - executionPrice) : (executionPrice - entryPrice);
+                    // Convert to USDC: (lossPerUnit_6dec * size_18dec) / (DECIMAL_SCALE_12dec * TICK_PRECISION_6dec) = 6 decimals
                     tradingLoss = (lossPerUnit * uint256(oldSize > 0 ? oldSize : -oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
                 }
                 
@@ -259,9 +274,12 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 // Calculate realized P&L for the liquidation
                 int256 realizedPnL = 0;
                 if (oldSize != 0) {
-                    // Calculate P&L: (execution_price - entry_price) * size_closed
+                    // Calculate P&L: (execution_price - entry_price) * original_position_size
                     int256 priceDiff = int256(executionPrice) - int256(entryPrice);
-                    realizedPnL = (priceDiff * sizeDelta) / int256(TICK_PRECISION);
+                    // FIX: Use oldSize (original position) to ensure correct sign for both long/short:
+                    // - Long liquidation: price falls → priceDiff negative, oldSize positive → negative loss ✓
+                    // - Short liquidation: price rises → priceDiff positive, oldSize negative → negative loss ✓
+                    realizedPnL = (priceDiff * oldSize) / int256(TICK_PRECISION);
                 }
                 
                 // Update position size directly without releasing margin
@@ -759,12 +777,14 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 uint256 entryPrice = positions[i].entryPrice;
                 uint256 markPrice = getMarkPrice(marketId);
 
-                // Calculate trading loss first
+                // Calculate trading loss for short liquidation (USDC amount for collateral deduction)
+                // Note: This differs from standard P&L tracking (18 decimals) as it calculates actual USDC loss
                 uint256 tradingLoss = 0;
                 if (markPrice > entryPrice) {
                     // Short position loss: (current price - entry price) * position size
                     uint256 lossPerUnit = markPrice - entryPrice;
-                    tradingLoss = (lossPerUnit * uint256(-oldSize)) / (DECIMAL_SCALE * TICK_PRECISION); // Convert to USDC decimals
+                    // Convert to USDC: (lossPerUnit_6dec * size_18dec) / (DECIMAL_SCALE_12dec * TICK_PRECISION_6dec) = 6 decimals
+                    tradingLoss = (lossPerUnit * uint256(-oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
                 }
                 
                 // Apply liquidation penalty on top of trading loss
@@ -833,12 +853,14 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 uint256 entryPrice = positions[i].entryPrice;
                 uint256 markPrice = getMarkPrice(marketId);
 
-                // Calculate trading loss first
+                // Calculate trading loss for long liquidation (USDC amount for collateral deduction)
+                // Note: This differs from standard P&L tracking (18 decimals) as it calculates actual USDC loss
                 uint256 tradingLoss = 0;
                 if (markPrice < entryPrice) {
                     // Long position loss: (entry price - current price) * position size
                     uint256 lossPerUnit = entryPrice - markPrice;
-                    tradingLoss = (lossPerUnit * uint256(oldSize)) / (DECIMAL_SCALE * TICK_PRECISION); // Convert to USDC decimals
+                    // Convert to USDC: (lossPerUnit_6dec * size_18dec) / (DECIMAL_SCALE_12dec * TICK_PRECISION_6dec) = 6 decimals
+                    tradingLoss = (lossPerUnit * uint256(oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
                 }
                 
                 // Apply liquidation penalty on top of trading loss
