@@ -389,7 +389,7 @@ async function main() {
       console.log("     Side: SELL (limit order)");
 
       const user2 = signers[2]; // User2 is the 3rd signer
-      const user2Price = ethers.parseUnits("2.5", 6); // $2.50 in USDC (6 decimals)
+      const user2Price = ethers.parseUnits("5", 6); // $2.50 in USDC (6 decimals)
       const user2Amount = ethers.parseUnits("20", 18); // 20 ALU (18 decimals)
 
       const user2OrderTx = await orderBook.connect(user2).placeMarginLimitOrder(

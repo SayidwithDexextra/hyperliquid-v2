@@ -31,6 +31,10 @@ interface ICoreVault {
         bool isMarginHealthy
     );
     function getMarginUtilization(address user) external view returns (uint256 utilizationBps);
+    
+    // Enhanced liquidation functions
+    function confiscateAvailableCollateralForGapLoss(address user, uint256 gapLossAmount) external;
+    function socializeLoss(bytes32 marketId, uint256 lossAmount, address liquidatedUser) external;
 }
 
 /**
@@ -65,6 +69,16 @@ contract OrderBook {
         uint256 firstOrderId; // Head of linked list
         uint256 lastOrderId;  // Tail of linked list
         bool exists;
+    }
+    
+    // Liquidation execution result structure
+    struct LiquidationExecutionResult {
+        bool success;                    // Whether liquidation was successful
+        uint256 filledAmount;           // Amount that was actually filled
+        uint256 remainingAmount;        // Amount that could not be filled
+        uint256 averageExecutionPrice;  // Volume-weighted average execution price
+        uint256 worstExecutionPrice;    // Worst price among all executions
+        uint256 totalExecutions;        // Number of price levels executed at
     }
 
     // State variables
@@ -119,6 +133,12 @@ contract OrderBook {
     address private liquidationTarget;
     // True when liquidation market order is a BUY to close a short; false when SELL to close a long
     bool private liquidationClosesShort;
+    
+    // Enhanced liquidation execution tracking
+    uint256 private liquidationExecutionTotalVolume;    // Total volume executed
+    uint256 private liquidationExecutionTotalValue;     // Total value (price * volume) executed
+    uint256 private liquidationWorstPrice;              // Worst execution price achieved
+    uint256 private liquidationExecutionCount;          // Number of executions
     
     /**
      * @dev Create a market buy order for liquidation (on behalf of target user)
@@ -296,22 +316,38 @@ contract OrderBook {
                 // This section tries to liquidate via market order matching first
                 
                 // Try market order liquidation first
+                LiquidationExecutionResult memory liquidationResult;
                 bool marketOrderSuccess = false;
                 if (size < 0) {
                     // Short liquidation: Create market BUY order
                     // DEBUG: PAST - Attempting short liquidation via market buy order
                     emit LiquidationMarketOrderAttempt(trader, uint256(-size), true, markPrice);
-                    marketOrderSuccess = _executeLiquidationMarketOrder(trader, uint256(-size), true, markPrice);
+                    liquidationResult = _executeLiquidationMarketOrder(trader, uint256(-size), true, markPrice);
+                    marketOrderSuccess = liquidationResult.success;
                 } else {
                     // Long liquidation: Create market SELL order
                     // DEBUG: PAST - Attempting long liquidation via market sell order
                     emit LiquidationMarketOrderAttempt(trader, uint256(size), false, markPrice);
-                    marketOrderSuccess = _executeLiquidationMarketOrder(trader, uint256(size), false, markPrice);
+                    liquidationResult = _executeLiquidationMarketOrder(trader, uint256(size), false, markPrice);
+                    marketOrderSuccess = liquidationResult.success;
                 }
                 
                 // DEBUG: PAST - Market order liquidation attempt completed
                 // This section reports the result of the market order liquidation
                 emit LiquidationMarketOrderResult(trader, marketOrderSuccess, marketOrderSuccess ? "Market order filled" : "No liquidity available");
+                
+                // ============ ENHANCED THREE-LAYER LIQUIDATION DEFENSE ============
+                
+                if (marketOrderSuccess && liquidationResult.filledAmount > 0) {
+                    // Market order succeeded - check for gap loss and apply three-layer protection
+                    _processEnhancedLiquidationWithGapProtection(
+                        trader,
+                        size,
+                        markPrice,
+                        liquidationResult
+                    );
+                    liquidationCompleted = true;
+                }
                 
                 // If market order failed, use socialized loss as backup
                 if (!marketOrderSuccess) {
@@ -396,25 +432,33 @@ contract OrderBook {
      * @param amount Amount to trade
      * @param isBuy True for buy order (covering short), false for sell order (closing long)
      * @param markPrice Current mark price for slippage calculation
-     * @return success True if market order was successfully filled
+     * @return result Detailed execution results including success status and execution prices
      */
     function _executeLiquidationMarketOrder(
         address trader,
         uint256 amount,
         bool isBuy,
         uint256 markPrice
-    ) internal returns (bool success) {
+    ) internal returns (LiquidationExecutionResult memory result) {
+        // Initialize result
+        result.success = false;
+        result.filledAmount = 0;
+        result.remainingAmount = amount;
+        result.averageExecutionPrice = 0;
+        result.worstExecutionPrice = 0;
+        result.totalExecutions = 0;
+        
         // Validate inputs
         if (amount == 0 || markPrice == 0) {
-            return false;
+            return result;
         }
         
         // Check if there's any liquidity available
         if (isBuy && bestAsk == 0) {
-            return false; // No asks available for buy order
+            return result; // No asks available for buy order
         }
         if (!isBuy && bestBid == 0) {
-            return false; // No bids available for sell order
+            return result; // No bids available for sell order
         }
         
         // Calculate maximum acceptable slippage (15% from mark price for liquidations)
@@ -432,6 +476,12 @@ contract OrderBook {
                     (markPrice * (10000 - liquidationSlippageBps)) / 10000 : 0;
         }
         
+        // Initialize execution tracking
+        liquidationExecutionTotalVolume = 0;
+        liquidationExecutionTotalValue = 0;
+        liquidationWorstPrice = isBuy ? 0 : type(uint256).max; // Best possible starting point
+        liquidationExecutionCount = 0;
+        
         // Create liquidation order - still use OrderBook as order owner,
         // but we will attribute margin updates to the real trader below
         Order memory liquidationOrder = Order({
@@ -446,24 +496,168 @@ contract OrderBook {
             isMarginOrder: true
         });
         
-        uint256 remainingAmount = amount; // Default to no fill
+        uint256 remainingAmount = amount;
         
         // Execute the matching - these functions are designed to not revert
         // Ensure liquidation mode so margin is updated for the real trader
         liquidationMode = true;
         liquidationTarget = trader;
         liquidationClosesShort = isBuy; // buy to close short, sell to close long
+        
         if (isBuy) {
             remainingAmount = _matchBuyOrderWithSlippage(liquidationOrder, amount, maxPrice);
         } else {
             remainingAmount = _matchSellOrderWithSlippage(liquidationOrder, amount, minPrice);
         }
+        
         liquidationMode = false;
         liquidationTarget = address(0);
         
-        // Return true if order was filled at least 50% (more lenient for liquidations)
-        uint256 filledAmount = amount - remainingAmount;
-        return filledAmount >= (amount * 50) / 100;
+        // Calculate results
+        result.remainingAmount = remainingAmount;
+        result.filledAmount = amount - remainingAmount;
+        
+        // Calculate average execution price if any execution happened
+        if (liquidationExecutionTotalVolume > 0) {
+            result.averageExecutionPrice = liquidationExecutionTotalValue / liquidationExecutionTotalVolume;
+            result.worstExecutionPrice = liquidationWorstPrice;
+            result.totalExecutions = liquidationExecutionCount;
+            
+            // Success if order was filled at least 50% (more lenient for liquidations)
+            result.success = result.filledAmount >= (amount * 50) / 100;
+        }
+        
+        return result;
+    }
+    
+    /**
+     * @dev Process enhanced three-layer liquidation with gap protection
+     * @param trader Address of the trader being liquidated
+     * @param positionSize Size of the position being liquidated (positive for long, negative for short)
+     * @param liquidationTriggerPrice The intended liquidation price (mark price)
+     * @param executionResult The actual execution results from market order
+     */
+    function _processEnhancedLiquidationWithGapProtection(
+        address trader,
+        int256 positionSize,
+        uint256 liquidationTriggerPrice,
+        LiquidationExecutionResult memory executionResult
+    ) internal {
+        // Calculate gap loss: difference between intended liquidation price and worst execution price
+        uint256 gapLoss = 0;
+        uint256 layer1LockedMargin = 0;
+        uint256 layer2AvailableCollateral = 0;
+        uint256 layer3SocializedLoss = 0;
+        
+        // Calculate gap loss based on position type and execution
+        if (executionResult.worstExecutionPrice != liquidationTriggerPrice) {
+            uint256 priceGap;
+            
+            if (positionSize > 0) {
+                // Long position liquidation (selling at lower price is bad)
+                if (executionResult.worstExecutionPrice < liquidationTriggerPrice) {
+                    priceGap = liquidationTriggerPrice - executionResult.worstExecutionPrice;
+                    gapLoss = (priceGap * uint256(positionSize)) / PRICE_SCALE;
+                }
+            } else {
+                // Short position liquidation (buying at higher price is bad)
+                if (executionResult.worstExecutionPrice > liquidationTriggerPrice) {
+                    priceGap = executionResult.worstExecutionPrice - liquidationTriggerPrice;
+                    gapLoss = (priceGap * uint256(-positionSize)) / PRICE_SCALE;
+                }
+            }
+            
+            if (gapLoss > 0) {
+                emit LiquidationMarketGapDetected(
+                    trader,
+                    liquidationTriggerPrice,
+                    executionResult.worstExecutionPrice,
+                    positionSize,
+                    gapLoss
+                );
+            }
+        }
+        
+        // Get user's position and collateral information
+        try vault.getUnifiedMarginSummary(trader) returns (
+            uint256 totalCollateral,
+            uint256 marginUsed,
+            uint256 marginReserved,
+            uint256 availableMargin,
+            int256 realizedPnL,
+            int256 unrealizedPnL,
+            uint256 totalMarginCommitted,
+            bool isMarginHealthy
+        ) {
+            // Layer 1: Normal liquidation processing (handled by vault's updatePositionWithLiquidation)
+            // This is already done by the standard liquidation mechanism
+            layer1LockedMargin = marginUsed; // This gets confiscated normally
+            
+            // Layer 2: Use available collateral to cover gap loss
+            if (gapLoss > 0 && availableMargin > 0) {
+                uint256 availableForGapCoverage = availableMargin;
+                uint256 gapCoveredByAvailable = gapLoss < availableForGapCoverage ? gapLoss : availableForGapCoverage;
+                
+                if (gapCoveredByAvailable > 0) {
+                    // Deduct from user's available collateral via vault
+                    try vault.confiscateAvailableCollateralForGapLoss(trader, gapCoveredByAvailable) {
+                        layer2AvailableCollateral = gapCoveredByAvailable;
+                        gapLoss -= gapCoveredByAvailable;
+                        
+                        emit LiquidationAvailableCollateralUsed(
+                            trader,
+                            gapCoveredByAvailable,
+                            availableMargin - gapCoveredByAvailable,
+                            gapCoveredByAvailable
+                        );
+                    } catch {
+                        // Available collateral confiscation failed - proceed to socialization
+                    }
+                }
+            }
+            
+            // Layer 3: Socialize any remaining gap loss
+            if (gapLoss > 0) {
+                layer3SocializedLoss = gapLoss;
+                
+                emit LiquidationRequiresSocialization(
+                    trader,
+                    gapLoss,
+                    totalCollateral
+                );
+                
+                // Trigger socialized loss mechanism
+                try vault.socializeLoss(marketId, gapLoss, trader) {
+                    // Socialized loss applied successfully
+                } catch {
+                    // Socialized loss failed - system is in critical state
+                    // This should be extremely rare
+                }
+            }
+            
+        } catch {
+            // Failed to get user's margin summary - proceed with basic liquidation
+            // Gap loss will be entirely socialized
+            if (gapLoss > 0) {
+                layer3SocializedLoss = gapLoss;
+                emit LiquidationRequiresSocialization(trader, gapLoss, 0);
+                
+                try vault.socializeLoss(marketId, gapLoss, trader) {
+                    // Socialized loss applied
+                } catch {
+                    // Critical system failure
+                }
+            }
+        }
+        
+        // Emit comprehensive liquidation breakdown
+        emit LiquidationLayerBreakdown(
+            trader,
+            layer1LockedMargin,
+            layer2AvailableCollateral,
+            layer3SocializedLoss,
+            layer1LockedMargin + layer2AvailableCollateral + layer3SocializedLoss
+        );
     }
     
     /**
@@ -689,6 +883,66 @@ contract OrderBook {
     event LiquidationIndexUpdated(uint256 oldIndex, uint256 newIndex, uint256 tradersLength);
     event LiquidationCheckFinished(uint256 tradersChecked, uint256 liquidationsTriggered, uint256 nextStartIndex);
     event LiquidationMarginConfiscated(address indexed trader, uint256 marginAmount, uint256 penalty, address indexed liquidator);
+    
+    // ============ Enhanced Three-Layer Liquidation Events ============
+    
+    /**
+     * @dev Emitted when a market gap is detected during liquidation execution
+     * @param trader Address of the trader being liquidated
+     * @param liquidationPrice The intended liquidation price (mark price)
+     * @param actualExecutionPrice The actual worst execution price achieved
+     * @param positionSize The size of the position being liquidated
+     * @param gapLoss The additional loss due to market gap (execution_price - liquidation_price) * size
+     */
+    event LiquidationMarketGapDetected(
+        address indexed trader,
+        uint256 liquidationPrice,
+        uint256 actualExecutionPrice,
+        int256 positionSize,
+        uint256 gapLoss
+    );
+    
+    /**
+     * @dev Emitted when user's available collateral is used to cover gap losses
+     * @param trader Address of the trader
+     * @param availableCollateralUsed Amount of available collateral used to cover gap loss
+     * @param remainingAvailableCollateral User's remaining available collateral
+     * @param totalGapLossCovered Total gap loss covered so far
+     */
+    event LiquidationAvailableCollateralUsed(
+        address indexed trader,
+        uint256 availableCollateralUsed,
+        uint256 remainingAvailableCollateral,
+        uint256 totalGapLossCovered
+    );
+    
+    /**
+     * @dev Emitted when there's remaining shortfall that needs to be socialized
+     * @param trader Address of the liquidated trader
+     * @param remainingShortfall Amount that needs to be socialized across all users
+     * @param userCollateralExhausted Total user collateral that was exhausted
+     */
+    event LiquidationRequiresSocialization(
+        address indexed trader,
+        uint256 remainingShortfall,
+        uint256 userCollateralExhausted
+    );
+    
+    /**
+     * @dev Comprehensive liquidation summary showing all three layers
+     * @param trader Address of the trader
+     * @param layer1LockedMargin Amount covered by locked margin (standard)
+     * @param layer2AvailableCollateral Amount covered by available collateral (new)
+     * @param layer3SocializedLoss Amount that was socialized (last resort)
+     * @param totalLoss Total loss from liquidation
+     */
+    event LiquidationLayerBreakdown(
+        address indexed trader,
+        uint256 layer1LockedMargin,
+        uint256 layer2AvailableCollateral,
+        uint256 layer3SocializedLoss,
+        uint256 totalLoss
+    );
 
     // Modifiers
     modifier validOrder(uint256 price, uint256 amount) {
@@ -1114,6 +1368,18 @@ contract OrderBook {
                 _executeTrade(buyOrder.trader, sellOrder.trader, currentPrice, matchAmount, buyOrder.isMarginOrder, sellOrder.isMarginOrder);
                 emit OrderMatched(buyOrder.trader, sellOrder.trader, currentPrice, matchAmount);
                 
+                // Track execution prices for liquidation if in liquidation mode
+                if (liquidationMode) {
+                    liquidationExecutionTotalVolume += matchAmount;
+                    liquidationExecutionTotalValue += currentPrice * matchAmount;
+                    liquidationExecutionCount++;
+                    
+                    // Update worst price (highest price for buy orders in liquidation)
+                    if (liquidationWorstPrice == 0 || currentPrice > liquidationWorstPrice) {
+                        liquidationWorstPrice = currentPrice;
+                    }
+                }
+                
                 remainingAmount -= matchAmount;
                 sellOrder.amount -= matchAmount;
                 level.totalAmount -= matchAmount;
@@ -1201,6 +1467,18 @@ contract OrderBook {
                 // Execute the trade
                 _executeTrade(buyOrder.trader, sellOrder.trader, currentPrice, matchAmount, buyOrder.isMarginOrder, sellOrder.isMarginOrder);
                 emit OrderMatched(buyOrder.trader, sellOrder.trader, currentPrice, matchAmount);
+                
+                // Track execution prices for liquidation if in liquidation mode
+                if (liquidationMode) {
+                    liquidationExecutionTotalVolume += matchAmount;
+                    liquidationExecutionTotalValue += currentPrice * matchAmount;
+                    liquidationExecutionCount++;
+                    
+                    // Update worst price (lowest price for sell orders in liquidation)
+                    if (liquidationWorstPrice == type(uint256).max || currentPrice < liquidationWorstPrice) {
+                        liquidationWorstPrice = currentPrice;
+                    }
+                }
                 
                 remainingAmount -= matchAmount;
                 buyOrder.amount -= matchAmount;

@@ -44,6 +44,10 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     mapping(address => PositionManager.Position[]) public userPositions;
     mapping(address => VaultAnalytics.PendingOrder[]) public userPendingOrders;
     mapping(address => bytes32[]) public userMarketIds;
+    
+    // User tracking for socialized loss distribution
+    address[] public allKnownUsers;
+    mapping(address => bool) public isKnownUser;
     // REMOVED: userMarginByMarket - margin now tracked exclusively in Position structs
     
     // Market management
@@ -72,6 +76,10 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     event MarginConfiscated(address indexed user, uint256 marginAmount, uint256 totalLoss, uint256 penalty, address indexed liquidator);
     event PositionUpdated(address indexed user, bytes32 indexed marketId, int256 oldSize, int256 newSize, uint256 entryPrice, uint256 marginLocked);
     event SocializedLossApplied(bytes32 indexed marketId, uint256 lossAmount, address indexed liquidatedUser);
+    
+    // Enhanced liquidation events
+    event AvailableCollateralConfiscated(address indexed user, uint256 amount, uint256 remainingAvailable);
+    event UserLossSocialized(address indexed user, uint256 lossAmount, uint256 remainingCollateral);
 
     // ============ Constructor ============
     constructor(address _collateralToken, address _admin) {
@@ -87,6 +95,9 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         collateralToken.safeTransferFrom(msg.sender, address(this), amount);
         userCollateral[msg.sender] += amount;
         totalCollateralDeposited += amount;
+        
+        // Track user for socialized loss distribution
+        _ensureUserTracked(msg.sender);
         
         emit CollateralDeposited(msg.sender, amount);
     }
@@ -881,7 +892,133 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         // no long position found; ignore
     }
 
+    // ============ Enhanced Liquidation Functions ============
+    
+    /**
+     * @dev Confiscate user's available collateral to cover gap losses during liquidation
+     * @param user User address
+     * @param gapLossAmount Amount of gap loss to cover from available collateral
+     */
+    function confiscateAvailableCollateralForGapLoss(
+        address user, 
+        uint256 gapLossAmount
+    ) external onlyRole(ORDERBOOK_ROLE) {
+        require(gapLossAmount > 0, "Gap loss amount must be positive");
+        
+        uint256 availableCollateral = getAvailableCollateral(user);
+        require(availableCollateral >= gapLossAmount, "Insufficient available collateral for gap coverage");
+        
+        // Deduct from user's collateral
+        userCollateral[user] -= gapLossAmount;
+        
+        // Emit event for transparency
+        emit AvailableCollateralConfiscated(user, gapLossAmount, availableCollateral - gapLossAmount);
+    }
+    
+    /**
+     * @dev Socialize losses across profitable positions when user collateral is exhausted
+     * @param marketId Market where the loss occurred
+     * @param lossAmount Amount to socialize across users
+     * @param liquidatedUser The user who was liquidated (for event tracking)
+     */
+    function socializeLoss(
+        bytes32 marketId,
+        uint256 lossAmount,
+        address liquidatedUser
+    ) external onlyRole(ORDERBOOK_ROLE) {
+        require(lossAmount > 0, "Loss amount must be positive");
+        
+        // For now, implement a simple socialization mechanism
+        // In production, this would be more sophisticated with profit-based distribution
+        
+        // Get all users who have positions in this market
+        address[] memory usersWithPositions = _getUsersWithPositionsInMarket(marketId);
+        uint256 totalUsersToSocialize = 0;
+        
+        // Count users with available collateral to share the loss
+        for (uint256 i = 0; i < usersWithPositions.length; i++) {
+            if (usersWithPositions[i] != liquidatedUser && userCollateral[usersWithPositions[i]] > 0) {
+                totalUsersToSocialize++;
+            }
+        }
+        
+        if (totalUsersToSocialize == 0) {
+            // No users to socialize to - loss becomes bad debt
+            emit SocializedLossApplied(marketId, lossAmount, liquidatedUser);
+            return;
+        }
+        
+        // Simple equal distribution for now
+        uint256 lossPerUser = lossAmount / totalUsersToSocialize;
+        uint256 remainingLoss = lossAmount;
+        
+        for (uint256 i = 0; i < usersWithPositions.length && remainingLoss > 0; i++) {
+            address user = usersWithPositions[i];
+            if (user != liquidatedUser && userCollateral[user] > 0) {
+                uint256 userLoss = remainingLoss < lossPerUser ? remainingLoss : lossPerUser;
+                
+                // Cap loss at user's available collateral
+                if (userLoss > userCollateral[user]) {
+                    userLoss = userCollateral[user];
+                }
+                
+                if (userLoss > 0) {
+                    userCollateral[user] -= userLoss;
+                    remainingLoss -= userLoss;
+                    
+                    emit UserLossSocialized(user, userLoss, userCollateral[user]);
+                }
+            }
+        }
+        
+        emit SocializedLossApplied(marketId, lossAmount - remainingLoss, liquidatedUser);
+    }
+    
+    /**
+     * @dev Get all users who have positions in a specific market
+     * @param marketId Market ID to check
+     * @return users Array of user addresses with positions in the market
+     */
+    function _getUsersWithPositionsInMarket(bytes32 marketId) internal view returns (address[] memory) {
+        // Create a dynamic array to hold users with positions
+        address[] memory tempUsers = new address[](allKnownUsers.length);
+        uint256 count = 0;
+        
+        for (uint256 i = 0; i < allKnownUsers.length; i++) {
+            address user = allKnownUsers[i];
+            PositionManager.Position[] storage positions = userPositions[user];
+            
+            // Check if user has any position in this market
+            for (uint256 j = 0; j < positions.length; j++) {
+                if (positions[j].marketId == marketId && positions[j].size != 0) {
+                    tempUsers[count] = user;
+                    count++;
+                    break; // Found position, move to next user
+                }
+            }
+        }
+        
+        // Create correctly sized array
+        address[] memory usersWithPositions = new address[](count);
+        for (uint256 i = 0; i < count; i++) {
+            usersWithPositions[i] = tempUsers[i];
+        }
+        
+        return usersWithPositions;
+    }
+
     // ============ Internal Helper Functions ============
+    
+    /**
+     * @dev Ensure user is tracked in allKnownUsers array for socialized loss distribution
+     * @param user User address to track
+     */
+    function _ensureUserTracked(address user) internal {
+        if (!isKnownUser[user]) {
+            allKnownUsers.push(user);
+            isKnownUser[user] = true;
+        }
+    }
     
     /**
      * @dev Remove market ID from user's market list (helper for position closure)
