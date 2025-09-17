@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "./OrderBook.sol";
-import "./CentralizedVault.sol";
+import "./CoreVault.sol";
 
 // UMA Oracle interface
 interface IOptimisticOracleV3 {
@@ -32,7 +32,7 @@ interface IPriceOracle {
 contract FuturesMarketFactory {
     // ============ State Variables ============
     
-    CentralizedVault public immutable vault;
+    CoreVault public immutable vault;
     address public admin;
     address public feeRecipient;
     
@@ -144,7 +144,7 @@ contract FuturesMarketFactory {
         require(_admin != address(0), "FuturesMarketFactory: admin cannot be zero address");
         require(_feeRecipient != address(0), "FuturesMarketFactory: fee recipient cannot be zero address");
         
-        vault = CentralizedVault(_vault);
+        vault = CoreVault(_vault);
         admin = _admin;
         feeRecipient = _feeRecipient;
     }

@@ -311,32 +311,6 @@ function validatePriceAccuracy(originalPrice, formattedPrice, decimals = 6) {
   }
 }
 
-// Helper function to safely calculate mark price
-function calculateSafeMarkPrice(bestBid, bestAsk, fallbackPrice, decimals = 6) {
-  try {
-    // Handle BigInt inputs
-    const bidValue =
-      typeof bestBid === "bigint"
-        ? Number(bestBid) / Math.pow(10, decimals)
-        : 0;
-    const askValue =
-      typeof bestAsk === "bigint"
-        ? Number(bestAsk) / Math.pow(10, decimals)
-        : 0;
-
-    // Check if we have valid market prices
-    if (bidValue > 0 && askValue > 0 && !isNaN(bidValue) && !isNaN(askValue)) {
-      return (bidValue + askValue) / 2;
-    }
-
-    // Return fallback price if no valid market
-    return typeof fallbackPrice === "number" ? fallbackPrice : 0;
-  } catch (error) {
-    console.error("Error calculating mark price:", error);
-    return typeof fallbackPrice === "number" ? fallbackPrice : 0;
-  }
-}
-
 function formatPriceWithValidation(
   price,
   decimals = 6,
@@ -424,7 +398,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
 
     try {
       this.contracts.mockUSDC = await getContract("MOCK_USDC");
-      this.contracts.vault = await getContract("CENTRALIZED_VAULT");
+      this.contracts.vault = await getContract("CORE_VAULT");
       this.contracts.orderBook = await getContract("ALUMINUM_ORDERBOOK");
       this.contracts.router = await getContract("TRADING_ROUTER");
       this.contracts.factory = await getContract("FUTURES_MARKET_FACTORY");
@@ -2585,15 +2559,10 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
               const bestBid = await this.contracts.orderBook.bestBid();
               const bestAsk = await this.contracts.orderBook.bestAsk();
               if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
-                const bidPrice = parseFloat(ethers.formatUnits(bestBid, 6));
-                const askPrice = parseFloat(ethers.formatUnits(bestAsk, 6));
                 const markPrice =
-                  !isNaN(bidPrice) &&
-                  !isNaN(askPrice) &&
-                  bidPrice > 0 &&
-                  askPrice > 0
-                    ? (bidPrice + askPrice) / 2
-                    : entryPrice; // Fallback to entry price if no market
+                  (parseFloat(ethers.formatUnits(bestBid, 6)) +
+                    parseFloat(ethers.formatUnits(bestAsk, 6))) /
+                  2;
                 const priceDiff = markPrice - entryPrice;
                 currentPnL =
                   positionSize >= 0n ? priceDiff * size : -priceDiff * size;
@@ -2891,29 +2860,12 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
               const bestBid = await this.contracts.orderBook.bestBid();
               const bestAsk = await this.contracts.orderBook.bestAsk();
               if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
-                const bidStr = formatPriceWithValidation(bestBid, 6, 4, false);
-                const askStr = formatPriceWithValidation(bestAsk, 6, 4, false);
-                const bidPrice = parseFloat(bidStr);
-                const askPrice = parseFloat(askStr);
-
-                // Check for valid prices (not NaN, ERROR, or ∞)
-                if (
-                  !isNaN(bidPrice) &&
-                  !isNaN(askPrice) &&
-                  bidStr !== "ERROR" &&
-                  askStr !== "ERROR" &&
-                  bidStr !== "∞" &&
-                  askStr !== "∞" &&
-                  bidPrice > 0 &&
-                  askPrice > 0
-                ) {
-                  markPrice = (bidPrice + askPrice) / 2;
-                } else {
-                  // Keep entry price as fallback
-                  console.log(
-                    "⚠️ No valid market price available, using entry price"
-                  );
-                }
+                markPrice =
+                  (parseFloat(formatPriceWithValidation(bestBid, 6, 4, false)) +
+                    parseFloat(
+                      formatPriceWithValidation(bestAsk, 6, 4, false)
+                    )) /
+                  2;
               }
             } catch (priceError) {
               // Use entry price as fallback
@@ -3150,13 +3102,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             const askPrice = parseFloat(
               formatPriceWithValidation(bestAsk, 6, 4, false)
             );
-            const markPrice =
-              !isNaN(bidPrice) &&
-              !isNaN(askPrice) &&
-              bidPrice > 0 &&
-              askPrice > 0
-                ? (bidPrice + askPrice) / 2
-                : parseFloat(entryPrice); // Fallback to entry price
+            const markPrice = (bidPrice + askPrice) / 2;
             const spread = askPrice - bidPrice;
 
             console.log(

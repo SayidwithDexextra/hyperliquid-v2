@@ -2558,7 +2558,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             try {
               const bestBid = await this.contracts.orderBook.bestBid();
               const bestAsk = await this.contracts.orderBook.bestAsk();
-              if (bestBid > 0 && bestAsk > 0) {
+              if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
                 const markPrice =
                   (parseFloat(ethers.formatUnits(bestBid, 6)) +
                     parseFloat(ethers.formatUnits(bestAsk, 6))) /
@@ -2859,7 +2859,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             try {
               const bestBid = await this.contracts.orderBook.bestBid();
               const bestAsk = await this.contracts.orderBook.bestAsk();
-              if (bestBid > 0 && bestAsk > 0) {
+              if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
                 markPrice =
                   (parseFloat(formatPriceWithValidation(bestBid, 6, 4, false)) +
                     parseFloat(

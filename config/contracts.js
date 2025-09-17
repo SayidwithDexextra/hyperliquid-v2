@@ -15,6 +15,11 @@
 //   2. Update CONTRACT_ADDRESSES below
 //   3. All scripts automatically use new addresses
 //
+// Ensure Node-run scripts connect to the running Hardhat node (localhost)
+// This avoids ABI mismatches caused by connecting to the in-process "hardhat" network
+if (!process.env.HARDHAT_NETWORK) {
+  process.env.HARDHAT_NETWORK = "localhost";
+}
 const { ethers } = require("hardhat");
 
 // 📋 CONTRACT ADDRESSES - PRODUCTION MARGIN RELEASE DEPLOYMENT
@@ -50,24 +55,24 @@ const { ethers } = require("hardhat");
 //   ✅ Gas efficient - updates happen in-place
 //
 const CONTRACT_ADDRESSES = {
-  // Core contracts - PRODUCTION MARGIN RELEASE DEPLOYMENT
-  TRADING_ROUTER: "0xfbC22278A96299D91d41C453234d97b4F5Eb9B2d",
-  CENTRALIZED_VAULT: "0xD84379CEae14AA33C123Af12424A37803F885889",
-  FUTURES_MARKET_FACTORY: "0x2B0d36FACD61B71CC05ab8F3D2355ec3631C0dd5",
+  // Core contracts - MODULAR V2 DEPLOYMENT
+  TRADING_ROUTER: "0x4b6aB5F819A515382B0dEB6935D793817bB4af28",
+  CORE_VAULT: "0xe8D2A1E88c91DCd5433208d4152Cc4F399a7e91d", // Updated from CentralizedVault
+  FUTURES_MARKET_FACTORY: "0x18E317A7D70d8fBf8e6E893616b52390EbBdb629",
 
   // Market-specific contracts (populated during deployment)
-  ORDERBOOK: "0xaE4a7d39A9A09545d3e2542d75e0e64A63df9E59", // BTC-USD market
+  ORDERBOOK: "0xd43F5E24C6b2edc1dFDE8548cDdaBeFFA6eCc822", // BTC-USD market
   BTC_ORDERBOOK: "0x413b1AfCa96a3df5A686d8BFBF93d30688a7f7D9",
-  ALUMINUM_ORDERBOOK: "0xaE4a7d39A9A09545d3e2542d75e0e64A63df9E59", // Temporary - using same as BTC
+  ALUMINUM_ORDERBOOK: "0xd43F5E24C6b2edc1dFDE8548cDdaBeFFA6eCc822", // Temporary - using same as BTC
 
   // Mock contracts
-  MOCK_USDC: "0xBEc49fA140aCaA83533fB00A2BB19bDdd0290f25",
+  MOCK_USDC: "0xf953b3A269d80e3eB0F2947630Da976B896A8C5b",
 };
 
-// 📋 CONTRACT NAMES - Maps to hardhat artifacts
+// 📋 CONTRACT NAMES - Maps to hardhat artifacts (MODULAR V2)
 const CONTRACT_NAMES = {
   TRADING_ROUTER: "TradingRouter",
-  CENTRALIZED_VAULT: "CentralizedVault",
+  CORE_VAULT: "CoreVault", // Updated from CentralizedVault
   FUTURES_MARKET_FACTORY: "FuturesMarketFactory",
   ORDERBOOK: "OrderBook",
   BTC_ORDERBOOK: "OrderBook",
@@ -97,9 +102,9 @@ const MARKET_INFO = {
   ALUMINUM: {
     symbol: "ALU-USD",
     marketId:
-      "0x7c17d3052a0f2728087b3dcbd87e9fe522e1beec898038b2d887af77b23d610f",
+      "0xf872921aa920dfbd1eafc1d283c61ff9634f7c0af770c23ab4495bd2612b56b1",
     name: "Aluminum Futures",
-    orderBook: "0x3fA4E6e03Fbd434A577387924aF39efd3b4b50F2",
+    orderBook: "0x90625ecD89311Bc52223aeCa43a365de7BD1aDEF",
     leverageEnabled: false,
     maxLeverage: "1x",
     marginRequirement: "100%",
@@ -132,9 +137,9 @@ const NETWORK_CONFIG = {
   // Add more networks as needed
 };
 
-// 🔒 ROLE DEFINITIONS - For authorization management
+// 🔒 ROLE DEFINITIONS - For authorization management (MODULAR V2)
 const ROLES = {
-  // CentralizedVault roles
+  // CoreVault roles (updated from CentralizedVault)
   ORDERBOOK_ROLE: ethers.keccak256(ethers.toUtf8Bytes("ORDERBOOK_ROLE")),
   SETTLEMENT_ROLE: ethers.keccak256(ethers.toUtf8Bytes("SETTLEMENT_ROLE")),
   FACTORY_ROLE: ethers.keccak256(ethers.toUtf8Bytes("FACTORY_ROLE")),
@@ -202,7 +207,7 @@ async function getContracts(contractKeys, options = {}) {
  */
 async function getCoreContracts(options = {}) {
   return await getContracts(
-    ["TRADING_ROUTER", "CENTRALIZED_VAULT", "FUTURES_MARKET_FACTORY"],
+    ["TRADING_ROUTER", "CORE_VAULT", "FUTURES_MARKET_FACTORY"],
     options
   );
 }
@@ -296,10 +301,89 @@ function displayConfig() {
 }
 
 /**
+ * Verify modular contract structure is working correctly
+ */
+async function verifyModularStructure() {
+  console.log("\n🔍 MODULAR STRUCTURE VERIFICATION:");
+  console.log("═".repeat(60));
+
+  try {
+    const vault = await getContract("CORE_VAULT");
+    const orderBook = await getContract("ORDERBOOK");
+    const factory = await getContract("FUTURES_MARKET_FACTORY");
+    const tradingRouter = await getContract("TRADING_ROUTER");
+
+    console.log("✅ CoreVault contract loaded successfully");
+    console.log("✅ OrderBook contract loaded successfully");
+    console.log("✅ FuturesMarketFactory contract loaded successfully");
+    console.log("✅ TradingRouter contract loaded successfully");
+
+    // Test method availability
+    const vaultMethods = [
+      "getUserPositions",
+      "getMarginSummary",
+      "depositCollateral",
+    ];
+    const orderBookMethods = [
+      "placeMarginLimitOrder",
+      "getUserOrders",
+      "calculateMarkPrice",
+    ];
+    const factoryMethods = [
+      "getMarketDetails",
+      "getAllMarkets",
+      "doesMarketExist",
+    ];
+    const routerMethods = [
+      "marketBuyWithLeverage",
+      "getUserPositionBreakdowns",
+    ];
+
+    for (const method of vaultMethods) {
+      if (typeof vault[method] === "function") {
+        console.log(`  ✅ CoreVault.${method}() available`);
+      } else {
+        console.log(`  ❌ CoreVault.${method}() missing`);
+      }
+    }
+
+    for (const method of orderBookMethods) {
+      if (typeof orderBook[method] === "function") {
+        console.log(`  ✅ OrderBook.${method}() available`);
+      } else {
+        console.log(`  ❌ OrderBook.${method}() missing`);
+      }
+    }
+
+    for (const method of factoryMethods) {
+      if (typeof factory[method] === "function") {
+        console.log(`  ✅ FuturesMarketFactory.${method}() available`);
+      } else {
+        console.log(`  ❌ FuturesMarketFactory.${method}() missing`);
+      }
+    }
+
+    for (const method of routerMethods) {
+      if (typeof tradingRouter[method] === "function") {
+        console.log(`  ✅ TradingRouter.${method}() available`);
+      } else {
+        console.log(`  ❌ TradingRouter.${method}() missing`);
+      }
+    }
+
+    console.log("═".repeat(60));
+    return true;
+  } catch (error) {
+    console.error(`❌ Error verifying modular structure: ${error.message}`);
+    return false;
+  }
+}
+
+/**
  * Display full configuration including markets
  */
 async function displayFullConfig() {
-  console.log("\n📋 FULL SYSTEM CONFIGURATION:");
+  console.log("\n📋 FULL SYSTEM CONFIGURATION (MODULAR V2):");
   console.log("═".repeat(80));
 
   console.log("\n🏢 CONTRACT ADDRESSES:");
@@ -346,7 +430,7 @@ async function checkAuthorization() {
   console.log("═".repeat(60));
 
   try {
-    const vault = await getContract("CENTRALIZED_VAULT");
+    const vault = await getContract("CORE_VAULT");
     const factory = await getContract("FUTURES_MARKET_FACTORY");
     const orderBook = await getContract("ORDERBOOK");
 
@@ -413,6 +497,7 @@ module.exports = {
   getNetworkConfig,
   displayConfig,
   displayFullConfig,
+  verifyModularStructure,
   checkAuthorization,
 
   // Constants (for backwards compatibility)
@@ -424,7 +509,8 @@ module.exports = {
 
   // Direct access to addresses (for scripts that need them)
   TRADING_ROUTER: () => getAddress("TRADING_ROUTER"),
-  CENTRALIZED_VAULT: () => getAddress("CENTRALIZED_VAULT"),
+  CORE_VAULT: () => getAddress("CORE_VAULT"),
+  CENTRALIZED_VAULT: () => getAddress("CORE_VAULT"), // Backwards compatibility
   FUTURES_MARKET_FACTORY: () => getAddress("FUTURES_MARKET_FACTORY"),
   ORDERBOOK: () => getAddress("ORDERBOOK"),
   MOCK_USDC: () => getAddress("MOCK_USDC"),

@@ -14,6 +14,10 @@
 // 🚀 USAGE:
 //   npx hardhat run scripts/interactive-trader.js --network localhost
 //
+// Ensure we connect to the running Hardhat node (localhost) for all direct node runs
+if (!process.env.HARDHAT_NETWORK) {
+  process.env.HARDHAT_NETWORK = "localhost";
+}
 const { ethers } = require("hardhat");
 const readline = require("readline");
 const {
@@ -185,36 +189,36 @@ function boxText(text, color = colors.cyan) {
 
 // 📊 UTILITY FUNCTIONS - ENHANCED PRICE ACCURACY
 function formatPrice(price, decimals = 6, displayDecimals = 2) {
+  // Handle MaxUint256 case (used for empty order book)
+  if (!price || price === 0n) return "0.00";
+  if (price >= ethers.MaxUint256) return "∞";
+
   try {
-    if (!price || price === 0n || price === "0") return "0.00";
+    // Use high precision conversion to avoid floating point errors
+    const priceString = ethers.formatUnits(price, decimals);
 
-    // Handle BigInt conversion
-    const priceValue = typeof price === "bigint" ? price : BigInt(price);
+    // Parse as BigNumber-like for precision validation
+    const priceBigInt = ethers.parseUnits(priceString, decimals);
 
-    // Check for extremely large values that might cause overflow
-    const maxSafeValue =
-      BigInt(Number.MAX_SAFE_INTEGER) * BigInt(10 ** decimals);
-    if (priceValue > maxSafeValue) {
-      return "∞";
+    // Validate no precision loss occurred during conversion
+    if (priceBigInt !== price) {
+      console.warn(
+        `⚠️ Price precision loss detected: ${price} -> ${priceBigInt}`
+      );
     }
 
-    const divisor = BigInt(10 ** decimals);
-    const wholePart = priceValue / divisor;
-    const fractionalPart = priceValue % divisor;
+    // Format with specified decimal places, ensuring no scientific notation
+    const priceNumber = parseFloat(priceString);
 
-    const fractionalStr = fractionalPart.toString().padStart(decimals, "0");
-    const result =
-      wholePart.toString() + "." + fractionalStr.slice(0, displayDecimals);
-
-    // Validate the result
-    const parsed = parseFloat(result);
-    if (isNaN(parsed) || !isFinite(parsed)) {
-      return "ERROR";
+    // Handle very small numbers that might be displayed in scientific notation
+    if (priceNumber < 0.000001 && priceNumber > 0) {
+      return priceNumber.toFixed(8); // Show more decimals for very small prices
     }
 
-    return result;
+    // For standard prices, use specified decimal places
+    return priceNumber.toFixed(displayDecimals);
   } catch (error) {
-    console.error("Price formatting error:", error);
+    console.error(`❌ Price formatting error for ${price}:`, error);
     return "ERROR";
   }
 }
@@ -371,16 +375,34 @@ class InteractiveTrader {
       output: process.stdout,
     });
 
+    // Gracefully handle closed stdin/non-interactive environments
+    this.inputClosed = false;
+    this.rl.on("close", () => {
+      this.inputClosed = true;
+      try {
+        console.log(
+          colorText("\n⚠️ Input closed. Exiting trader.", colors.yellow)
+        );
+      } catch (_) {}
+      process.exit(0);
+    });
+    if (this.rl && this.rl.input) {
+      this.rl.input.on("end", () => {
+        this.inputClosed = true;
+        try {
+          console.log(
+            colorText("\n⚠️ Input ended. Exiting trader.", colors.yellow)
+          );
+        } catch (_) {}
+        process.exit(0);
+      });
+    }
+
     this.contracts = {};
     this.users = [];
     this.currentUser = null;
     this.currentUserIndex = 0;
     this.isRunning = true;
-
-    // Position caching for better performance and real-time updates
-    this.cachedPositions = null;
-    this.lastPositionRefresh = 0;
-    this.positionCacheTimeout = 5000; // 5 seconds
   }
 
   async initialize() {
@@ -429,13 +451,10 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
 
     try {
       this.contracts.mockUSDC = await getContract("MOCK_USDC");
-      this.contracts.vault = await getContract("CENTRALIZED_VAULT");
+      this.contracts.vault = await getContract("CORE_VAULT");
       this.contracts.orderBook = await getContract("ALUMINUM_ORDERBOOK");
       this.contracts.router = await getContract("TRADING_ROUTER");
       this.contracts.factory = await getContract("FUTURES_MARKET_FACTORY");
-
-      // Set up liquidation event listeners for real-time position updates
-      this.setupLiquidationEventListeners();
 
       console.log(
         colorText("✅ All contracts loaded successfully!", colors.brightGreen)
@@ -446,116 +465,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         colorText("❌ Failed to load contracts: " + error.message, colors.red)
       );
       process.exit(1);
-    }
-  }
-
-  setupLiquidationEventListeners() {
-    try {
-      // Listen for liquidation events to refresh position data
-      this.contracts.vault.on(
-        "LiquidationExecuted",
-        (user, marketId, liquidator, penalty, remainingCollateral) => {
-          if (
-            this.currentUser &&
-            user.toLowerCase() === this.currentUser.address.toLowerCase()
-          ) {
-            console.log(
-              colorText(
-                "\n🚨 Your position has been liquidated!",
-                colors.brightRed
-              )
-            );
-            console.log(
-              colorText(
-                `💰 Liquidation penalty: $${ethers.formatUnits(penalty, 6)}`,
-                colors.red
-              )
-            );
-            console.log(
-              colorText(
-                `💰 Remaining collateral: $${ethers.formatUnits(
-                  remainingCollateral,
-                  6
-                )}`,
-                colors.yellow
-              )
-            );
-
-            // Clear cached position data to force refresh
-            this.clearPositionCache();
-
-            console.log(colorText("🔄 Position data refreshed", colors.cyan));
-          }
-        }
-      );
-
-      // Listen for position updates
-      this.contracts.vault.on(
-        "PositionUpdated",
-        (user, marketId, oldSize, newSize, entryPrice, marginLocked) => {
-          if (
-            this.currentUser &&
-            user.toLowerCase() === this.currentUser.address.toLowerCase()
-          ) {
-            // Clear cached data when positions change
-            this.clearPositionCache();
-          }
-        }
-      );
-
-      // Listen for active trader removal
-      this.contracts.orderBook.on("ActiveTraderRemoved", (trader) => {
-        if (
-          this.currentUser &&
-          trader.toLowerCase() === this.currentUser.address.toLowerCase()
-        ) {
-          console.log(
-            colorText("📊 Removed from active traders list", colors.cyan)
-          );
-        }
-      });
-    } catch (error) {
-      console.log(
-        colorText(
-          "⚠️ Could not set up event listeners: " + error.message,
-          colors.yellow
-        )
-      );
-    }
-  }
-
-  clearPositionCache() {
-    this.cachedPositions = null;
-    this.lastPositionRefresh = 0;
-  }
-
-  async getPositionsWithCache() {
-    const now = Date.now();
-
-    // Return cached positions if they're still fresh
-    if (
-      this.cachedPositions &&
-      now - this.lastPositionRefresh < this.positionCacheTimeout
-    ) {
-      return this.cachedPositions;
-    }
-
-    // Fetch fresh position data
-    try {
-      const positions = await this.contracts.vault.getUserPositions(
-        this.currentUser.address
-      );
-      this.cachedPositions = positions;
-      this.lastPositionRefresh = now;
-      return positions;
-    } catch (error) {
-      console.log(
-        colorText(
-          "⚠️ Could not fetch positions: " + error.message,
-          colors.yellow
-        )
-      );
-      return [];
     }
   }
 
@@ -665,6 +574,9 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       const positions = await this.contracts.vault.getUserPositions(
         this.currentUser.address
       );
+
+      // Get comprehensive margin data from all sources
+      const comprehensiveMarginData = await this.getComprehensiveMarginData();
 
       // Calculate portfolio metrics
       // Using auto-detection for decimal precision as some values may be in 18 decimals instead of 6
@@ -925,8 +837,10 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         )
       );
 
-      // Key Insights Box
-      console.log(colorText("\n🔍 KEY INSIGHTS:", colors.brightCyan));
+      // Key Insights Box with Comprehensive Margin Data
+      console.log(
+        colorText("\n🔍 KEY INSIGHTS & MARGIN BREAKDOWN:", colors.brightCyan)
+      );
       console.log(
         colorText(
           "┌─────────────────────────────────────────────────────────────┐",
@@ -953,28 +867,118 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         );
       }
 
-      if (parseFloat(marginUsed) > 0) {
+      // Display comprehensive margin data
+      if (comprehensiveMarginData && comprehensiveMarginData.sources) {
         console.log(
           colorText(
-            `│ 🔒 ${colorText(
-              marginUsed,
-              colors.yellow
-            )} USDC is locked in active positions             │`,
-            colors.white
+            "├─────────────────────────────────────────────────────────────┤",
+            colors.dim
           )
         );
-      }
+        console.log(
+          colorText(
+            "│                    📊 MARGIN SOURCES                        │",
+            colors.brightYellow
+          )
+        );
 
-      if (parseFloat(marginReserved) > 0) {
-        console.log(
-          colorText(
-            `│ ⏳ ${colorText(
-              marginReserved,
-              colors.yellow
-            )} USDC is reserved for pending orders           │`,
-            colors.white
-          )
-        );
+        // CoreVault Summary
+        if (comprehensiveMarginData.sources.coreVaultSummary) {
+          const summary = comprehensiveMarginData.sources.coreVaultSummary;
+          console.log(
+            colorText(
+              `│ 🏛️  CoreVault Summary: ${colorText(
+                summary.marginUsed,
+                colors.yellow
+              )} used, ${colorText(
+                summary.marginReserved,
+                colors.orange
+              )} reserved   │`,
+              colors.white
+            )
+          );
+        }
+
+        // Direct margin mapping
+        if (comprehensiveMarginData.sources.coreVaultDirect) {
+          const direct = comprehensiveMarginData.sources.coreVaultDirect;
+          console.log(
+            colorText(
+              `│ 🎯 Direct Mapping: ${colorText(
+                direct.marginLocked,
+                colors.yellow
+              )} USDC (userMarginByMarket)      │`,
+              colors.white
+            )
+          );
+        }
+
+        // Position-embedded margin
+        if (comprehensiveMarginData.sources.coreVaultPositions) {
+          const positions = comprehensiveMarginData.sources.coreVaultPositions;
+          console.log(
+            colorText(
+              `│ 📍 Position Embedded: ${colorText(
+                positions.totalMarginFromPositions,
+                colors.yellow
+              )} USDC (position.marginLocked) │`,
+              colors.white
+            )
+          );
+        }
+
+        // OrderBook orders
+        if (comprehensiveMarginData.sources.orderBookOrders) {
+          const orders = comprehensiveMarginData.sources.orderBookOrders;
+          console.log(
+            colorText(
+              `│ 📋 Order Requirements: ${colorText(
+                orders.totalMarginFromOrders,
+                colors.yellow
+              )} USDC (order.marginRequired)  │`,
+              colors.white
+            )
+          );
+        }
+
+        // Show discrepancies if any
+        if (
+          comprehensiveMarginData.totals.discrepancies &&
+          comprehensiveMarginData.totals.discrepancies.length > 0
+        ) {
+          console.log(
+            colorText(
+              "├─────────────────────────────────────────────────────────────┤",
+              colors.dim
+            )
+          );
+          console.log(
+            colorText(
+              "│                    ⚠️  DISCREPANCIES                        │",
+              colors.red
+            )
+          );
+
+          for (const discrepancy of comprehensiveMarginData.totals
+            .discrepancies) {
+            console.log(
+              colorText(
+                `│ ❌ ${discrepancy.type}: ${colorText(
+                  discrepancy.difference,
+                  colors.red
+                )} USDC difference          │`,
+                colors.white
+              )
+            );
+          }
+        } else {
+          console.log(
+            colorText(
+              "│ ✅ All margin sources are synchronized                      │",
+              colors.green
+            )
+          );
+        }
       }
 
       console.log(
@@ -1146,29 +1150,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           colors.white
         )
       );
-
-      // Get and display mark price
-      let markPriceDisplay = "N/A";
-      try {
-        const markPriceWei =
-          await this.contracts.orderBook.calculateMarkPrice();
-        const markPrice = parseFloat(ethers.formatUnits(markPriceWei, 6));
-        markPriceDisplay = "$" + markPrice.toFixed(4);
-      } catch (error) {
-        console.log(colorText("⚠️ Could not fetch mark price", colors.yellow));
-      }
-
-      console.log(
-        colorText(
-          `│ Mark Price: ${colorText(markPriceDisplay, colors.cyan).padEnd(
-            32
-          )} Spread: ${colorText(
-            "$" + formatPriceWithValidation(bestAsk - bestBid, 6, 4, false),
-            colors.yellow
-          ).padEnd(25)} │`,
-          colors.white
-        )
-      );
       console.log(
         colorText(
           `│ Best Bid: ${colorText(
@@ -1178,6 +1159,76 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             "$" + formatPriceWithValidation(bestAsk, 6, 4, false),
             colors.red
           ).padEnd(25)} │`,
+          colors.white
+        )
+      );
+
+      // Add mark price display
+      let markPriceDisplay = "N/A";
+      let midPriceDisplay = "N/A";
+      let spreadDisplay = "N/A";
+
+      try {
+        // Get comprehensive market data from OrderBook
+        const marketData = await this.contracts.orderBook.getMarketPriceData();
+
+        if (marketData.isValid) {
+          markPriceDisplay = colorText(
+            "$" + formatPriceWithValidation(marketData.markPrice, 6, 4, false),
+            colors.brightCyan
+          );
+          midPriceDisplay = colorText(
+            "$" + formatPriceWithValidation(marketData.midPrice, 6, 4, false),
+            colors.yellow
+          );
+
+          if (marketData.spreadBps > 0) {
+            const spreadPercent = (Number(marketData.spreadBps) / 100).toFixed(
+              2
+            );
+            spreadDisplay = colorText(`${spreadPercent}%`, colors.magenta);
+          }
+        }
+      } catch (error) {
+        // Fallback: calculate mark price manually
+        if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
+          const bidPrice = parseFloat(
+            formatPriceWithValidation(bestBid, 6, 4, false)
+          );
+          const askPrice = parseFloat(
+            formatPriceWithValidation(bestAsk, 6, 4, false)
+          );
+
+          if (
+            !isNaN(bidPrice) &&
+            !isNaN(askPrice) &&
+            bidPrice > 0 &&
+            askPrice > 0
+          ) {
+            const calculatedMarkPrice = (bidPrice + askPrice) / 2;
+            markPriceDisplay = colorText(
+              "$" + calculatedMarkPrice.toFixed(4),
+              colors.brightCyan
+            );
+            midPriceDisplay = markPriceDisplay; // Same as mark price in this case
+
+            const spread = askPrice - bidPrice;
+            const spreadPercent = (
+              (spread / calculatedMarkPrice) *
+              100
+            ).toFixed(2);
+            spreadDisplay = colorText(`${spreadPercent}%`, colors.magenta);
+          }
+        }
+      }
+
+      console.log(
+        colorText(
+          `│ Mark Price: ${markPriceDisplay.padEnd(
+            20
+          )} Mid Price: ${midPriceDisplay.padEnd(
+            20
+          )} Spread: ${spreadDisplay.padEnd(10)} │`,
           colors.white
         )
       );
@@ -1300,48 +1351,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     return colorText(traderAddress.substring(2, 6), colors.dim);
   }
 
-  /**
-   * Calculate liquidation price for a position
-   * @param {Object} position - Position object with size, entryPrice, etc.
-   * @returns {string|null} - Formatted liquidation price or null if not applicable
-   */
-  calculateLiquidationPrice(position) {
-    try {
-      const positionSize = BigInt(position.size.toString());
-      const entryPrice = parseFloat(ethers.formatUnits(position.entryPrice, 6));
-
-      if (positionSize === 0n) {
-        return null;
-      }
-
-      if (positionSize > 0n) {
-        // Long position: liquidates at P=0 (practically never)
-        return "0.00";
-      } else {
-        // Short position: Calculate using the formula
-        // For shorts with 150% initial margin and 10% maintenance margin:
-        // Liquidation occurs when equity = maintenance_margin * mark_price
-        // equity = (collateral + entry_price - mark_price) * position_size
-        // At liquidation: (1.5 * entry_price + entry_price - liq_price) = 0.1 * liq_price
-        // Solving: liq_price = (2.5 * entry_price) / 1.1 ≈ 2.27 * entry_price
-
-        const maintenanceMarginRatio = 0.1; // 10% maintenance margin
-        const initialMarginRatio = 1.5; // 150% initial margin
-
-        // Liquidation price formula for shorts:
-        // liq_price = entry_price * (1 + initial_margin_ratio) / (1 + maintenance_margin_ratio)
-        const liquidationPrice =
-          (entryPrice * (1 + initialMarginRatio)) /
-          (1 + maintenanceMarginRatio);
-
-        return liquidationPrice.toFixed(4);
-      }
-    } catch (error) {
-      console.error("Error calculating liquidation price:", error);
-      return null;
-    }
-  }
-
   async displayMenu() {
     // Quick position summary before menu
     try {
@@ -1376,17 +1385,40 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
               false // Don't show warnings in quick summary
             );
 
-            // Calculate liquidation price
-            const liquidationPrice = this.calculateLiquidationPrice(position);
-            const liqPriceStr =
-              liquidationPrice === null ? "N/A" : `$${liquidationPrice}`;
+            // Calculate indicative liquidation price (CV.md logic)
+            let liqStr = "N/A";
+            try {
+              const entryPriceNum = parseFloat(entryPrice);
+              if (positionSize < 0n && entryPriceNum > 0) {
+                // Short: P_liq = (2.5E)/(1+m), m = maintenanceMarginBps/10000 (default 10%)
+                let mmBps = 1000;
+                try {
+                  if (
+                    typeof this.contracts.vault.maintenanceMarginBps ===
+                    "function"
+                  ) {
+                    mmBps = Number(
+                      await this.contracts.vault.maintenanceMarginBps(
+                        position.marketId
+                      )
+                    );
+                  }
+                } catch (_) {}
+                const m = mmBps / 10000;
+                const pLiq = (2.5 * entryPriceNum) / (1 + m);
+                liqStr = pLiq.toFixed(4);
+              } else if (positionSize > 0n) {
+                // Long: liquidates only at 0 in 1:1 system
+                liqStr = "0.0000";
+              }
+            } catch (_) {}
 
             console.log(
               colorText(
                 `│ ${marketIdStr}: ${colorText(
                   side,
                   sideColor
-                )} ${size} ALU @ $${entryPrice} | Liq: ${liqPriceStr}  │`,
+                )} ${size} ALU @ $${entryPrice}  Liq: $${liqStr} │`,
                 colors.white
               )
             );
@@ -1457,7 +1489,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     );
     console.log(
       colorText(
-        "│ 13. 🔄 RESET ALL (Cancel & Fund Users) │",
+        "│ 13. 🔍 Detailed Margin Analysis        │",
         colors.brightYellow
       )
     );
@@ -1517,7 +1549,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         await this.viewTradeHistory();
         break;
       case "13":
-        await this.resetOrderBookAndFundUsers();
+        await this.viewDetailedMarginAnalysis();
         break;
       case "r":
         // Refresh - just continue loop
@@ -1640,6 +1672,55 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         const priceWei = ethers.parseUnits(price, 6);
         const amountWei = ethers.parseUnits(amount, 18);
 
+        // Pre-trade validation to prevent on-chain reverts
+        try {
+          const [marginBps, leverageFlag] = await Promise.all([
+            this.contracts.orderBook.marginRequirementBps(),
+            this.contracts.orderBook.leverageEnabled(),
+          ]);
+
+          if (!leverageFlag && Number(marginBps) !== 10000) {
+            console.log(
+              colorText(
+                `❌ Invalid margin config: marginRequirementBps=${marginBps}, leverageEnabled=${leverageFlag}`,
+                colors.red
+              )
+            );
+            await this.pause(2000);
+            return;
+          }
+
+          // Check registration and role by probing a cheap view call chain
+          // Also compute required margin and compare with available collateral
+          const userAddr = this.currentUser.address;
+          const [available] = await Promise.all([
+            this.contracts.vault.getAvailableCollateral(userAddr),
+          ]);
+
+          const required = (amountWei * priceWei) / 10n ** 18n; // 1:1 margin
+
+          if (available < required) {
+            console.log(
+              colorText(
+                `❌ Insufficient available collateral. Need $${formatUSDC(
+                  required
+                )}, available $${formatUSDC(available)}`,
+                colors.red
+              )
+            );
+            await this.pause(2000);
+            return;
+          }
+        } catch (e) {
+          console.log(
+            colorText(
+              `⚠️ Pre-trade validation failed (continuing): ${e.message}`,
+              colors.yellow
+            )
+          );
+        }
+
+        // Always use margin limit order path per new design
         const tx = await this.contracts.orderBook
           .connect(this.currentUser)
           .placeMarginLimitOrder(priceWei, amountWei, isBuy);
@@ -2778,14 +2859,13 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
 
             // Try to get current market price for P&L calculation
             let currentPnL = 0;
-            let markPrice = entryPrice; // Default to entry price
             try {
               const bestBid = await this.contracts.orderBook.bestBid();
               const bestAsk = await this.contracts.orderBook.bestAsk();
-              if (bestBid > 0 && bestAsk > 0) {
+              if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
                 const bidPrice = parseFloat(ethers.formatUnits(bestBid, 6));
                 const askPrice = parseFloat(ethers.formatUnits(bestAsk, 6));
-                markPrice =
+                const markPrice =
                   !isNaN(bidPrice) &&
                   !isNaN(askPrice) &&
                   bidPrice > 0 &&
@@ -2797,13 +2877,362 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
                   positionSize >= 0n ? priceDiff * size : -priceDiff * size;
               }
             } catch (priceError) {
-              // Use 0 if can't get prices, markPrice stays as entryPrice
+              // Use 0 if can't get prices
             }
-
-            totalUnrealizedPnL += currentPnL;
 
             const pnlColor = currentPnL >= 0 ? colors.green : colors.red;
             const pnlSign = currentPnL >= 0 ? "+" : "";
+
+            console.log(
+              colorText(
+                `│ ${marketIdStr.padEnd(9)} │ ${colorText(
+                  `${sizeSign}${size.toFixed(3)}`,
+                  sizeColor
+                ).padEnd(12)} │ ${entryPrice
+                  .toFixed(2)
+                  .padStart(11)} │ ${marginLocked
+                  .toFixed(2)
+                  .padStart(10)} │ ${colorText(
+                  `${pnlSign}${currentPnL.toFixed(2)}`,
+                  pnlColor
+                ).padStart(8)} │`,
+                colors.white
+              )
+            );
+          } catch (positionError) {
+            console.log(
+              colorText(
+                `│ ERROR    │ Cannot parse position data                      │`,
+                colors.red
+              )
+            );
+          }
+        }
+        console.log(
+          colorText(
+            "├─────────────────────────────────────────────────────────────────┤",
+            colors.cyan
+          )
+        );
+        console.log(
+          colorText(
+            `│ 💎 TOTAL POSITION VALUE: ${totalPositionValue
+              .toFixed(2)
+              .padStart(12)} USDC                │`,
+            colors.brightCyan
+          )
+        );
+        console.log(
+          colorText(
+            "└─────────────────────────────────────────────────────────────────┘",
+            colors.cyan
+          )
+        );
+      }
+
+      // Order Summary
+      console.log(colorText(`\n📋 TRADING ACTIVITY:`, colors.bright));
+      console.log(
+        colorText(
+          `   • Active Orders:      ${userOrders.length
+            .toString()
+            .padStart(12)}`,
+          colors.yellow
+        )
+      );
+      console.log(
+        colorText(
+          `   • Open Positions:     ${positions.length
+            .toString()
+            .padStart(12)}`,
+          colors.magenta
+        )
+      );
+
+      // Risk Metrics
+      console.log(colorText(`\n⚠️  RISK METRICS:`, colors.bright));
+      const leverageRatio = marginUsed > 0 ? portfolioValue / marginUsed : 0;
+      const leverageColor =
+        leverageRatio > 10
+          ? colors.red
+          : leverageRatio > 5
+          ? colors.yellow
+          : colors.green;
+      console.log(
+        colorText(
+          `   • Effective Leverage: ${colorText(
+            leverageRatio.toFixed(2).padStart(12),
+            leverageColor
+          )}x`,
+          colors.white
+        )
+      );
+
+      const marginRatio =
+        totalCollateral > 0 ? (availableBalance / totalCollateral) * 100 : 0;
+      const marginColor =
+        marginRatio < 20
+          ? colors.red
+          : marginRatio < 40
+          ? colors.yellow
+          : colors.green;
+      console.log(
+        colorText(
+          `   • Available Margin:   ${colorText(
+            marginRatio.toFixed(1).padStart(12),
+            marginColor
+          )}%`,
+          colors.white
+        )
+      );
+
+      // Recommendations
+      console.log(colorText(`\n💡 RECOMMENDATIONS:`, colors.brightYellow));
+      console.log(
+        colorText(
+          "┌─────────────────────────────────────────────────────────────┐",
+          colors.dim
+        )
+      );
+
+      if (availableBalance < totalCollateral * 0.2) {
+        console.log(
+          colorText(
+            "│ ⚠️  Consider reducing position sizes or adding collateral   │",
+            colors.yellow
+          )
+        );
+      }
+      if (utilizationRate > 80) {
+        console.log(
+          colorText(
+            "│ 🔴 High utilization rate - risk of margin calls           │",
+            colors.red
+          )
+        );
+      }
+      if (unrealizedPnL < -totalCollateral * 0.1) {
+        console.log(
+          colorText(
+            "│ 📉 Significant unrealized losses - consider risk management│",
+            colors.red
+          )
+        );
+      }
+      if (availableBalance > totalCollateral * 0.5) {
+        console.log(
+          colorText(
+            "│ ✅ Good available balance for new trading opportunities    │",
+            colors.green
+          )
+        );
+      }
+
+      console.log(
+        colorText(
+          "└─────────────────────────────────────────────────────────────┘",
+          colors.dim
+        )
+      );
+    } catch (error) {
+      console.log(
+        colorText("❌ Could not fetch portfolio analysis data", colors.red)
+      );
+      console.log(colorText(`Error: ${error.message}`, colors.red));
+    }
+
+    await this.askQuestion(
+      colorText("\n📱 Press Enter to continue...", colors.dim)
+    );
+  }
+
+  async viewOpenPositions() {
+    console.clear();
+    console.log(boxText("📊 OPEN POSITIONS OVERVIEW", colors.brightCyan));
+
+    try {
+      const positions = await this.contracts.vault.getUserPositions(
+        this.currentUser.address
+      );
+
+      if (positions.length === 0) {
+        console.log(colorText("\n💤 No open positions", colors.yellow));
+        console.log(
+          colorText(
+            "┌─────────────────────────────────────────────────────────────┐",
+            colors.dim
+          )
+        );
+        console.log(
+          colorText(
+            "│                    No Active Positions                     │",
+            colors.yellow
+          )
+        );
+        console.log(
+          colorText(
+            "│                                                             │",
+            colors.dim
+          )
+        );
+        console.log(
+          colorText(
+            "│  💡 Place some trades to see positions here!               │",
+            colors.cyan
+          )
+        );
+        console.log(
+          colorText(
+            "│     • Use limit orders for precise entry points            │",
+            colors.white
+          )
+        );
+        console.log(
+          colorText(
+            "│     • Use market orders for immediate execution            │",
+            colors.white
+          )
+        );
+        console.log(
+          colorText(
+            "│     • All positions use 1:1 margin requirement            │",
+            colors.white
+          )
+        );
+        console.log(
+          colorText(
+            "└─────────────────────────────────────────────────────────────┘",
+            colors.dim
+          )
+        );
+      } else {
+        console.log(
+          colorText(
+            `\n📈 ACTIVE POSITIONS (${positions.length})`,
+            colors.brightYellow
+          )
+        );
+        console.log(
+          colorText(
+            "┌─────────────────────────────────────────────────────────────────────────────────┐",
+            colors.cyan
+          )
+        );
+        console.log(
+          colorText(
+            "│  Market    │   Side   │    Size     │ Entry Price │   Margin   │   Mark   │  P&L   │  Liq  │",
+            colors.cyan
+          )
+        );
+        console.log(
+          colorText(
+            "├─────────────────────────────────────────────────────────────────────────────────┤",
+            colors.cyan
+          )
+        );
+
+        let totalMarginLocked = 0;
+        let totalUnrealizedPnL = 0;
+
+        for (let i = 0; i < positions.length; i++) {
+          const position = positions[i];
+          try {
+            // Parse position data
+            const marketIdStr = (
+              await safeDecodeMarketId(position.marketId, this.contracts)
+            ).substring(0, 8);
+
+            // Safe BigInt conversion for position size
+            const positionSize = BigInt(position.size.toString());
+            const absSize = positionSize >= 0n ? positionSize : -positionSize;
+            const size = parseFloat(ethers.formatUnits(absSize, 18));
+            const sizeColor = positionSize >= 0n ? colors.green : colors.red;
+            const side = positionSize >= 0n ? "LONG " : "SHORT";
+
+            // Use high-precision formatting to get exact entry price from smart contract
+            const entryPrice = formatPriceWithValidation(
+              BigInt(position.entryPrice.toString()),
+              6,
+              4, // 4 decimals for higher precision
+              false // Don't show warnings in overview
+            );
+            const marginLocked = parseFloat(
+              ethers.formatUnits(BigInt(position.marginLocked.toString()), 6)
+            );
+
+            totalMarginLocked += marginLocked;
+
+            // Get current mark price (simplified - would need oracle in real implementation)
+            const entryPriceNum = parseFloat(entryPrice);
+            let markPrice = entryPriceNum; // Fallback to entry price
+            try {
+              const bestBid = await this.contracts.orderBook.bestBid();
+              const bestAsk = await this.contracts.orderBook.bestAsk();
+              if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
+                const bidStr = formatPriceWithValidation(bestBid, 6, 4, false);
+                const askStr = formatPriceWithValidation(bestAsk, 6, 4, false);
+                const bidPrice = parseFloat(bidStr);
+                const askPrice = parseFloat(askStr);
+
+                // Check for valid prices (not NaN, ERROR, or ∞)
+                if (
+                  !isNaN(bidPrice) &&
+                  !isNaN(askPrice) &&
+                  bidStr !== "ERROR" &&
+                  askStr !== "ERROR" &&
+                  bidStr !== "∞" &&
+                  askStr !== "∞" &&
+                  bidPrice > 0 &&
+                  askPrice > 0
+                ) {
+                  markPrice = (bidPrice + askPrice) / 2;
+                } else {
+                  // Keep entry price as fallback
+                  console.log(
+                    "⚠️ No valid market price available, using entry price"
+                  );
+                }
+              }
+            } catch (priceError) {
+              // Use entry price as fallback
+            }
+
+            // Calculate unrealized P&L
+            const priceDiff = markPrice - entryPriceNum;
+            const positionPnL =
+              positionSize >= 0n
+                ? priceDiff * size // Long position
+                : -priceDiff * size; // Short position
+
+            totalUnrealizedPnL += positionPnL;
+
+            const pnlColor = positionPnL >= 0 ? colors.green : colors.red;
+            const pnlSign = positionPnL >= 0 ? "+" : "";
+
+            // Compute indicative liquidation price
+            let liqDisplay = "N/A";
+            try {
+              if (positionSize < 0n) {
+                let mmBps = 1000;
+                try {
+                  if (
+                    typeof this.contracts.vault.maintenanceMarginBps ===
+                    "function"
+                  ) {
+                    mmBps = Number(
+                      await this.contracts.vault.maintenanceMarginBps(
+                        position.marketId
+                      )
+                    );
+                  }
+                } catch (_) {}
+                const m = mmBps / 10000;
+                const pLiq = (2.5 * entryPriceNum) / (1 + m);
+                liqDisplay = pLiq.toFixed(2);
+              } else if (positionSize > 0n) {
+                liqDisplay = "0.00";
+              }
+            } catch (_) {}
 
             console.log(
               colorText(
@@ -2812,15 +3241,12 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
                   sizeColor
                 )} │ ${size.toFixed(4).padStart(11)} │ $${entryPrice.padStart(
                   10
-                )} │ ${marginLocked.toFixed(2).padStart(10)} │ ${(!isNaN(
-                  markPrice
-                )
-                  ? markPrice.toFixed(2)
-                  : "N/A"
-                ).padStart(8)} │ ${colorText(
-                  (pnlSign + currentPnL.toFixed(2)).padStart(6),
+                )} │ ${marginLocked.toFixed(2).padStart(10)} │ ${markPrice
+                  .toFixed(2)
+                  .padStart(8)} │ ${colorText(
+                  (pnlSign + positionPnL.toFixed(2)).padStart(6),
                   pnlColor
-                )} │`,
+                )} │ ${liqDisplay.padStart(5)} │`,
                 colors.white
               )
             );
@@ -2931,241 +3357,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     await this.askQuestion(
       colorText("\n📱 Press Enter to continue...", colors.dim)
     );
-  }
-
-  async viewOpenPositions() {
-    console.clear();
-    console.log(boxText("🔍 VIEW OPEN POSITIONS", colors.cyan));
-
-    try {
-      // Get positions directly from vault
-      const positions = await this.contracts.vault.getUserPositions(
-        this.currentUser.address
-      );
-
-      if (!positions || positions.length === 0) {
-        console.log(colorText("\n💤 No open positions found", colors.yellow));
-        await this.pause(2000);
-        return;
-      }
-
-      console.log(
-        colorText(
-          `\n📊 Found ${positions.length} open position(s)\n`,
-          colors.cyan
-        )
-      );
-
-      // Display positions table
-      console.log(
-        colorText(
-          "┌─────────────────────────────────────────────────────────────────────────────────────────┐",
-          colors.cyan
-        )
-      );
-      console.log(
-        colorText(
-          "│ Market ID  │ Side     │ Size (ALU) │ Entry Price │ Margin     │ Mark    │ P&L   │ Liq Price │",
-          colors.bright
-        )
-      );
-      console.log(
-        colorText(
-          "├─────────────────────────────────────────────────────────────────────────────────────────┤",
-          colors.cyan
-        )
-      );
-
-      let totalMarginLocked = 0;
-      let totalUnrealizedPnL = 0;
-
-      for (const position of positions) {
-        try {
-          const marketIdStr = position.marketId
-            ? position.marketId.slice(0, 10)
-            : "Unknown";
-          const positionSize = BigInt(position.size.toString());
-          const absSize = positionSize < 0n ? -positionSize : positionSize;
-
-          const side = positionSize >= 0n ? "LONG" : "SHORT";
-          const sizeColor = positionSize >= 0n ? colors.green : colors.red;
-
-          const size = parseFloat(ethers.formatUnits(absSize, 18));
-          const entryPrice = parseFloat(
-            ethers.formatUnits(BigInt(position.entryPrice.toString()), 6)
-          );
-          const marginLocked = parseFloat(
-            ethers.formatUnits(BigInt(position.marginLocked.toString()), 6)
-          );
-
-          totalMarginLocked += marginLocked;
-
-          // Get current mark price (simplified - would need oracle in real implementation)
-          const entryPriceNum = parseFloat(entryPrice);
-          let markPrice = entryPriceNum; // Fallback to entry price
-          try {
-            const bestBid = await this.contracts.orderBook.bestBid();
-            const bestAsk = await this.contracts.orderBook.bestAsk();
-            if (bestBid > 0 && bestAsk > 0) {
-              const bidStr = formatPriceWithValidation(bestBid, 6, 4, false);
-              const askStr = formatPriceWithValidation(bestAsk, 6, 4, false);
-              const bidPrice = parseFloat(bidStr);
-              const askPrice = parseFloat(askStr);
-
-              // Check for valid prices (not NaN, ERROR, or ∞)
-              if (
-                !isNaN(bidPrice) &&
-                !isNaN(askPrice) &&
-                bidStr !== "ERROR" &&
-                askStr !== "ERROR" &&
-                bidStr !== "∞" &&
-                askStr !== "∞" &&
-                bidPrice > 0 &&
-                askPrice > 0
-              ) {
-                markPrice = (bidPrice + askPrice) / 2;
-              }
-            }
-          } catch (priceError) {
-            // Use entry price as fallback
-          }
-
-          // Calculate unrealized P&L
-          const priceDiff = markPrice - entryPriceNum;
-          const positionPnL =
-            positionSize >= 0n
-              ? priceDiff * size // Long position
-              : -priceDiff * size; // Short position
-
-          totalUnrealizedPnL += positionPnL;
-
-          const pnlColor = positionPnL >= 0 ? colors.green : colors.red;
-          const pnlSign = positionPnL >= 0 ? "+" : "";
-
-          // Calculate liquidation price
-          const liquidationPrice = this.calculateLiquidationPrice(position);
-          const liqPriceStr =
-            liquidationPrice === null ? "N/A" : `$${liquidationPrice}`;
-
-          console.log(
-            colorText(
-              `│ ${marketIdStr.padEnd(10)} │ ${colorText(
-                side.padEnd(8),
-                sizeColor
-              )} │ ${size.toFixed(4).padStart(11)} │ $${entryPrice
-                .toFixed(2)
-                .padStart(10)} │ ${marginLocked
-                .toFixed(2)
-                .padStart(10)} │ ${markPrice
-                .toFixed(2)
-                .padStart(8)} │ ${colorText(
-                (pnlSign + positionPnL.toFixed(2)).padStart(6),
-                pnlColor
-              )} │ ${liqPriceStr.padStart(9)} │`,
-              colors.white
-            )
-          );
-        } catch (positionError) {
-          console.log(
-            colorText(
-              `│ ERROR     │ Cannot parse position data                                      │`,
-              colors.red
-            )
-          );
-          console.error(
-            "Debug - ViewOpenPositions error:",
-            positionError.message
-          );
-        }
-      }
-
-      console.log(
-        colorText(
-          "├─────────────────────────────────────────────────────────────────────────────────┤",
-          colors.cyan
-        )
-      );
-
-      // Summary row
-      const totalPnLColor =
-        totalUnrealizedPnL >= 0 ? colors.brightGreen : colors.brightRed;
-      const totalPnLSign = totalUnrealizedPnL >= 0 ? "+" : "";
-      console.log(
-        colorText(
-          `│ TOTALS    │          │             │             │ ${totalMarginLocked
-            .toFixed(2)
-            .padStart(10)} │          │ ${colorText(
-            (totalPnLSign + totalUnrealizedPnL.toFixed(2)).padStart(6),
-            totalPnLColor
-          )} │`,
-          colors.bright
-        )
-      );
-
-      console.log(
-        colorText(
-          "└─────────────────────────────────────────────────────────────────────────────────────────┘",
-          colors.cyan
-        )
-      );
-
-      // Position Management Options
-      console.log(colorText("\n🎮 POSITION MANAGEMENT", colors.brightYellow));
-      console.log(
-        colorText("┌─────────────────────────────────────────┐", colors.cyan)
-      );
-      console.log(
-        colorText("│ 1. 🔄 Refresh Positions                 │", colors.white)
-      );
-      console.log(
-        colorText("│ 2. 🔍 Detailed Position Analysis        │", colors.white)
-      );
-      console.log(
-        colorText("│ 3. ⚡ Quick Close Position              │", colors.white)
-      );
-      console.log(
-        colorText("│ 4. 📊 Close All Positions               │", colors.white)
-      );
-      console.log(
-        colorText("│ 5. 🔙 Back to Main Menu                 │", colors.white)
-      );
-      console.log(
-        colorText("└─────────────────────────────────────────┘", colors.cyan)
-      );
-
-      const choice = await this.askQuestion(
-        colorText("\n👉 Select option (1-5): ", colors.yellow)
-      );
-
-      switch (choice.trim()) {
-        case "1":
-          // Refresh - just call the function again
-          await this.viewOpenPositions();
-          return;
-        case "2":
-          await this.detailedPositionAnalysis(positions);
-          break;
-        case "3":
-          await this.quickClosePosition(positions);
-          break;
-        case "4":
-          await this.closeAllPositions(positions);
-          break;
-        case "5":
-          // Back to main menu
-          break;
-        default:
-          console.log(colorText("❌ Invalid option", colors.red));
-          await this.pause(2000);
-          await this.viewOpenPositions();
-      }
-    } catch (error) {
-      console.log(
-        colorText(`\n❌ Error viewing positions: ${error.message}`, colors.red)
-      );
-      console.error("Debug - Full error:", error);
-      await this.pause(3000);
-    }
   }
 
   async detailedPositionAnalysis(positions) {
@@ -3367,106 +3558,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     await this.askQuestion(
       colorText("\n📱 Press Enter to continue...", colors.dim)
     );
-  }
-
-  async closeAllPositions(positions) {
-    console.clear();
-    console.log(boxText("🔥 CLOSE ALL POSITIONS", colors.red));
-
-    if (!positions || positions.length === 0) {
-      console.log(colorText("\n💤 No positions to close", colors.yellow));
-      await this.pause(2000);
-      return;
-    }
-
-    console.log(
-      colorText(
-        `\n⚠️  WARNING: This will close ALL ${positions.length} open position(s)!\n`,
-        colors.brightRed
-      )
-    );
-
-    // Show all positions to be closed
-    for (let i = 0; i < positions.length; i++) {
-      const position = positions[i];
-      const positionSize = BigInt(position.size.toString());
-      const absSize = positionSize < 0n ? -positionSize : positionSize;
-      const side = positionSize >= 0n ? "LONG" : "SHORT";
-      const sizeColor = positionSize >= 0n ? colors.green : colors.red;
-      const size = parseFloat(ethers.formatUnits(absSize, 18));
-
-      console.log(
-        colorText(
-          `   ${i + 1}. ${colorText(side, sizeColor)} ${size.toFixed(4)} ALU`,
-          colors.white
-        )
-      );
-    }
-
-    const confirm = await this.askQuestion(
-      colorText(
-        "\n⚠️  Type 'CONFIRM' to close all positions: ",
-        colors.brightRed
-      )
-    );
-
-    if (confirm.trim().toUpperCase() !== "CONFIRM") {
-      console.log(colorText("\n❌ Cancelled", colors.yellow));
-      await this.pause(2000);
-      return;
-    }
-
-    console.log(colorText("\n🔄 Closing all positions...", colors.yellow));
-
-    let successCount = 0;
-    let failCount = 0;
-
-    for (let i = 0; i < positions.length; i++) {
-      const position = positions[i];
-      try {
-        const positionSize = BigInt(position.size.toString());
-        const absSize = positionSize < 0n ? -positionSize : positionSize;
-        const isBuy = positionSize < 0n; // Reverse to close
-
-        console.log(
-          colorText(
-            `\n📝 Closing position ${i + 1}/${positions.length}...`,
-            colors.cyan
-          )
-        );
-
-        // Place market order to close
-        const tx = await this.contracts.tradingRouter.placeMarginMarketOrder(
-          absSize,
-          isBuy,
-          1000 // 10% slippage for market orders
-        );
-
-        console.log(
-          colorText(`   ⏳ Transaction sent: ${tx.hash}`, colors.dim)
-        );
-        const receipt = await tx.wait();
-
-        if (receipt.status === 1) {
-          console.log(colorText(`   ✅ Position closed!`, colors.green));
-          successCount++;
-        } else {
-          console.log(colorText(`   ❌ Transaction failed`, colors.red));
-          failCount++;
-        }
-      } catch (error) {
-        console.log(colorText(`   ❌ Error: ${error.message}`, colors.red));
-        failCount++;
-      }
-    }
-
-    console.log(colorText("\n📊 SUMMARY", colors.brightCyan));
-    console.log(
-      colorText(`   ✅ Successfully closed: ${successCount}`, colors.green)
-    );
-    console.log(colorText(`   ❌ Failed: ${failCount}`, colors.red));
-
-    await this.pause(3000);
   }
 
   async quickClosePosition(positions) {
@@ -4622,253 +4713,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     }
   }
 
-  async resetOrderBookAndFundUsers() {
-    console.clear();
-    console.log(
-      boxText("🔄 RESET ORDER BOOK & FUND USERS", colors.brightYellow)
-    );
-
-    console.log(colorText("\n⚠️  WARNING: This will:", colors.red));
-    console.log(colorText("  • Cancel ALL open orders", colors.yellow));
-    console.log(colorText("  • Close ALL positions", colors.yellow));
-    console.log(
-      colorText("  • Reset user collateral to 5000 USDC", colors.yellow)
-    );
-    console.log(colorText("  • Clear order book completely", colors.yellow));
-
-    const confirm = await this.askQuestion(
-      colorText(
-        "\n❓ Are you sure you want to proceed? (yes/no): ",
-        colors.cyan
-      )
-    );
-
-    if (confirm.toLowerCase() !== "yes") {
-      console.log(colorText("\n❌ Reset cancelled", colors.red));
-      await this.pause(1500);
-      return;
-    }
-
-    console.log(colorText("\n🔄 Starting reset process...", colors.cyan));
-
-    try {
-      // Get all signers
-      const signers = await ethers.getSigners();
-      const users = signers.slice(1, 4); // User1, User2, User3
-
-      // Step 1: Cancel all orders
-      console.log(
-        colorText("\n📋 Step 1: Canceling all orders...", colors.yellow)
-      );
-      for (let i = 0; i < users.length; i++) {
-        const user = users[i];
-        console.log(colorText(`   User ${i + 1}: ${user.address}`, colors.dim));
-
-        try {
-          // Get user's buy orders
-          const buyOrders = await this.contracts.orderBook.getUserBuyOrders(
-            user.address
-          );
-          for (const order of buyOrders) {
-            if (order.isActive) {
-              await this.contracts.orderBook
-                .connect(user)
-                .cancelOrder(order.orderId);
-              console.log(
-                colorText(
-                  `     ✅ Cancelled buy order #${order.orderId}`,
-                  colors.green
-                )
-              );
-            }
-          }
-
-          // Get user's sell orders
-          const sellOrders = await this.contracts.orderBook.getUserSellOrders(
-            user.address
-          );
-          for (const order of sellOrders) {
-            if (order.isActive) {
-              await this.contracts.orderBook
-                .connect(user)
-                .cancelOrder(order.orderId);
-              console.log(
-                colorText(
-                  `     ✅ Cancelled sell order #${order.orderId}`,
-                  colors.green
-                )
-              );
-            }
-          }
-        } catch (error) {
-          // Skip if user has no orders
-        }
-      }
-
-      // Step 2: Close all positions (by trading against each other if needed)
-      console.log(
-        colorText("\n📊 Step 2: Closing all positions...", colors.yellow)
-      );
-      for (let i = 0; i < users.length; i++) {
-        const user = users[i];
-        try {
-          const positions = await this.contracts.vault.getUserPositions(
-            user.address
-          );
-          for (const position of positions) {
-            if (position.size !== 0n) {
-              const size = position.size;
-              const absSize = size < 0n ? -size : size;
-              const isLong = size > 0n;
-
-              console.log(
-                colorText(
-                  `   User ${i + 1} has ${
-                    isLong ? "LONG" : "SHORT"
-                  } ${ethers.formatUnits(absSize, 18)} ALU`,
-                  colors.cyan
-                )
-              );
-
-              // Place opposite order to close position
-              const closePrice = ethers.parseUnits("10", 6); // Use $10 as a fair closing price
-              await this.contracts.orderBook
-                .connect(user)
-                .placeMarginLimitOrder(
-                  closePrice,
-                  absSize,
-                  !isLong // Opposite direction to close
-                );
-
-              // Have another user take the opposite side
-              const counterparty = users[(i + 1) % users.length];
-              await this.contracts.orderBook
-                .connect(counterparty)
-                .placeMarginLimitOrder(closePrice, absSize, isLong);
-
-              console.log(
-                colorText(`     ✅ Position closed at $10`, colors.green)
-              );
-            }
-          }
-        } catch (error) {
-          // Skip if user has no positions
-        }
-      }
-
-      // Step 3: Reset collateral to 5000 USDC for each user
-      console.log(
-        colorText(
-          "\n💰 Step 3: Resetting user collateral to 5000 USDC...",
-          colors.yellow
-        )
-      );
-
-      const targetCollateral = ethers.parseUnits("5000", 6);
-      const deployer = signers[0];
-      const mockUSDC = await ethers.getContractAt(
-        "MockUSDC",
-        getAddress("MOCK_USDC")
-      );
-
-      for (let i = 0; i < users.length; i++) {
-        const user = users[i];
-        try {
-          const marginSummary = await this.contracts.vault.getMarginSummary(
-            user.address
-          );
-          const currentCollateral = marginSummary.totalCollateral;
-
-          if (currentCollateral < targetCollateral) {
-            // Need to deposit more
-            const toDeposit = targetCollateral - currentCollateral;
-
-            // First ensure user has USDC
-            const userUsdcBalance = await mockUSDC.balanceOf(user.address);
-            if (userUsdcBalance < toDeposit) {
-              // Mint USDC to user
-              await mockUSDC
-                .connect(deployer)
-                .mint(user.address, toDeposit - userUsdcBalance);
-            }
-
-            // Approve and deposit
-            await mockUSDC
-              .connect(user)
-              .approve(this.contracts.vault.target, toDeposit);
-            await this.contracts.vault
-              .connect(user)
-              .depositCollateral(toDeposit);
-
-            console.log(
-              colorText(
-                `   User ${i + 1}: Deposited ${ethers.formatUnits(
-                  toDeposit,
-                  6
-                )} USDC`,
-                colors.green
-              )
-            );
-          } else if (currentCollateral > targetCollateral) {
-            // Need to withdraw
-            const toWithdraw = currentCollateral - targetCollateral;
-            await this.contracts.vault
-              .connect(user)
-              .withdrawCollateral(toWithdraw);
-
-            console.log(
-              colorText(
-                `   User ${i + 1}: Withdrew ${ethers.formatUnits(
-                  toWithdraw,
-                  6
-                )} USDC`,
-                colors.yellow
-              )
-            );
-          } else {
-            console.log(
-              colorText(`   User ${i + 1}: Already has 5000 USDC`, colors.green)
-            );
-          }
-
-          // Verify final balance
-          const finalSummary = await this.contracts.vault.getMarginSummary(
-            user.address
-          );
-          console.log(
-            colorText(
-              `     Final collateral: ${ethers.formatUnits(
-                finalSummary.totalCollateral,
-                6
-              )} USDC`,
-              colors.cyan
-            )
-          );
-        } catch (error) {
-          console.log(
-            colorText(`   User ${i + 1}: Error - ${error.message}`, colors.red)
-          );
-        }
-      }
-
-      console.log(colorText("\n✅ RESET COMPLETE!", colors.brightGreen));
-      console.log(colorText("\n📊 Final Status:", colors.brightCyan));
-      console.log(colorText("  • All orders cancelled", colors.green));
-      console.log(colorText("  • All positions closed", colors.green));
-      console.log(
-        colorText("  • Each user has 5000 USDC collateral", colors.green)
-      );
-      console.log(colorText("  • Order book is empty", colors.green));
-    } catch (error) {
-      console.log(colorText("\n❌ Reset failed: " + error.message, colors.red));
-      console.error("Debug - Full error:", error);
-    }
-
-    await this.askQuestion(
-      colorText("\n📱 Press Enter to continue...", colors.dim)
-    );
-  }
-
   async exit() {
     console.clear();
     console.log(
@@ -4882,13 +4726,553 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
 
   // UTILITY METHODS
   askQuestion(question) {
+    // If running non-interactively or input closed, exit cleanly
+    if (
+      !process.stdin.isTTY ||
+      !this.rl ||
+      this.rl.closed ||
+      this.inputClosed
+    ) {
+      try {
+        console.log(
+          colorText(
+            "\n⚠️ Non-interactive mode detected (stdin closed). Exiting.",
+            colors.yellow
+          )
+        );
+      } catch (_) {}
+      process.exit(0);
+    }
     return new Promise((resolve) => {
-      this.rl.question(question, resolve);
+      try {
+        this.rl.question(question, (answer) => resolve(answer ?? ""));
+      } catch (_) {
+        try {
+          console.log(
+            colorText("\n⚠️ Input unavailable. Exiting trader.", colors.yellow)
+          );
+        } catch (__) {}
+        process.exit(0);
+      }
     });
   }
 
   async pause(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Display detailed margin analysis from all sources
+   */
+  async viewDetailedMarginAnalysis() {
+    console.clear();
+    console.log(colorText("🔍 DETAILED MARGIN ANALYSIS", colors.brightCyan));
+    console.log(gradient("═".repeat(80)));
+
+    try {
+      const comprehensiveMarginData = await this.getComprehensiveMarginData();
+
+      if (comprehensiveMarginData.sources.error) {
+        console.log(
+          colorText(
+            `❌ Error: ${comprehensiveMarginData.sources.error}`,
+            colors.red
+          )
+        );
+        await this.pause(3000);
+        return;
+      }
+
+      // Display summary
+      console.log(colorText("\n📊 MARGIN SUMMARY", colors.brightYellow));
+      console.log(colorText("─".repeat(60), colors.dim));
+      console.log(
+        colorText(
+          `Total Margin Used:     ${colorText(
+            comprehensiveMarginData.totals.totalMarginUsed.toFixed(6),
+            colors.yellow
+          )} USDC`,
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          `Total Margin Reserved: ${colorText(
+            comprehensiveMarginData.totals.totalMarginReserved.toFixed(6),
+            colors.orange
+          )} USDC`,
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          `Total Margin Locked:   ${colorText(
+            comprehensiveMarginData.totals.totalMarginLocked.toFixed(6),
+            colors.magenta
+          )} USDC`,
+          colors.white
+        )
+      );
+
+      // Display each source in detail
+      console.log(colorText("\n🏛️ COREVAULT SOURCES", colors.brightCyan));
+      console.log(colorText("─".repeat(60), colors.dim));
+
+      // CoreVault Summary
+      if (comprehensiveMarginData.sources.coreVaultSummary) {
+        const summary = comprehensiveMarginData.sources.coreVaultSummary;
+        console.log(colorText(`\n📋 ${summary.source}`, colors.cyan));
+        console.log(
+          colorText(
+            `   Margin Used:        ${colorText(
+              summary.marginUsed,
+              colors.yellow
+            )} USDC`,
+            colors.white
+          )
+        );
+        console.log(
+          colorText(
+            `   Margin Reserved:    ${colorText(
+              summary.marginReserved,
+              colors.orange
+            )} USDC`,
+            colors.white
+          )
+        );
+        console.log(
+          colorText(
+            `   Total Collateral:   ${colorText(
+              summary.totalCollateral,
+              colors.green
+            )} USDC`,
+            colors.white
+          )
+        );
+        console.log(
+          colorText(
+            `   Available:          ${colorText(
+              summary.availableCollateral,
+              colors.brightGreen
+            )} USDC`,
+            colors.white
+          )
+        );
+        console.log(colorText(`   Raw Values:`, colors.dim));
+        console.log(
+          colorText(`     marginUsed: ${summary.raw.marginUsed}`, colors.dim)
+        );
+        console.log(
+          colorText(
+            `     marginReserved: ${summary.raw.marginReserved}`,
+            colors.dim
+          )
+        );
+      }
+
+      // Direct margin mapping
+      if (comprehensiveMarginData.sources.coreVaultDirect) {
+        const direct = comprehensiveMarginData.sources.coreVaultDirect;
+        console.log(colorText(`\n🎯 ${direct.source}`, colors.cyan));
+        console.log(
+          colorText(
+            `   Margin Locked:      ${colorText(
+              direct.marginLocked,
+              colors.yellow
+            )} USDC`,
+            colors.white
+          )
+        );
+        console.log(colorText(`   Raw Value: ${direct.raw}`, colors.dim));
+      }
+
+      // Position-embedded margin
+      if (comprehensiveMarginData.sources.coreVaultPositions) {
+        const positions = comprehensiveMarginData.sources.coreVaultPositions;
+        console.log(colorText(`\n📍 ${positions.source}`, colors.cyan));
+        console.log(
+          colorText(
+            `   Total from Positions: ${colorText(
+              positions.totalMarginFromPositions,
+              colors.yellow
+            )} USDC`,
+            colors.white
+          )
+        );
+
+        if (positions.positions && positions.positions.length > 0) {
+          console.log(colorText(`   Position Details:`, colors.white));
+          for (const pos of positions.positions) {
+            console.log(
+              colorText(
+                `     Market: ${pos.marketId.substring(0, 8)}...`,
+                colors.dim
+              )
+            );
+            console.log(colorText(`     Size: ${pos.size} ALU`, colors.dim));
+            console.log(
+              colorText(`     Entry: ${pos.entryPrice} USDC`, colors.dim)
+            );
+            console.log(
+              colorText(
+                `     Margin: ${colorText(
+                  pos.marginLocked,
+                  colors.yellow
+                )} USDC`,
+                colors.white
+              )
+            );
+            console.log(colorText(`     Raw: ${pos.raw}`, colors.dim));
+          }
+        }
+      }
+
+      // Global counter
+      if (comprehensiveMarginData.sources.coreVaultGlobal) {
+        const global = comprehensiveMarginData.sources.coreVaultGlobal;
+        console.log(colorText(`\n🌍 ${global.source}`, colors.cyan));
+        console.log(
+          colorText(
+            `   Global Total:       ${colorText(
+              global.totalMarginLocked,
+              colors.magenta
+            )} USDC`,
+            colors.white
+          )
+        );
+        console.log(colorText(`   Raw Value: ${global.raw}`, colors.dim));
+      }
+
+      // OrderBook sources
+      console.log(colorText("\n📋 ORDERBOOK SOURCES", colors.brightMagenta));
+      console.log(colorText("─".repeat(60), colors.dim));
+
+      if (comprehensiveMarginData.sources.orderBookPosition) {
+        const obPos = comprehensiveMarginData.sources.orderBookPosition;
+        console.log(colorText(`\n🎯 ${obPos.source}`, colors.magenta));
+        console.log(
+          colorText(
+            `   Position Size:      ${colorText(
+              obPos.positionSize,
+              colors.yellow
+            )} ALU`,
+            colors.white
+          )
+        );
+        console.log(colorText(`   Note: ${obPos.note}`, colors.dim));
+      }
+
+      if (comprehensiveMarginData.sources.orderBookOrders) {
+        const orders = comprehensiveMarginData.sources.orderBookOrders;
+        console.log(colorText(`\n📋 ${orders.source}`, colors.magenta));
+        console.log(
+          colorText(
+            `   Total from Orders:  ${colorText(
+              orders.totalMarginFromOrders,
+              colors.orange
+            )} USDC`,
+            colors.white
+          )
+        );
+
+        if (orders.orders && orders.orders.length > 0) {
+          console.log(colorText(`   Order Details:`, colors.white));
+          for (const order of orders.orders) {
+            console.log(
+              colorText(`     Order ID: ${order.orderId}`, colors.dim)
+            );
+            console.log(
+              colorText(
+                `     Amount: ${order.amount} ALU @ ${order.price} USDC`,
+                colors.dim
+              )
+            );
+            console.log(
+              colorText(
+                `     Type: ${order.isBuy ? "BUY" : "SELL"} ${
+                  order.isMarginOrder ? "(MARGIN)" : "(SPOT)"
+                }`,
+                colors.dim
+              )
+            );
+            console.log(
+              colorText(
+                `     Margin: ${colorText(
+                  order.marginRequired,
+                  colors.orange
+                )} USDC`,
+                colors.white
+              )
+            );
+            console.log(colorText(`     Raw: ${order.raw}`, colors.dim));
+          }
+        }
+      }
+
+      // Discrepancies
+      if (
+        comprehensiveMarginData.totals.discrepancies &&
+        comprehensiveMarginData.totals.discrepancies.length > 0
+      ) {
+        console.log(colorText("\n⚠️ DISCREPANCIES FOUND", colors.red));
+        console.log(colorText("─".repeat(60), colors.dim));
+
+        for (const discrepancy of comprehensiveMarginData.totals
+          .discrepancies) {
+          console.log(colorText(`\n❌ ${discrepancy.type}`, colors.red));
+          console.log(colorText(`   ${discrepancy.description}`, colors.white));
+          console.log(
+            colorText(
+              `   Difference: ${colorText(
+                discrepancy.difference,
+                colors.red
+              )} USDC`,
+              colors.white
+            )
+          );
+        }
+
+        console.log(colorText("\n💡 RECOMMENDATIONS:", colors.brightYellow));
+        console.log(
+          colorText(
+            "   • Check for stale data in OrderBook local tracking",
+            colors.white
+          )
+        );
+        console.log(
+          colorText(
+            "   • Verify PositionManager netting is being called",
+            colors.white
+          )
+        );
+        console.log(
+          colorText(
+            "   • Look for direct margin mutations bypassing libraries",
+            colors.white
+          )
+        );
+      } else {
+        console.log(colorText("\n✅ NO DISCREPANCIES FOUND", colors.green));
+        console.log(
+          colorText(
+            "All margin sources are synchronized correctly.",
+            colors.white
+          )
+        );
+      }
+
+      console.log(colorText("\n" + "─".repeat(60), colors.dim));
+      console.log(
+        colorText("Press any key to return to main menu...", colors.dim)
+      );
+      await this.askQuestion("");
+    } catch (error) {
+      console.log(
+        colorText(
+          `❌ Error in detailed margin analysis: ${error.message}`,
+          colors.red
+        )
+      );
+      console.log(
+        colorText("Press any key to return to main menu...", colors.dim)
+      );
+      await this.askQuestion("");
+    }
+  }
+
+  /**
+   * Get comprehensive margin data from all available sources
+   * @returns {Object} Comprehensive margin breakdown with sources
+   */
+  async getComprehensiveMarginData() {
+    const marketId = MARKET_INFO.ALUMINUM.marketId;
+    const marginData = {
+      sources: {},
+      totals: {
+        totalMarginUsed: 0,
+        totalMarginReserved: 0,
+        totalMarginLocked: 0,
+        discrepancies: [],
+      },
+    };
+
+    try {
+      // 1. CoreVault - Primary margin tracking
+      console.log("🔍 Fetching margin data from CoreVault...");
+
+      // Get margin summary (aggregated view)
+      const marginSummary = await this.contracts.vault.getMarginSummary(
+        this.currentUser.address
+      );
+      marginData.sources.coreVaultSummary = {
+        source: "CoreVault.getMarginSummary()",
+        marginUsed: formatWithAutoDecimalDetection(marginSummary.marginUsed, 6),
+        marginReserved: formatUSDC(marginSummary.marginReserved),
+        totalCollateral: formatWithAutoDecimalDetection(
+          marginSummary.totalCollateral,
+          6
+        ),
+        availableCollateral: formatWithAutoDecimalDetection(
+          marginSummary.availableCollateral,
+          6
+        ),
+        raw: {
+          marginUsed: marginSummary.marginUsed.toString(),
+          marginReserved: marginSummary.marginReserved.toString(),
+          totalCollateral: marginSummary.totalCollateral.toString(),
+          availableCollateral: marginSummary.availableCollateral.toString(),
+        },
+      };
+
+      // Get direct margin mapping
+      const directMargin = await this.contracts.vault.userMarginByMarket(
+        this.currentUser.address,
+        marketId
+      );
+      marginData.sources.coreVaultDirect = {
+        source: "CoreVault.userMarginByMarket[user][marketId]",
+        marginLocked: formatUSDC(directMargin),
+        raw: directMargin.toString(),
+      };
+
+      // Get positions with embedded margin
+      const positions = await this.contracts.vault.getUserPositions(
+        this.currentUser.address
+      );
+      let positionMarginTotal = 0;
+      const positionMargins = [];
+      for (let i = 0; i < positions.length; i++) {
+        const pos = positions[i];
+        positionMarginTotal += parseFloat(formatUSDC(pos.marginLocked));
+        positionMargins.push({
+          marketId: pos.marketId,
+          size: pos.size.toString(),
+          entryPrice: formatUSDC(pos.entryPrice),
+          marginLocked: formatUSDC(pos.marginLocked),
+          raw: pos.marginLocked.toString(),
+        });
+      }
+      marginData.sources.coreVaultPositions = {
+        source: "CoreVault.userPositions[user][i].marginLocked",
+        totalMarginFromPositions: positionMarginTotal.toFixed(6),
+        positions: positionMargins,
+      };
+
+      // Get global margin counter
+      const globalMarginLocked = await this.contracts.vault.totalMarginLocked();
+      marginData.sources.coreVaultGlobal = {
+        source: "CoreVault.totalMarginLocked (global counter)",
+        totalMarginLocked: formatUSDC(globalMarginLocked),
+        raw: globalMarginLocked.toString(),
+      };
+
+      // 2. OrderBook - Local position tracking
+      console.log("🔍 Fetching margin data from OrderBook...");
+
+      // Get OrderBook's local position
+      const orderBookPosition = await this.contracts.orderBook.getUserPosition(
+        this.currentUser.address
+      );
+      marginData.sources.orderBookPosition = {
+        source: "OrderBook.userPositions[user] (local tracking)",
+        positionSize: orderBookPosition.toString(),
+        note: "This is OrderBook's local position size tracking (int256)",
+      };
+
+      // Get user orders and their margin requirements
+      const userOrders = await this.contracts.orderBook.getUserOrders(
+        this.currentUser.address
+      );
+      let orderMarginTotal = 0;
+      const orderMargins = [];
+      for (const orderId of userOrders) {
+        try {
+          const order = await this.contracts.orderBook.getOrder(orderId);
+          if (
+            order &&
+            order.trader !== "0x0000000000000000000000000000000000000000"
+          ) {
+            orderMarginTotal += parseFloat(formatUSDC(order.marginRequired));
+            orderMargins.push({
+              orderId: orderId.toString(),
+              marginRequired: formatUSDC(order.marginRequired),
+              amount: formatALU(order.amount),
+              price: formatUSDC(order.price),
+              isBuy: order.isBuy,
+              isMarginOrder: order.isMarginOrder,
+              raw: order.marginRequired.toString(),
+            });
+          }
+        } catch (error) {
+          console.log(`⚠️ Could not fetch order ${orderId}: ${error.message}`);
+        }
+      }
+      marginData.sources.orderBookOrders = {
+        source: "OrderBook.orders[orderId].marginRequired",
+        totalMarginFromOrders: orderMarginTotal.toFixed(6),
+        orders: orderMargins,
+      };
+
+      // 3. Calculate totals and identify discrepancies
+      const summaryMarginUsed = parseFloat(
+        marginData.sources.coreVaultSummary.marginUsed
+      );
+      const summaryMarginReserved = parseFloat(
+        marginData.sources.coreVaultSummary.marginReserved
+      );
+      const directMarginValue = parseFloat(
+        marginData.sources.coreVaultDirect.marginLocked
+      );
+      const positionMarginValue = parseFloat(
+        marginData.sources.coreVaultPositions.totalMarginFromPositions
+      );
+
+      marginData.totals.totalMarginUsed = summaryMarginUsed;
+      marginData.totals.totalMarginReserved = summaryMarginReserved;
+      marginData.totals.totalMarginLocked =
+        summaryMarginUsed + summaryMarginReserved;
+
+      // Check for discrepancies
+      const tolerance = 0.000001; // 1 micro USDC tolerance
+
+      if (Math.abs(directMarginValue - positionMarginValue) > tolerance) {
+        marginData.totals.discrepancies.push({
+          type: "CoreVault Internal Mismatch",
+          description: `userMarginByMarket (${directMarginValue}) ≠ sum of position.marginLocked (${positionMarginValue})`,
+          difference: (directMarginValue - positionMarginValue).toFixed(6),
+        });
+      }
+
+      if (
+        Math.abs(
+          summaryMarginUsed - Math.max(directMarginValue, positionMarginValue)
+        ) > tolerance
+      ) {
+        marginData.totals.discrepancies.push({
+          type: "Summary vs Direct Mismatch",
+          description: `getMarginSummary.marginUsed (${summaryMarginUsed}) ≠ direct margin queries`,
+          difference: (
+            summaryMarginUsed - Math.max(directMarginValue, positionMarginValue)
+          ).toFixed(6),
+        });
+      }
+
+      console.log("✅ Comprehensive margin data collected successfully");
+      return marginData;
+    } catch (error) {
+      console.log(
+        `⚠️ Error collecting comprehensive margin data: ${error.message}`
+      );
+      return {
+        sources: { error: error.message },
+        totals: {
+          totalMarginUsed: 0,
+          totalMarginReserved: 0,
+          totalMarginLocked: 0,
+          discrepancies: [],
+        },
+      };
+    }
   }
 }
 

@@ -6,7 +6,9 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./OrderBook.sol";
 import "./FuturesMarketFactory.sol";
-import "./CentralizedVault.sol";
+import "./CoreVault.sol";
+import "./PositionManager.sol";
+import "./VaultAnalytics.sol";
 
 /**
  * @title TradingRouter
@@ -19,7 +21,7 @@ contract TradingRouter is AccessControl, ReentrancyGuard, Pausable {
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
 
     // ============ Core Dependencies ============
-    CentralizedVault public immutable VAULT_ROUTER;
+    CoreVault public immutable VAULT_ROUTER;
     FuturesMarketFactory public immutable ORDER_BOOK_FACTORY;
 
     // ============ Data Structures ============
@@ -150,7 +152,7 @@ contract TradingRouter is AccessControl, ReentrancyGuard, Pausable {
         require(_orderBookFactory != address(0), "TradingRouter: factory cannot be zero address");
         require(_admin != address(0), "TradingRouter: admin cannot be zero address");
 
-        VAULT_ROUTER = CentralizedVault(_vaultRouter);
+        VAULT_ROUTER = CoreVault(_vaultRouter);
         ORDER_BOOK_FACTORY = FuturesMarketFactory(_orderBookFactory);
         
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
@@ -524,8 +526,8 @@ contract TradingRouter is AccessControl, ReentrancyGuard, Pausable {
         uint256 totalValue,
         int256[] memory marketExposures
     ) {
-        CentralizedVault.MarginSummary memory marginSummary = VAULT_ROUTER.getMarginSummary(user);
-        CentralizedVault.Position[] memory positions = VAULT_ROUTER.getUserPositions(user);
+        VaultAnalytics.MarginSummary memory marginSummary = VAULT_ROUTER.getMarginSummary(user);
+        PositionManager.Position[] memory positions = VAULT_ROUTER.getUserPositions(user);
         
         totalValue = uint256(marginSummary.portfolioValue);
         marketExposures = new int256[](positions.length);
@@ -549,7 +551,7 @@ contract TradingRouter is AccessControl, ReentrancyGuard, Pausable {
         PositionBreakdown[] memory breakdowns,
         PositionPortfolioSummary memory summary
     ) {
-        CentralizedVault.Position[] memory positions = VAULT_ROUTER.getUserPositions(user);
+        PositionManager.Position[] memory positions = VAULT_ROUTER.getUserPositions(user);
         breakdowns = new PositionBreakdown[](positions.length);
         
         uint256 profitableCount = 0;
@@ -559,7 +561,7 @@ contract TradingRouter is AccessControl, ReentrancyGuard, Pausable {
         uint256 totalMarginUtilization = 0;
         
         for (uint256 i = 0; i < positions.length; i++) {
-            CentralizedVault.Position memory position = positions[i];
+            PositionManager.Position memory position = positions[i];
             
             // Get current market price
             address orderBookAddress = ORDER_BOOK_FACTORY.getOrderBookForMarket(position.marketId);
@@ -619,7 +621,7 @@ contract TradingRouter is AccessControl, ReentrancyGuard, Pausable {
                 entryPrice: position.entryPrice,
                 currentPrice: currentPrice,
                 marginLocked: position.marginLocked,
-                timestamp: position.timestamp,
+                timestamp: block.timestamp, // Use current timestamp since not stored in position
                 unrealizedPnL: unrealizedPnL,
                 unrealizedPnLPercent: unrealizedPnLPercent,
                 notionalValue: notionalValue,
@@ -664,13 +666,13 @@ contract TradingRouter is AccessControl, ReentrancyGuard, Pausable {
      * @return marginSummary Margin summary from vault
      */
     function getUserTradingData(address user) external view returns (
-        CentralizedVault.Position[] memory positions,
+        PositionManager.Position[] memory positions,
         bytes32[] memory activeOrderMarkets,
         bytes32[][] memory activeOrderIds,
         OrderBook.Order[][] memory activeOrders,
         uint256 portfolioValue,
         int256[] memory marketExposures,
-        CentralizedVault.MarginSummary memory marginSummary
+        VaultAnalytics.MarginSummary memory marginSummary
     ) {
         // Get positions and margin data from vault
         positions = VAULT_ROUTER.getUserPositions(user);
@@ -880,7 +882,7 @@ contract TradingRouter is AccessControl, ReentrancyGuard, Pausable {
         PositionBreakdown memory breakdown,
         bool hasPosition
     ) {
-        CentralizedVault.Position[] memory positions = VAULT_ROUTER.getUserPositions(user);
+        PositionManager.Position[] memory positions = VAULT_ROUTER.getUserPositions(user);
         
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId) {

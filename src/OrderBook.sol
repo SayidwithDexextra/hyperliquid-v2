@@ -1566,29 +1566,32 @@ contract OrderBook {
 
     // CRITICAL FIX: Skip margin updates for OrderBook contract (liquidation orders)
     if (user == address(this)) return;
-        uint256 openingAmount = 0;
-        if (oldPosition < 0 && amount > 0) {
-            // Closing short
-            int256 absOldPosition = -oldPosition;
-            if (amount > absOldPosition) {
-                openingAmount = uint256(amount - absOldPosition);
+        // Compute margin required only for the opening portion; for pure closing, it's zero
+        uint256 marginRequired = 0;
+        {
+            uint256 openingAmount = 0;
+            if (oldPosition < 0 && amount > 0) {
+                // Closing short; any excess over abs(old) is opening
+                int256 absOldPosition = -oldPosition;
+                if (amount > absOldPosition) {
+                    openingAmount = uint256(amount - absOldPosition);
+                }
+            } else if (oldPosition > 0 && amount < 0) {
+                // Closing long; any excess over old is opening short
+                if (-amount > oldPosition) {
+                    openingAmount = uint256(-amount - oldPosition);
+                }
+            } else {
+                // Same-direction increase is fully opening
+                openingAmount = uint256(amount > 0 ? amount : -amount);
             }
-        } else if (oldPosition > 0 && amount < 0) {
-            // Closing long
-            if (-amount > oldPosition) {
-                openingAmount = uint256(-amount - oldPosition);
+            if (openingAmount > 0) {
+                int256 signedOpeningAmount = amount > 0 ? int256(openingAmount) : -int256(openingAmount);
+                marginRequired = _calculateExecutionMargin(signedOpeningAmount, price);
             }
-        } else {
-            // Opening new position
-            openingAmount = uint256(amount > 0 ? amount : -amount);
         }
-
-        if (openingAmount > 0) {
-            // Use the actual trade direction (amount) to determine margin requirement
-            int256 signedOpeningAmount = amount > 0 ? int256(openingAmount) : -int256(openingAmount);
-            uint256 marginRequired = _calculateExecutionMargin(signedOpeningAmount, price);
-            vault.updatePositionWithMargin(user, marketId, amount, price, marginRequired);
-        }
+        // Always update vault position to apply netting and release margin when closing
+        vault.updatePositionWithMargin(user, marketId, amount, price, marginRequired);
     }
 
 
@@ -2080,7 +2083,7 @@ contract OrderBook {
         uint256 _tradingFee,
         address _feeRecipient
     ) external onlyAdmin {
-        require(_marginRequirementBps <= 5000, "OrderBook: margin requirement too high"); // Max 50%
+        require(_marginRequirementBps <= 15000, "OrderBook: margin requirement too high"); // Max 150% for shorts
         require(_tradingFee <= 1000, "OrderBook: trading fee too high"); // Max 10%
         require(_feeRecipient != address(0), "OrderBook: fee recipient cannot be zero");
         
@@ -2195,7 +2198,7 @@ contract OrderBook {
         lastTradePriceReturn = lastTradePrice;
         
         // Calculate mid price
-        if (bestBid > 0 && bestAsk > 0) {
+        if (bestBid > 0 && bestAsk < type(uint256).max) {
             midPrice = (bestBid + bestAsk) / 2;
             spread = bestAsk - bestBid;
             spreadBps = (spread * 10000) / midPrice; // Convert to basis points
@@ -2205,7 +2208,7 @@ contract OrderBook {
             spread = 0;
             spreadBps = 0;
             isValid = true;
-        } else if (bestAsk > 0) {
+        } else if (bestAsk < type(uint256).max) {
             midPrice = bestAsk;
             spread = 0;
             spreadBps = 0;

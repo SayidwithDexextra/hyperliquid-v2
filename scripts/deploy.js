@@ -2,15 +2,16 @@
 
 // deploy.js - Complete deployment script for HyperLiquid v2
 //
-// 🎯 THIS SCRIPT DOES EVERYTHING:
-//   1. Deploys all core contracts (MockUSDC, Vault, Factory, Router)
-//   2. Sets up all authorization and roles
-//   3. Creates ALUMINUM market
-//   4. Funds trading accounts with USDC and collateral
-//   5. Places initial limit buy order (10 ALU @ $1.00 from deployer)
-//   6. Executes market sell order from User3 (creates first trade & short position)
-//   7. Places User2 limit buy order (20 ALU @ $2.50 for liquidity)
-//   8. Updates configuration files
+// 🎯 THIS SCRIPT DEPLOYS OUR NEW MODULAR ARCHITECTURE:
+//   1. Deploys libraries (VaultAnalytics, PositionManager, LiquidationLibrary)
+//   2. Deploys core contracts (MockUSDC, CoreVault, LiquidationHandler, Factory, Router)
+//   3. Sets up all authorization and roles between modular contracts
+//   4. Creates ALUMINUM market
+//   5. Funds trading accounts with USDC and collateral
+//   6. Places initial limit buy order (10 ALU @ $1.00 from deployer)
+//   7. Executes market sell order from User3 (creates first trade & short position)
+//   8. Places User2 limit buy order (20 ALU @ $2.50 for liquidity)
+//   9. Updates configuration files
 //
 // 🚀 USAGE:
 //   node scripts/deploy.js
@@ -28,8 +29,12 @@ const COLLATERAL_PER_USER = "1000"; // 1,000 USDC collateral per user
 const NUM_USERS = 4; // Setup 4 trading accounts
 
 async function main() {
-  console.log("\n🚀 HYPERLIQUID V2 - COMPLETE DEPLOYMENT");
+  console.log("\n🚀 HYPERLIQUID V2 - MODULAR DEPLOYMENT");
   console.log("═".repeat(80));
+  console.log(
+    "🏗️  NEW ARCHITECTURE: CoreVault + LiquidationHandler + 3 Libraries"
+  );
+  console.log("✅ All contracts under 24,576 byte limit!");
 
   const [deployer] = await ethers.getSigners();
   console.log("📋 Deployer:", deployer.address);
@@ -51,29 +56,84 @@ async function main() {
     contracts.MOCK_USDC = await mockUSDC.getAddress();
     console.log("     ✅ MockUSDC deployed at:", contracts.MOCK_USDC);
 
-    // Deploy CentralizedVault (now includes liquidation + margin logic)
-    console.log("  2️⃣ Deploying CentralizedVault...");
-    const CentralizedVault = await ethers.getContractFactory(
-      "CentralizedVault"
+    // Deploy all libraries first (required for linking)
+    console.log("  2️⃣ Deploying VaultAnalytics library...");
+    const VaultAnalytics = await ethers.getContractFactory("VaultAnalytics");
+    const vaultAnalytics = await VaultAnalytics.deploy();
+    await vaultAnalytics.waitForDeployment();
+    contracts.VAULT_ANALYTICS = await vaultAnalytics.getAddress();
+    console.log(
+      "     ✅ VaultAnalytics deployed at:",
+      contracts.VAULT_ANALYTICS
     );
-    const vault = await CentralizedVault.deploy(
+
+    console.log("  3️⃣ Deploying PositionManager library...");
+    const PositionManager = await ethers.getContractFactory("PositionManager");
+    const positionManager = await PositionManager.deploy();
+    await positionManager.waitForDeployment();
+    contracts.POSITION_MANAGER = await positionManager.getAddress();
+    console.log(
+      "     ✅ PositionManager deployed at:",
+      contracts.POSITION_MANAGER
+    );
+
+    console.log("  4️⃣ Deploying LiquidationLibrary...");
+    const LiquidationLibrary = await ethers.getContractFactory(
+      "LiquidationLibrary"
+    );
+    const liquidationLibrary = await LiquidationLibrary.deploy();
+    await liquidationLibrary.waitForDeployment();
+    contracts.LIQUIDATION_LIBRARY = await liquidationLibrary.getAddress();
+    console.log(
+      "     ✅ LiquidationLibrary deployed at:",
+      contracts.LIQUIDATION_LIBRARY
+    );
+
+    // Deploy CoreVault (with library linking)
+    console.log("  5️⃣ Deploying CoreVault...");
+    const CoreVault = await ethers.getContractFactory("CoreVault", {
+      libraries: {
+        VaultAnalytics: contracts.VAULT_ANALYTICS,
+        PositionManager: contracts.POSITION_MANAGER,
+      },
+    });
+    const coreVault = await CoreVault.deploy(
       contracts.MOCK_USDC,
       deployer.address
     );
-    await vault.waitForDeployment();
-    contracts.CENTRALIZED_VAULT = await vault.getAddress();
+    await coreVault.waitForDeployment();
+    contracts.CORE_VAULT = await coreVault.getAddress();
+    console.log("     ✅ CoreVault deployed at:", contracts.CORE_VAULT);
+
+    // Deploy LiquidationHandler (with library linking)
+    console.log("  6️⃣ Deploying LiquidationHandler...");
+    const LiquidationHandler = await ethers.getContractFactory(
+      "LiquidationHandler",
+      {
+        libraries: {
+          LiquidationLibrary: contracts.LIQUIDATION_LIBRARY,
+          VaultAnalytics: contracts.VAULT_ANALYTICS,
+        },
+      }
+    );
+    const liquidationHandler = await LiquidationHandler.deploy(
+      contracts.CORE_VAULT,
+      deployer.address
+    );
+    await liquidationHandler.waitForDeployment();
+    contracts.LIQUIDATION_HANDLER = await liquidationHandler.getAddress();
     console.log(
-      "     ✅ CentralizedVault deployed at:",
-      contracts.CENTRALIZED_VAULT
+      "     ✅ LiquidationHandler deployed at:",
+      contracts.LIQUIDATION_HANDLER
     );
 
     // Deploy FuturesMarketFactory
-    console.log("  3️⃣ Deploying FuturesMarketFactory...");
+    console.log("  7️⃣ Deploying FuturesMarketFactory...");
     const FuturesMarketFactory = await ethers.getContractFactory(
       "FuturesMarketFactory"
     );
     const factory = await FuturesMarketFactory.deploy(
-      contracts.CENTRALIZED_VAULT,
+      contracts.CORE_VAULT,
       deployer.address,
       deployer.address
     );
@@ -85,10 +145,10 @@ async function main() {
     );
 
     // Deploy TradingRouter
-    console.log("  4️⃣ Deploying TradingRouter...");
+    console.log("  8️⃣ Deploying TradingRouter...");
     const TradingRouter = await ethers.getContractFactory("TradingRouter");
     const router = await TradingRouter.deploy(
-      contracts.CENTRALIZED_VAULT,
+      contracts.CORE_VAULT,
       contracts.FUTURES_MARKET_FACTORY,
       deployer.address
     );
@@ -106,14 +166,24 @@ async function main() {
     const SETTLEMENT_ROLE = ethers.keccak256(
       ethers.toUtf8Bytes("SETTLEMENT_ROLE")
     );
+    const ORDERBOOK_ROLE = ethers.keccak256(
+      ethers.toUtf8Bytes("ORDERBOOK_ROLE")
+    );
 
-    console.log("  🔧 Granting FACTORY_ROLE to FuturesMarketFactory...");
-    await vault.grantRole(FACTORY_ROLE, contracts.FUTURES_MARKET_FACTORY);
-    console.log("     ✅ FACTORY_ROLE granted");
+    console.log("  🔧 Setting up modular contract roles...");
+    console.log("     → Granting FACTORY_ROLE to FuturesMarketFactory...");
+    await coreVault.grantRole(FACTORY_ROLE, contracts.FUTURES_MARKET_FACTORY);
 
-    console.log("  🔧 Granting SETTLEMENT_ROLE to FuturesMarketFactory...");
-    await vault.grantRole(SETTLEMENT_ROLE, contracts.FUTURES_MARKET_FACTORY);
-    console.log("     ✅ SETTLEMENT_ROLE granted");
+    console.log("     → Granting SETTLEMENT_ROLE to FuturesMarketFactory...");
+    await coreVault.grantRole(
+      SETTLEMENT_ROLE,
+      contracts.FUTURES_MARKET_FACTORY
+    );
+
+    console.log("     → Granting ORDERBOOK_ROLE to LiquidationHandler...");
+    await coreVault.grantRole(ORDERBOOK_ROLE, contracts.LIQUIDATION_HANDLER);
+
+    console.log("     ✅ All modular roles granted successfully!");
 
     // ============================================
     // STEP 3: CREATE ALUMINUM MARKET
@@ -191,10 +261,10 @@ async function main() {
     // Set initial mark price for the market
     console.log("  📊 Setting initial mark price...");
     // SETTLEMENT_ROLE already declared above, grant it to deployer for mark price update
-    await vault.grantRole(SETTLEMENT_ROLE, deployer.address);
+    await coreVault.grantRole(SETTLEMENT_ROLE, deployer.address);
     // Set mark price to $1 to match initial liquidity
     const actualInitialPrice = ethers.parseUnits("1", 6); // $1 USDC
-    await vault.updateMarkPrice(actualMarketId, actualInitialPrice);
+    await coreVault.updateMarkPrice(actualMarketId, actualInitialPrice);
     console.log(
       `     ✅ Mark price set to $${ethers.formatUnits(
         actualInitialPrice,
@@ -209,11 +279,29 @@ async function main() {
     );
 
     // Grant ORDERBOOK_ROLE to the OrderBook
-    const ORDERBOOK_ROLE = ethers.keccak256(
-      ethers.toUtf8Bytes("ORDERBOOK_ROLE")
-    );
-    await vault.grantRole(ORDERBOOK_ROLE, contracts.ALUMINUM_ORDERBOOK);
+    await coreVault.grantRole(ORDERBOOK_ROLE, contracts.ALUMINUM_ORDERBOOK);
     console.log("     ✅ ORDERBOOK_ROLE granted to OrderBook");
+
+    // Configure margin requirements for 1:1 longs, 150% shorts (no leverage)
+    console.log("  🔧 Configuring margin requirements...");
+    const orderBook = await ethers.getContractAt(
+      "OrderBook",
+      contracts.ALUMINUM_ORDERBOOK
+    );
+
+    // Ensure leverage is disabled and margin is set to 100% (10000 BPS) for longs
+    // Shorts will require 150% but that's handled in the trading logic
+    try {
+      await orderBook.connect(deployer).disableLeverage();
+      console.log("     ✅ Leverage disabled - using 1:1 margin system");
+    } catch (error) {
+      console.log("     ⚠️  Leverage already disabled");
+    }
+
+    console.log("     ℹ️  Long positions: 100% margin (1:1)");
+    console.log(
+      "     ℹ️  Short positions: 150% margin (handled by trading logic)"
+    );
 
     // No VaultRouter – liquidation is integrated
 
@@ -246,15 +334,15 @@ async function main() {
         const collateralAmount = ethers.parseUnits(COLLATERAL_PER_USER, 6);
         await mockUSDC
           .connect(user)
-          .approve(contracts.CENTRALIZED_VAULT, collateralAmount);
-        await vault.connect(user).depositCollateral(collateralAmount);
+          .approve(contracts.CORE_VAULT, collateralAmount);
+        await coreVault.connect(user).depositCollateral(collateralAmount);
         console.log(
           `     ✅ Deposited ${COLLATERAL_PER_USER} USDC as collateral`
         );
 
         // Show final balances
         const balance = await mockUSDC.balanceOf(user.address);
-        const collateral = await vault.userCollateral(user.address);
+        const collateral = await coreVault.userCollateral(user.address);
         console.log(
           `     📊 Final: ${ethers.formatUnits(
             balance,
@@ -398,12 +486,31 @@ async function main() {
     // ============================================
     // DEPLOYMENT COMPLETE
     // ============================================
-    console.log("\n✅ DEPLOYMENT COMPLETE!");
+    console.log("\n✅ MODULAR DEPLOYMENT COMPLETE!");
     console.log("═".repeat(80));
+    console.log("🎉 NEW ARCHITECTURE: All contracts under 24,576 byte limit!");
 
     console.log("\n📋 DEPLOYED CONTRACTS:");
+    console.log("\n🏛️  CORE ARCHITECTURE:");
+    console.log(`  CORE_VAULT: ${contracts.CORE_VAULT}`);
+    console.log(`  LIQUIDATION_HANDLER: ${contracts.LIQUIDATION_HANDLER}`);
+    console.log("\n📚 LIBRARIES:");
+    console.log(`  VAULT_ANALYTICS: ${contracts.VAULT_ANALYTICS}`);
+    console.log(`  POSITION_MANAGER: ${contracts.POSITION_MANAGER}`);
+    console.log(`  LIQUIDATION_LIBRARY: ${contracts.LIQUIDATION_LIBRARY}`);
+    console.log("\n🏭 INFRASTRUCTURE:");
     Object.entries(contracts).forEach(([name, address]) => {
-      console.log(`  ${name}: ${address}`);
+      if (
+        ![
+          "CORE_VAULT",
+          "LIQUIDATION_HANDLER",
+          "VAULT_ANALYTICS",
+          "POSITION_MANAGER",
+          "LIQUIDATION_LIBRARY",
+        ].includes(name)
+      ) {
+        console.log(`  ${name}: ${address}`);
+      }
     });
 
     console.log("\n💰 TRADING ACCOUNTS:");
