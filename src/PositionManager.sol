@@ -44,7 +44,6 @@ library PositionManager {
      */
     function executePositionNetting(
         Position[] storage positions,
-        mapping(bytes32 => uint256) storage marginByMarket,
         address user,
         bytes32 marketId,
         int256 sizeDelta,
@@ -141,12 +140,8 @@ library PositionManager {
             }));
         }
         
-        // Update margin mapping
-        if (result.positionClosed) {
-            delete marginByMarket[marketId];
-        } else {
-            marginByMarket[marketId] = result.newMargin;
-        }
+        // Note: Margin is now tracked exclusively in Position struct
+        // No separate marginByMarket mapping needed - single source of truth
     }
 
     /**
@@ -154,7 +149,6 @@ library PositionManager {
      */
     function recalculatePositionMargin(
         Position[] storage positions,
-        mapping(bytes32 => uint256) storage marginByMarket,
         address user,
         bytes32 marketId,
         uint256 newRequiredMargin
@@ -173,7 +167,7 @@ library PositionManager {
                 }
                 
                 position.marginLocked = newRequiredMargin;
-                marginByMarket[marketId] = newRequiredMargin;
+                // Margin now tracked exclusively in Position struct
                 
                 return (oldMargin, marginDelta, isIncrease);
             }
@@ -187,7 +181,6 @@ library PositionManager {
      */
     function updatePosition(
         Position[] storage positions,
-        mapping(bytes32 => uint256) storage marginByMarket,
         address user,
         bytes32 marketId,
         int256 newSize,
@@ -206,13 +199,13 @@ library PositionManager {
                         positions[i] = positions[positions.length - 1];
                     }
                     positions.pop();
-                    delete marginByMarket[marketId];
+                    // Margin tracking removed from position - no separate mapping needed
                 } else {
                     // Update position
                     position.size = newSize;
                     position.entryPrice = newEntryPrice;
                     position.marginLocked = newMargin;
-                    marginByMarket[marketId] = newMargin;
+                    // Margin now tracked exclusively in Position struct
                 }
                 
                 return (oldSize, oldEntryPrice);
@@ -227,7 +220,7 @@ library PositionManager {
                 entryPrice: newEntryPrice,
                 marginLocked: newMargin
             }));
-            marginByMarket[marketId] = newMargin;
+            // Margin now tracked exclusively in Position struct
         }
         
         return (0, 0);

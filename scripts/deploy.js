@@ -3,8 +3,8 @@
 // deploy.js - Complete deployment script for HyperLiquid v2
 //
 // 🎯 THIS SCRIPT DEPLOYS OUR NEW MODULAR ARCHITECTURE:
-//   1. Deploys libraries (VaultAnalytics, PositionManager, LiquidationLibrary)
-//   2. Deploys core contracts (MockUSDC, CoreVault, LiquidationHandler, Factory, Router)
+//   1. Deploys libraries (VaultAnalytics, PositionManager)
+//   2. Deploys core contracts (MockUSDC, CoreVault, Factory, Router)
 //   3. Sets up all authorization and roles between modular contracts
 //   4. Creates ALUMINUM market
 //   5. Funds trading accounts with USDC and collateral
@@ -32,7 +32,7 @@ async function main() {
   console.log("\n🚀 HYPERLIQUID V2 - MODULAR DEPLOYMENT");
   console.log("═".repeat(80));
   console.log(
-    "🏗️  NEW ARCHITECTURE: CoreVault + LiquidationHandler + 3 Libraries"
+    "🏗️  NEW ARCHITECTURE: CoreVault + 2 Libraries (VaultAnalytics + PositionManager)"
   );
   console.log("✅ All contracts under 24,576 byte limit!");
 
@@ -77,20 +77,8 @@ async function main() {
       contracts.POSITION_MANAGER
     );
 
-    console.log("  4️⃣ Deploying LiquidationLibrary...");
-    const LiquidationLibrary = await ethers.getContractFactory(
-      "LiquidationLibrary"
-    );
-    const liquidationLibrary = await LiquidationLibrary.deploy();
-    await liquidationLibrary.waitForDeployment();
-    contracts.LIQUIDATION_LIBRARY = await liquidationLibrary.getAddress();
-    console.log(
-      "     ✅ LiquidationLibrary deployed at:",
-      contracts.LIQUIDATION_LIBRARY
-    );
-
     // Deploy CoreVault (with library linking)
-    console.log("  5️⃣ Deploying CoreVault...");
+    console.log("  4️⃣ Deploying CoreVault...");
     const CoreVault = await ethers.getContractFactory("CoreVault", {
       libraries: {
         VaultAnalytics: contracts.VAULT_ANALYTICS,
@@ -105,30 +93,8 @@ async function main() {
     contracts.CORE_VAULT = await coreVault.getAddress();
     console.log("     ✅ CoreVault deployed at:", contracts.CORE_VAULT);
 
-    // Deploy LiquidationHandler (with library linking)
-    console.log("  6️⃣ Deploying LiquidationHandler...");
-    const LiquidationHandler = await ethers.getContractFactory(
-      "LiquidationHandler",
-      {
-        libraries: {
-          LiquidationLibrary: contracts.LIQUIDATION_LIBRARY,
-          VaultAnalytics: contracts.VAULT_ANALYTICS,
-        },
-      }
-    );
-    const liquidationHandler = await LiquidationHandler.deploy(
-      contracts.CORE_VAULT,
-      deployer.address
-    );
-    await liquidationHandler.waitForDeployment();
-    contracts.LIQUIDATION_HANDLER = await liquidationHandler.getAddress();
-    console.log(
-      "     ✅ LiquidationHandler deployed at:",
-      contracts.LIQUIDATION_HANDLER
-    );
-
     // Deploy FuturesMarketFactory
-    console.log("  7️⃣ Deploying FuturesMarketFactory...");
+    console.log("  5️⃣ Deploying FuturesMarketFactory...");
     const FuturesMarketFactory = await ethers.getContractFactory(
       "FuturesMarketFactory"
     );
@@ -145,7 +111,7 @@ async function main() {
     );
 
     // Deploy TradingRouter
-    console.log("  8️⃣ Deploying TradingRouter...");
+    console.log("  6️⃣ Deploying TradingRouter...");
     const TradingRouter = await ethers.getContractFactory("TradingRouter");
     const router = await TradingRouter.deploy(
       contracts.CORE_VAULT,
@@ -179,9 +145,6 @@ async function main() {
       SETTLEMENT_ROLE,
       contracts.FUTURES_MARKET_FACTORY
     );
-
-    console.log("     → Granting ORDERBOOK_ROLE to LiquidationHandler...");
-    await coreVault.grantRole(ORDERBOOK_ROLE, contracts.LIQUIDATION_HANDLER);
 
     console.log("     ✅ All modular roles granted successfully!");
 
@@ -493,21 +456,13 @@ async function main() {
     console.log("\n📋 DEPLOYED CONTRACTS:");
     console.log("\n🏛️  CORE ARCHITECTURE:");
     console.log(`  CORE_VAULT: ${contracts.CORE_VAULT}`);
-    console.log(`  LIQUIDATION_HANDLER: ${contracts.LIQUIDATION_HANDLER}`);
     console.log("\n📚 LIBRARIES:");
     console.log(`  VAULT_ANALYTICS: ${contracts.VAULT_ANALYTICS}`);
     console.log(`  POSITION_MANAGER: ${contracts.POSITION_MANAGER}`);
-    console.log(`  LIQUIDATION_LIBRARY: ${contracts.LIQUIDATION_LIBRARY}`);
     console.log("\n🏭 INFRASTRUCTURE:");
     Object.entries(contracts).forEach(([name, address]) => {
       if (
-        ![
-          "CORE_VAULT",
-          "LIQUIDATION_HANDLER",
-          "VAULT_ANALYTICS",
-          "POSITION_MANAGER",
-          "LIQUIDATION_LIBRARY",
-        ].includes(name)
+        !["CORE_VAULT", "VAULT_ANALYTICS", "POSITION_MANAGER"].includes(name)
       ) {
         console.log(`  ${name}: ${address}`);
       }

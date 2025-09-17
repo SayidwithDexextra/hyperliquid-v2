@@ -2,8 +2,9 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/utils/math/Math.sol";
+import "./PositionManager.sol";
 
-interface ICentralizedVault {
+interface ICoreVault {
     function isLiquidatable(address user, bytes32 marketId, uint256 markPrice) external view returns (bool);
     function getPositionSummary(address user, bytes32 marketId) external view returns (int256 size, uint256 entryPrice, uint256 marginLocked);
     function liquidateShort(address user, bytes32 marketId, address liquidator) external;
@@ -13,27 +14,23 @@ interface ICentralizedVault {
     function reserveMargin(address user, bytes32 orderId, bytes32 marketId, uint256 amount) external;
     function unreserveMargin(address user, bytes32 orderId) external;
     function releaseExcessMargin(address user, bytes32 orderId, uint256 actualMarginNeeded) external;
-    function updatePosition(address user, bytes32 marketId, int256 sizeDelta, uint256 entryPrice) external;
     function updatePositionWithMargin(address user, bytes32 marketId, int256 sizeDelta, uint256 entryPrice, uint256 marginToLock) external;
+    function updatePositionWithLiquidation(address user, bytes32 marketId, int256 sizeDelta, uint256 executionPrice, address liquidator) external;
     function deductFees(address user, uint256 feeAmount, address feeRecipient) external;
     function transferCollateral(address from, address to, uint256 amount) external;
     function getAvailableCollateral(address user) external view returns (uint256);
-    
-    // Interface updated - vault methods not needed for OrderBook-based tracking
-    
-    // Position information for better margin management
-    function getPositionNettingSummary(
-        address user,
-        bytes32 marketId,
-        int256 sizeDelta,
-        uint256 entryPrice
-    ) external view returns (
-        string memory summary,
-        uint256 realizedPnL,
-        bool isProfit,
-        uint256 closedUnits,
-        int256 finalSize
+    function getUserPositions(address user) external view returns (PositionManager.Position[] memory);
+    function getUnifiedMarginSummary(address user) external view returns (
+        uint256 totalCollateral,
+        uint256 marginUsedInPositions,
+        uint256 marginReservedForOrders,
+        uint256 availableMargin,
+        int256 realizedPnL,
+        int256 unrealizedPnL,
+        uint256 totalMarginCommitted,
+        bool isMarginHealthy
     );
+    function getMarginUtilization(address user) external view returns (uint256 utilizationBps);
 }
 
 /**
@@ -87,7 +84,7 @@ contract OrderBook {
     mapping(uint256 => bool) public sellPriceExists;
 
     // Vault integration
-    ICentralizedVault public immutable vault;
+    ICoreVault public immutable vault;
     bytes32 public immutable marketId;
     
     // Trading parameters
@@ -116,6 +113,12 @@ contract OrderBook {
     
     // Recursion guard to prevent infinite liquidation loops
     bool private liquidationInProgress;
+    // Indicates we are executing a liquidation market matching flow
+    bool private liquidationMode;
+    // Target user whose position is being force-closed during liquidation market order
+    address private liquidationTarget;
+    // True when liquidation market order is a BUY to close a short; false when SELL to close a long
+    bool private liquidationClosesShort;
     
     /**
      * @dev Create a market buy order for liquidation (on behalf of target user)
@@ -188,10 +191,18 @@ contract OrderBook {
     }
 
     function _checkPositionsForLiquidation(uint256 markPrice) internal {
+        // DEBUG: PAST - Function entry point reached and verified working
+        emit LiquidationCheckStarted(markPrice, 0, 0, 0); // Will update with actual values
+        
         // CRITICAL FIX: Prevent infinite recursion during liquidation
         if (liquidationInProgress) {
+            // DEBUG: PAST - Recursion guard check completed, liquidation already in progress
+            emit LiquidationRecursionGuardSet(true);
             return; // Skip liquidation check if already in progress
         }
+        
+        // DEBUG: PAST - Recursion guard passed, proceeding with liquidation check
+        emit LiquidationRecursionGuardSet(false);
         
         // ============ LIQUIDATION ARCHITECTURAL FIX ============
         // 
@@ -214,11 +225,16 @@ contract OrderBook {
         address[] memory recentTraders = _getRecentUniqueTraders();
         uint256 tradersLength = recentTraders.length;
         
+        // DEBUG: PAST - Recent traders retrieved successfully from trade history
+        // This section gets all traders who have participated in recent trades
+        
         if (tradersLength == 0) {
+            // DEBUG: PAST - No traders found to check, early return executed
             emit LiquidationCheckCompleted(0, 0);
             return;
         }
         
+        // DEBUG: PAST - Traders found, setting up liquidation parameters
         // Set recursion guard
         liquidationInProgress = true;
         
@@ -226,69 +242,121 @@ contract OrderBook {
         uint256 endIndex = Math.min(startIndex + MAX_POSITIONS_TO_CHECK, tradersLength);
         uint256 liquidationsTriggered = 0;
         
+        // DEBUG: PAST - Liquidation batch parameters calculated and verified
+        // This section determines which subset of traders to check in this batch
+        emit LiquidationCheckStarted(markPrice, tradersLength, startIndex, endIndex);
+        
         // Process liquidations one by one to avoid array allocation issues
         for (uint256 i = startIndex; i < endIndex; i++) {
             if (i >= recentTraders.length) break; // Safety check
             
             address trader = recentTraders[i];
             
+            // DEBUG: PAST - Trader extracted from array, beginning liquidation check
+            // This section processes each trader individually to check liquidation status
+            emit LiquidationTraderBeingChecked(trader, i, tradersLength);
+            
             // Check if trader is liquidatable
             bool isLiquidatable = false;
             try vault.isLiquidatable(trader, marketId, markPrice) returns (bool liquidatable) {
                 isLiquidatable = liquidatable;
+                // DEBUG: PAST - Liquidatable check completed successfully via vault
+                // This section queries the vault to determine if trader needs liquidation
+                emit LiquidationLiquidatableCheck(trader, isLiquidatable, markPrice);
             } catch {
-                // Skip failed liquidation checks
+                // DEBUG: PAST - Liquidatable check failed, skipping trader
+                // This section handles vault query failures gracefully
+                emit LiquidationLiquidatableCheck(trader, false, markPrice);
                 continue;
             }
             
             if (!isLiquidatable) {
+                // DEBUG: PAST - Trader not liquidatable, continuing to next trader
+                // This section confirms trader is healthy and skips liquidation
                 continue;
             }
             
+            // DEBUG: PAST - Trader confirmed as liquidatable, proceeding with liquidation
+            // This section begins the actual liquidation process for unhealthy positions
+            
             // Attempt liquidation
             bool liquidationCompleted = false;
-            try vault.getPositionSummary(trader, marketId) returns (int256 size, uint256, uint256) {
+            try vault.getPositionSummary(trader, marketId) returns (int256 size, uint256 marginLocked, uint256 unrealizedPnL) {
+                // DEBUG: PAST - Position summary retrieved successfully from vault
+                // This section gets the current position details for liquidation
+                emit LiquidationPositionRetrieved(trader, size, marginLocked, unrealizedPnL);
+                
                 if (size == 0) {
-                    // Position already closed, skip this user (vault tracking handles this)
+                    // DEBUG: PAST - Position already closed, skipping liquidation
+                    // This section handles positions that were closed between checks
                     continue;
                 }
+                
+                // DEBUG: PAST - Position confirmed open, attempting market order liquidation
+                // This section tries to liquidate via market order matching first
                 
                 // Try market order liquidation first
                 bool marketOrderSuccess = false;
                 if (size < 0) {
                     // Short liquidation: Create market BUY order
+                    // DEBUG: PAST - Attempting short liquidation via market buy order
+                    emit LiquidationMarketOrderAttempt(trader, uint256(-size), true, markPrice);
                     marketOrderSuccess = _executeLiquidationMarketOrder(trader, uint256(-size), true, markPrice);
                 } else {
                     // Long liquidation: Create market SELL order
+                    // DEBUG: PAST - Attempting long liquidation via market sell order
+                    emit LiquidationMarketOrderAttempt(trader, uint256(size), false, markPrice);
                     marketOrderSuccess = _executeLiquidationMarketOrder(trader, uint256(size), false, markPrice);
                 }
                 
+                // DEBUG: PAST - Market order liquidation attempt completed
+                // This section reports the result of the market order liquidation
+                emit LiquidationMarketOrderResult(trader, marketOrderSuccess, marketOrderSuccess ? "Market order filled" : "No liquidity available");
+                
                 // If market order failed, use socialized loss as backup
                 if (!marketOrderSuccess) {
+                    // DEBUG: PAST - Market order failed, attempting socialized loss liquidation
+                    // This section handles liquidation when no market liquidity is available
+                    
                     if (size > 0) {
                         // Try long liquidation
+                        // DEBUG: PAST - Attempting long position socialized loss liquidation
+                        emit LiquidationSocializedLossAttempt(trader, true, "liquidateLong");
                         try vault.liquidateLong(trader, marketId, address(this)) {
                             liquidationCompleted = true;
+                            // DEBUG: PAST - Long socialized loss liquidation successful
+                            emit LiquidationSocializedLossResult(trader, true, "liquidateLong");
                         } catch {
-                            // Long liquidation failed - skip this trader
+                            // DEBUG: PAST - Long socialized loss liquidation failed, skipping trader
+                            emit LiquidationSocializedLossResult(trader, false, "liquidateLong");
                             continue;
                         }
                     } else {
                         // Try short liquidation
+                        // DEBUG: PAST - Attempting short position socialized loss liquidation
+                        emit LiquidationSocializedLossAttempt(trader, false, "liquidateShort");
                         try vault.liquidateShort(trader, marketId, address(this)) {
                             liquidationCompleted = true;
+                            // DEBUG: PAST - Short socialized loss liquidation successful
+                            emit LiquidationSocializedLossResult(trader, true, "liquidateShort");
                         } catch {
-                            // Short liquidation failed - skip this trader
+                            // DEBUG: PAST - Short socialized loss liquidation failed, skipping trader
+                            emit LiquidationSocializedLossResult(trader, false, "liquidateShort");
                             continue;
                         }
                     }
                 } else {
                     liquidationCompleted = true;
+                    // DEBUG: PAST - Market order liquidation successful, no socialized loss needed
                 }
                 
                 if (liquidationCompleted) {
                     liquidationsTriggered++;
                     emit AutoLiquidationTriggered(trader, marketId, size, markPrice);
+                    
+                    // DEBUG: PAST - Liquidation completed successfully, updating counters
+                    // This section handles successful liquidation cleanup and tracking
+                    emit LiquidationCompleted(trader, liquidationsTriggered, marketOrderSuccess ? "Market Order" : "Socialized Loss");
                     
                     // Position liquidated successfully - vault tracking handles user list updates
                     
@@ -296,18 +364,29 @@ contract OrderBook {
                     break;
                 }
             } catch {
-                // Failed to get position summary - skip this trader
+                // DEBUG: PAST - Failed to get position summary, skipping trader
+                // This section handles vault query failures for position data
                 continue;
             }
         }
         
+        // DEBUG: PAST - Liquidation loop completed, updating tracking indices
+        // This section handles post-liquidation cleanup and state updates
+        
         // Update tracking
+        uint256 oldIndex = lastCheckedIndex;
         lastCheckedIndex = endIndex >= tradersLength ? 0 : endIndex;
         lastLiquidationCheck = block.timestamp;
+        
+        // DEBUG: PAST - Tracking indices updated successfully
+        emit LiquidationIndexUpdated(oldIndex, lastCheckedIndex, tradersLength);
         
         // Clear recursion guard
         liquidationInProgress = false;
         
+        // DEBUG: PAST - Liquidation check completed, recursion guard cleared
+        // This section finalizes the liquidation check and reports results
+        emit LiquidationCheckFinished(endIndex - startIndex, liquidationsTriggered, lastCheckedIndex);
         emit LiquidationCheckCompleted(endIndex - startIndex, liquidationsTriggered);
     }
     
@@ -353,7 +432,8 @@ contract OrderBook {
                     (markPrice * (10000 - liquidationSlippageBps)) / 10000 : 0;
         }
         
-        // Create liquidation order - use OrderBook as trader to avoid margin conflicts
+        // Create liquidation order - still use OrderBook as order owner,
+        // but we will attribute margin updates to the real trader below
         Order memory liquidationOrder = Order({
             orderId: nextOrderId++,
             trader: address(this),
@@ -369,11 +449,17 @@ contract OrderBook {
         uint256 remainingAmount = amount; // Default to no fill
         
         // Execute the matching - these functions are designed to not revert
+        // Ensure liquidation mode so margin is updated for the real trader
+        liquidationMode = true;
+        liquidationTarget = trader;
+        liquidationClosesShort = isBuy; // buy to close short, sell to close long
         if (isBuy) {
             remainingAmount = _matchBuyOrderWithSlippage(liquidationOrder, amount, maxPrice);
         } else {
             remainingAmount = _matchSellOrderWithSlippage(liquidationOrder, amount, minPrice);
         }
+        liquidationMode = false;
+        liquidationTarget = address(0);
         
         // Return true if order was filled at least 50% (more lenient for liquidations)
         uint256 filledAmount = amount - remainingAmount;
@@ -485,8 +571,8 @@ contract OrderBook {
     uint256 public maxLeverage = 1; // 1x leverage (1:1 margin) by default
     address public leverageController; // Who can enable/disable leverage
     
-    // Position tracking for margin calculations
-    mapping(address => int256) public userPositions; // user => position size
+    // REMOVED: Position tracking now handled exclusively by CoreVault
+    // mapping(address => int256) public userPositions; // DEPRECATED - use CoreVault as single source of truth
     
     // Order tracking for viewer functions  
     mapping(uint256 => uint256) public filledAmounts; // orderId => filled amount
@@ -560,6 +646,49 @@ contract OrderBook {
     // VWAP events
     event VWAPConfigUpdated(uint256 timeWindow, uint256 minVolume, bool useVWAP);
     event VWAPCalculated(uint256 vwap, uint256 volume, uint256 tradeCount, uint256 timeWindow);
+    
+    // DEBUG EVENTS for _executeTrade function
+    event TradeExecutionStarted(address indexed buyer, address indexed seller, uint256 price, uint256 amount, bool buyerMargin, bool sellerMargin);
+    event TradeValueCalculated(uint256 tradeValue, uint256 buyerFee, uint256 sellerFee);
+    event TradeRecorded(uint256 tradeId);
+    event PositionsRetrieved(address indexed buyer, int256 oldBuyerPosition, address indexed seller, int256 oldSellerPosition);
+    event PositionsCalculated(int256 newBuyerPosition, int256 newSellerPosition);
+    event ActiveTradersUpdated(address indexed buyer, bool buyerActive, address indexed seller, bool sellerActive);
+    event MarginValidationPassed(bool buyerMargin, bool sellerMargin);
+    event LiquidationTradeDetected(bool isLiquidationTrade, address liquidationTarget, bool liquidationClosesShort);
+    event MarginUpdatesStarted(bool isLiquidationTrade);
+    event MarginUpdatesCompleted();
+    event FeesDeducted(address indexed buyer, uint256 buyerFee, address indexed seller, uint256 sellerFee);
+    event PriceUpdated(uint256 lastTradePrice, uint256 currentMarkPrice);
+    event LiquidationCheckTriggered(uint256 currentMark, uint256 lastMarkPrice);
+    event TradeExecutionCompleted(address indexed buyer, address indexed seller, uint256 price, uint256 amount);
+
+    // DEBUG EVENTS for _matchBuyOrderWithSlippage function
+    event MatchingStarted(address indexed buyer, uint256 remainingAmount, uint256 maxPrice, uint256 startingPrice);
+    event PriceLevelEntered(uint256 currentPrice, bool levelExists, uint256 totalAmountAtLevel);
+    event OrderMatchAttempt(uint256 orderId, address indexed seller, uint256 sellOrderAmount, uint256 matchAmount);
+    event MarginUpdateExecuted(address indexed buyer, uint256 currentPrice, uint256 matchAmount, uint256 remainingAmount);
+    event OrderFullyFilled(uint256 orderId, address indexed trader, uint256 totalFilled);
+    event OrderPartiallyMatched(uint256 orderId, address indexed trader, uint256 matchAmount, uint256 remainingAmount);
+    event PriceLevelExhausted(uint256 currentPrice, uint256 nextPrice);
+    event SlippageProtectionTriggered(uint256 currentPrice, uint256 maxPrice, uint256 remainingAmount);
+    event BestAskUpdated(uint256 oldBestAsk, uint256 newBestAsk);
+    event MatchingCompleted(address indexed buyer, uint256 originalAmount, uint256 filledAmount, uint256 remainingAmount);
+
+    // DEBUG EVENTS for _checkPositionsForLiquidation function
+    event LiquidationCheckStarted(uint256 markPrice, uint256 tradersLength, uint256 startIndex, uint256 endIndex);
+    event LiquidationRecursionGuardSet(bool inProgress);
+    event LiquidationTraderBeingChecked(address indexed trader, uint256 index, uint256 totalTraders);
+    event LiquidationLiquidatableCheck(address indexed trader, bool isLiquidatable, uint256 markPrice);
+    event LiquidationPositionRetrieved(address indexed trader, int256 size, uint256 marginLocked, uint256 unrealizedPnL);
+    event LiquidationMarketOrderAttempt(address indexed trader, uint256 amount, bool isBuy, uint256 markPrice);
+    event LiquidationMarketOrderResult(address indexed trader, bool success, string reason);
+    event LiquidationSocializedLossAttempt(address indexed trader, bool isLong, string method);
+    event LiquidationSocializedLossResult(address indexed trader, bool success, string method);
+    event LiquidationCompleted(address indexed trader, uint256 liquidationsTriggered, string method);
+    event LiquidationIndexUpdated(uint256 oldIndex, uint256 newIndex, uint256 tradersLength);
+    event LiquidationCheckFinished(uint256 tradersChecked, uint256 liquidationsTriggered, uint256 nextStartIndex);
+    event LiquidationMarginConfiscated(address indexed trader, uint256 marginAmount, uint256 penalty, address indexed liquidator);
 
     // Modifiers
     modifier validOrder(uint256 price, uint256 amount) {
@@ -614,7 +743,7 @@ contract OrderBook {
         require(_vault != address(0), "OrderBook: vault cannot be zero address");
         require(_feeRecipient != address(0), "OrderBook: fee recipient cannot be zero address");
         
-        vault = ICentralizedVault(_vault);
+        vault = ICoreVault(_vault);
         marketId = _marketId;
         feeRecipient = _feeRecipient;
         leverageController = _feeRecipient; // Initially set fee recipient as leverage controller
@@ -793,9 +922,10 @@ contract OrderBook {
         external 
         onlyAdmin 
     {
-        userPositions[user] = 0;
+        // Position clearing now handled by CoreVault during liquidation
+        // This function is kept for compatibility but CoreVault manages the actual state
         _updateActiveTrader(user, false); // Remove from active traders
-        emit PositionUpdated(user, userPositions[user], 0);
+        emit PositionUpdated(user, 0, 0); // Legacy event for compatibility
     }
 
     /**
@@ -944,16 +1074,25 @@ contract OrderBook {
         private 
         returns (uint256) 
     {
+        // DEBUG: Matching started
+        uint256 originalAmount = remainingAmount;
+        emit MatchingStarted(buyOrder.trader, remainingAmount, maxPrice, bestAsk);
+
         // Match against sell orders starting from the lowest price (bestAsk)
         uint256 currentPrice = bestAsk;
         
         while (remainingAmount > 0 && currentPrice != type(uint256).max && currentPrice <= maxPrice) {
             if (!sellLevels[currentPrice].exists) {
+                // DEBUG: Price level doesn't exist
+                emit PriceLevelEntered(currentPrice, false, 0);
                 currentPrice = _getNextSellPrice(currentPrice);
                 continue;
             }
 
             PriceLevel storage level = sellLevels[currentPrice];
+            // DEBUG: Entering price level
+            emit PriceLevelEntered(currentPrice, true, level.totalAmount);
+            
             uint256 currentOrderId = level.firstOrderId;
             
             while (remainingAmount > 0 && currentOrderId != 0) {
@@ -962,8 +1101,14 @@ contract OrderBook {
                 
                 uint256 matchAmount = remainingAmount < sellOrder.amount ? remainingAmount : sellOrder.amount;
                 
+                // DEBUG: Order match attempt
+                emit OrderMatchAttempt(currentOrderId, sellOrder.trader, sellOrder.amount, matchAmount);
+                
                 // Handle margin updates for buy order
                 _handleBuyOrderMarginUpdate(buyOrder, currentPrice, matchAmount, remainingAmount);
+                
+                // DEBUG: Margin update executed
+                emit MarginUpdateExecuted(buyOrder.trader, currentPrice, matchAmount, remainingAmount);
                 
                 // Execute the trade
                 _executeTrade(buyOrder.trader, sellOrder.trader, currentPrice, matchAmount, buyOrder.isMarginOrder, sellOrder.isMarginOrder);
@@ -1001,6 +1146,15 @@ contract OrderBook {
             
             currentPrice = _getNextSellPrice(currentPrice);
         }
+        
+        // DEBUG: Check if slippage protection was triggered
+        if (remainingAmount > 0 && currentPrice > maxPrice) {
+            emit SlippageProtectionTriggered(currentPrice, maxPrice, remainingAmount);
+        }
+        
+        // DEBUG: Matching completed
+        uint256 filledAmount = originalAmount - remainingAmount;
+        emit MatchingCompleted(buyOrder.trader, originalAmount, filledAmount, remainingAmount);
         
         return remainingAmount;
     }
@@ -1566,28 +1720,15 @@ contract OrderBook {
 
     // CRITICAL FIX: Skip margin updates for OrderBook contract (liquidation orders)
     if (user == address(this)) return;
-        // Compute margin required only for the opening portion; for pure closing, it's zero
+        // Compute margin required based on net position after trade; for pure closing, it's zero
         uint256 marginRequired = 0;
         {
-            uint256 openingAmount = 0;
-            if (oldPosition < 0 && amount > 0) {
-                // Closing short; any excess over abs(old) is opening
-                int256 absOldPosition = -oldPosition;
-                if (amount > absOldPosition) {
-                    openingAmount = uint256(amount - absOldPosition);
-                }
-            } else if (oldPosition > 0 && amount < 0) {
-                // Closing long; any excess over old is opening short
-                if (-amount > oldPosition) {
-                    openingAmount = uint256(-amount - oldPosition);
-                }
+            int256 newNet = oldPosition + amount;
+            if (newNet == 0) {
+                marginRequired = 0;
             } else {
-                // Same-direction increase is fully opening
-                openingAmount = uint256(amount > 0 ? amount : -amount);
-            }
-            if (openingAmount > 0) {
-                int256 signedOpeningAmount = amount > 0 ? int256(openingAmount) : -int256(openingAmount);
-                marginRequired = _calculateExecutionMargin(signedOpeningAmount, price);
+                // Required margin should reflect the new net exposure
+                marginRequired = _calculateExecutionMargin(newNet, price);
             }
         }
         // Always update vault position to apply netting and release margin when closing
@@ -1617,14 +1758,28 @@ contract OrderBook {
         // Skip margin updates for OrderBook contract (liquidation orders)
         if (user == address(this)) return;
         
-        // For liquidation trades, use safe margin updates that don't revert on insufficient collateral
+        // For liquidation trades, use liquidation-specific margin handling that confiscates margin
         if (isLiquidationTrade) {
-            try this._safeMarginUpdate(user, oldPosition, amount, price) {
-                // Margin update succeeded
+            try vault.updatePositionWithLiquidation(user, marketId, amount, price, address(this)) {
+                // Liquidation margin update succeeded - margin has been confiscated
+                // Get position info to emit debug event
+                try vault.getPositionSummary(user, marketId) returns (int256, uint256, uint256 marginLocked) {
+                    // Calculate penalty for debug event (using same logic as CoreVault)
+                    uint256 penalty = (marginLocked * 500) / 10000; // 5% liquidation penalty
+                    emit LiquidationMarginConfiscated(user, marginLocked, penalty, address(this));
+                } catch {
+                    // Position summary failed, emit event with unknown values
+                    emit LiquidationMarginConfiscated(user, 0, 0, address(this));
+                }
             } catch {
-                // Margin update failed - continue liquidation without reverting
-                // The position will still be updated, but margin might not be perfectly calculated
-                emit MarginUpdateFailed(user, amount, price);
+                // Liquidation margin update failed - fall back to safe margin update
+                // This ensures the position is still updated even if liquidation-specific logic fails
+                try this._safeMarginUpdate(user, oldPosition, amount, price) {
+                    // Fallback margin update succeeded
+                } catch {
+                    // Both liquidation and fallback failed - continue without reverting
+                    emit MarginUpdateFailed(user, amount, price);
+                }
             }
         } else {
             // Normal margin updates for regular trades
@@ -1653,27 +1808,47 @@ contract OrderBook {
         bool buyerMargin,
         bool sellerMargin
     ) internal {
+        // DEBUG: Trade execution started
+        emit TradeExecutionStarted(buyer, seller, price, amount, buyerMargin, sellerMargin);
+        
         // Calculate trade value and fees
         uint256 tradeValue = (amount * price) / (10**18);
         uint256 buyerFee = tradingFee > 0 ? _calculateTradingFee(amount, price) : 0;
         uint256 sellerFee = tradingFee > 0 ? _calculateTradingFee(amount, price) : 0;
         
+        // DEBUG: Trade value calculated
+        emit TradeValueCalculated(tradeValue, buyerFee, sellerFee);
+        
         // Record trade
+        uint256 tradeId = nextTradeId; // Capture trade ID before recording
         _recordTrade(buyer, seller, price, amount, buyerMargin, sellerMargin, tradeValue, buyerFee, sellerFee);
         
-        // Update positions
-        int256 oldBuyerPosition = userPositions[buyer];
-        int256 oldSellerPosition = userPositions[seller];
+        // DEBUG: Trade recorded
+        emit TradeRecorded(tradeId);
         
-        userPositions[buyer] += int256(amount);
-        userPositions[seller] -= int256(amount);
+        // Get current positions from CoreVault (single source of truth)
+        (int256 oldBuyerPosition,,) = vault.getPositionSummary(buyer, marketId);
+        (int256 oldSellerPosition,,) = vault.getPositionSummary(seller, marketId);
         
-        emit PositionUpdated(buyer, oldBuyerPosition, userPositions[buyer]);
-        emit PositionUpdated(seller, oldSellerPosition, userPositions[seller]);
+        // DEBUG: Positions retrieved
+        emit PositionsRetrieved(buyer, oldBuyerPosition, seller, oldSellerPosition);
         
-        // Track active traders
-        _updateActiveTrader(buyer, userPositions[buyer] != 0);
-        _updateActiveTrader(seller, userPositions[seller] != 0);
+        // Positions are now updated through CoreVault via margin updates below
+        int256 newBuyerPosition = oldBuyerPosition + int256(amount);
+        int256 newSellerPosition = oldSellerPosition - int256(amount);
+        
+        // DEBUG: New positions calculated
+        emit PositionsCalculated(newBuyerPosition, newSellerPosition);
+        
+        emit PositionUpdated(buyer, oldBuyerPosition, newBuyerPosition);
+        emit PositionUpdated(seller, oldSellerPosition, newSellerPosition);
+        
+        // Track active traders based on new positions
+        _updateActiveTrader(buyer, newBuyerPosition != 0);
+        _updateActiveTrader(seller, newSellerPosition != 0);
+        
+        // DEBUG: Active traders updated
+        emit ActiveTradersUpdated(buyer, newBuyerPosition != 0, seller, newSellerPosition != 0);
         
         // LIQUIDATION FIX: Track all users who ever trade
         _trackKnownUser(buyer);
@@ -1682,17 +1857,45 @@ contract OrderBook {
         // Handle margin updates
         require(buyerMargin == sellerMargin, "OrderBook: cannot mix margin and spot trades");
         
+        // DEBUG: Margin validation passed
+        emit MarginValidationPassed(buyerMargin, sellerMargin);
+        
         // CRITICAL FIX: Special handling for liquidation trades
-        bool isLiquidationTrade = (buyer == address(this) || seller == address(this));
+        bool isLiquidationTrade = liquidationMode || (buyer == address(this) || seller == address(this));
+        
+        // DEBUG: Liquidation trade detection
+        emit LiquidationTradeDetected(isLiquidationTrade, liquidationTarget, liquidationClosesShort);
         
         if (buyerMargin || sellerMargin) {
-            _handleLiquidationMarginUpdate(buyer, oldBuyerPosition, int256(amount), price, buyerMargin, isLiquidationTrade);
-            _handleLiquidationMarginUpdate(seller, oldSellerPosition, -int256(amount), price, sellerMargin, isLiquidationTrade);
+            // DEBUG: Starting margin updates
+            emit MarginUpdatesStarted(isLiquidationTrade);
+            
+            // During liquidation market orders, attribute margin update to the real trader
+            if (isLiquidationTrade) {
+                // Only the liquidationTarget's margin should change
+                if (buyer == address(this) || seller == address(this)) {
+                    address realUser = liquidationTarget;
+                    // Determine size delta: buy closes short (+amount), sell closes long (-amount)
+                    int256 delta = liquidationClosesShort ? int256(amount) : -int256(amount);
+                    // Fetch real user's current position directly from vault
+                    (int256 oldRealPosition,,) = vault.getPositionSummary(realUser, marketId);
+                    _handleLiquidationMarginUpdate(realUser, oldRealPosition, delta, price, true, true);
+                }
+            } else {
+                _handleLiquidationMarginUpdate(buyer, oldBuyerPosition, int256(amount), price, buyerMargin, isLiquidationTrade);
+                _handleLiquidationMarginUpdate(seller, oldSellerPosition, -int256(amount), price, sellerMargin, isLiquidationTrade);
+            }
+            
+            // DEBUG: Margin updates completed
+            emit MarginUpdatesCompleted();
             
             // Deduct fees
             if (tradingFee > 0) {
                 if (buyerMargin && buyer != address(this)) vault.deductFees(buyer, buyerFee, feeRecipient);
                 if (sellerMargin && seller != address(this)) vault.deductFees(seller, sellerFee, feeRecipient);
+                
+                // DEBUG: Fees deducted
+                emit FeesDeducted(buyer, buyerFee, seller, sellerFee);
             }
         } else {
             // Allow spot trades only for liquidation (when OrderBook is a participant)
@@ -1706,15 +1909,25 @@ contract OrderBook {
         lastTradePrice = price;
         uint256 currentMark = _calculateMarkPrice();
         
+        // DEBUG: Price updated
+        emit PriceUpdated(lastTradePrice, currentMark);
+        
         // CRITICAL FIX: Only check liquidations if not already in liquidation process
         // and price has moved significantly (>= 2%) to save gas
         if (!liquidationInProgress && 
             (lastLiquidationCheck == 0 || 
             (currentMark > lastMarkPrice && (currentMark - lastMarkPrice) * 100 / lastMarkPrice >= 2) ||
             (lastMarkPrice > currentMark && (lastMarkPrice - currentMark) * 100 / lastMarkPrice >= 2))) {
+            
+            // DEBUG: Liquidation check triggered
+            emit LiquidationCheckTriggered(currentMark, lastMarkPrice);
+            
             _checkPositionsForLiquidation(currentMark);
             lastMarkPrice = currentMark;
         }
+        
+        // DEBUG: Trade execution completed
+        emit TradeExecutionCompleted(buyer, seller, price, amount);
     }
 
     /**
@@ -2159,7 +2372,8 @@ contract OrderBook {
      * @return Position size (positive for long, negative for short)
      */
     function getUserPosition(address user) external view returns (int256) {
-        return userPositions[user];
+        (int256 size,,) = vault.getPositionSummary(user, marketId);
+        return size;
     }
 
     /**
@@ -2259,6 +2473,8 @@ contract OrderBook {
                 }
             }
         }
+        
+        return (buyOrderCount, sellOrderCount);
     }
 
     /**

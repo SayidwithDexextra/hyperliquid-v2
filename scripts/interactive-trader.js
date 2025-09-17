@@ -459,6 +459,10 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       console.log(
         colorText("✅ All contracts loaded successfully!", colors.brightGreen)
       );
+
+      // Set up real-time event listeners
+      await this.setupEventListeners();
+
       await this.pause(1000);
     } catch (error) {
       console.log(
@@ -466,6 +470,1524 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       );
       process.exit(1);
     }
+  }
+
+  async setupEventListeners() {
+    console.log(
+      colorText("🎯 Setting up real-time event listeners...", colors.cyan)
+    );
+
+    try {
+      // Listen for OrderMatched events from the matching engine
+      this.contracts.orderBook.on(
+        "OrderMatched",
+        (buyer, seller, price, amount, event) => {
+          this.handleOrderMatchedEvent(buyer, seller, price, amount, event);
+        }
+      );
+
+      // Listen for other trading events
+      this.contracts.orderBook.on(
+        "OrderPlaced",
+        (orderId, trader, price, amount, isBuy, isMarginOrder, event) => {
+          this.handleOrderPlacedEvent(
+            orderId,
+            trader,
+            price,
+            amount,
+            isBuy,
+            isMarginOrder,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "OrderCancelled",
+        (orderId, trader, event) => {
+          this.handleOrderCancelledEvent(orderId, trader, event);
+        }
+      );
+
+      // Listen for matching engine debug events
+      this.contracts.orderBook.on(
+        "MatchingStarted",
+        (buyer, remainingAmount, maxPrice, startingPrice, event) => {
+          this.handleMatchingStartedEvent(
+            buyer,
+            remainingAmount,
+            maxPrice,
+            startingPrice,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "PriceLevelEntered",
+        (currentPrice, levelExists, totalAmountAtLevel, event) => {
+          this.handlePriceLevelEnteredEvent(
+            currentPrice,
+            levelExists,
+            totalAmountAtLevel,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "OrderMatchAttempt",
+        (orderId, seller, sellOrderAmount, matchAmount, event) => {
+          this.handleOrderMatchAttemptEvent(
+            orderId,
+            seller,
+            sellOrderAmount,
+            matchAmount,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "SlippageProtectionTriggered",
+        (currentPrice, maxPrice, remainingAmount, event) => {
+          this.handleSlippageProtectionTriggeredEvent(
+            currentPrice,
+            maxPrice,
+            remainingAmount,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "MatchingCompleted",
+        (buyer, originalAmount, filledAmount, remainingAmount, event) => {
+          this.handleMatchingCompletedEvent(
+            buyer,
+            originalAmount,
+            filledAmount,
+            remainingAmount,
+            event
+          );
+        }
+      );
+
+      // Listen for _executeTrade debug events
+      this.contracts.orderBook.on(
+        "TradeExecutionStarted",
+        (buyer, seller, price, amount, buyerMargin, sellerMargin, event) => {
+          this.handleTradeExecutionStartedEvent(
+            buyer,
+            seller,
+            price,
+            amount,
+            buyerMargin,
+            sellerMargin,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "TradeValueCalculated",
+        (tradeValue, buyerFee, sellerFee, event) => {
+          this.handleTradeValueCalculatedEvent(
+            tradeValue,
+            buyerFee,
+            sellerFee,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on("TradeRecorded", (tradeId, event) => {
+        this.handleTradeRecordedEvent(tradeId, event);
+      });
+
+      this.contracts.orderBook.on(
+        "PositionsRetrieved",
+        (buyer, oldBuyerPosition, seller, oldSellerPosition, event) => {
+          this.handlePositionsRetrievedEvent(
+            buyer,
+            oldBuyerPosition,
+            seller,
+            oldSellerPosition,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "PositionsCalculated",
+        (newBuyerPosition, newSellerPosition, event) => {
+          this.handlePositionsCalculatedEvent(
+            newBuyerPosition,
+            newSellerPosition,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "ActiveTradersUpdated",
+        (buyer, buyerActive, seller, sellerActive, event) => {
+          this.handleActiveTradersUpdatedEvent(
+            buyer,
+            buyerActive,
+            seller,
+            sellerActive,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "MarginValidationPassed",
+        (buyerMargin, sellerMargin, event) => {
+          this.handleMarginValidationPassedEvent(
+            buyerMargin,
+            sellerMargin,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationTradeDetected",
+        (
+          isLiquidationTrade,
+          liquidationTarget,
+          liquidationClosesShort,
+          event
+        ) => {
+          this.handleLiquidationTradeDetectedEvent(
+            isLiquidationTrade,
+            liquidationTarget,
+            liquidationClosesShort,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "MarginUpdatesStarted",
+        (isLiquidationTrade, event) => {
+          this.handleMarginUpdatesStartedEvent(isLiquidationTrade, event);
+        }
+      );
+
+      this.contracts.orderBook.on("MarginUpdatesCompleted", (event) => {
+        this.handleMarginUpdatesCompletedEvent(event);
+      });
+
+      this.contracts.orderBook.on(
+        "FeesDeducted",
+        (buyer, buyerFee, seller, sellerFee, event) => {
+          this.handleFeesDeductedEvent(
+            buyer,
+            buyerFee,
+            seller,
+            sellerFee,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "PriceUpdated",
+        (lastTradePrice, currentMarkPrice, event) => {
+          this.handlePriceUpdatedEvent(lastTradePrice, currentMarkPrice, event);
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationCheckTriggered",
+        (currentMark, lastMarkPrice, event) => {
+          this.handleLiquidationCheckTriggeredEvent(
+            currentMark,
+            lastMarkPrice,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "TradeExecutionCompleted",
+        (buyer, seller, price, amount, event) => {
+          this.handleTradeExecutionCompletedEvent(
+            buyer,
+            seller,
+            price,
+            amount,
+            event
+          );
+        }
+      );
+
+      // Listen for _checkPositionsForLiquidation debug events
+      this.contracts.orderBook.on(
+        "LiquidationCheckStarted",
+        (markPrice, tradersLength, startIndex, endIndex, event) => {
+          this.handleLiquidationCheckStartedEvent(
+            markPrice,
+            tradersLength,
+            startIndex,
+            endIndex,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationRecursionGuardSet",
+        (inProgress, event) => {
+          this.handleLiquidationRecursionGuardSetEvent(inProgress, event);
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationTraderBeingChecked",
+        (trader, index, totalTraders, event) => {
+          this.handleLiquidationTraderBeingCheckedEvent(
+            trader,
+            index,
+            totalTraders,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationLiquidatableCheck",
+        (trader, isLiquidatable, markPrice, event) => {
+          this.handleLiquidationLiquidatableCheckEvent(
+            trader,
+            isLiquidatable,
+            markPrice,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationPositionRetrieved",
+        (trader, size, marginLocked, unrealizedPnL, event) => {
+          this.handleLiquidationPositionRetrievedEvent(
+            trader,
+            size,
+            marginLocked,
+            unrealizedPnL,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationMarketOrderAttempt",
+        (trader, amount, isBuy, markPrice, event) => {
+          this.handleLiquidationMarketOrderAttemptEvent(
+            trader,
+            amount,
+            isBuy,
+            markPrice,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationMarketOrderResult",
+        (trader, success, reason, event) => {
+          this.handleLiquidationMarketOrderResultEvent(
+            trader,
+            success,
+            reason,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationSocializedLossAttempt",
+        (trader, isLong, method, event) => {
+          this.handleLiquidationSocializedLossAttemptEvent(
+            trader,
+            isLong,
+            method,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationSocializedLossResult",
+        (trader, success, method, event) => {
+          this.handleLiquidationSocializedLossResultEvent(
+            trader,
+            success,
+            method,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationCompleted",
+        (trader, liquidationsTriggered, method, event) => {
+          this.handleLiquidationCompletedEvent(
+            trader,
+            liquidationsTriggered,
+            method,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationIndexUpdated",
+        (oldIndex, newIndex, tradersLength, event) => {
+          this.handleLiquidationIndexUpdatedEvent(
+            oldIndex,
+            newIndex,
+            tradersLength,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationCheckFinished",
+        (tradersChecked, liquidationsTriggered, nextStartIndex, event) => {
+          this.handleLiquidationCheckFinishedEvent(
+            tradersChecked,
+            liquidationsTriggered,
+            nextStartIndex,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationMarginConfiscated",
+        (trader, marginAmount, penalty, liquidator, event) => {
+          this.handleLiquidationMarginConfiscatedEvent(
+            trader,
+            marginAmount,
+            penalty,
+            liquidator,
+            event
+          );
+        }
+      );
+
+      // Listen for CoreVault margin confiscation events
+      if (this.contracts.coreVault) {
+        this.contracts.coreVault.on(
+          "MarginConfiscated",
+          (user, marginAmount, totalLoss, penalty, liquidator, event) => {
+            this.handleCoreVaultMarginConfiscatedEvent(
+              user,
+              marginAmount,
+              totalLoss,
+              penalty,
+              liquidator,
+              event
+            );
+          }
+        );
+      }
+
+      console.log(
+        colorText("✅ Event listeners activated!", colors.brightGreen)
+      );
+    } catch (error) {
+      console.log(
+        colorText(
+          "⚠️ Warning: Could not set up event listeners: " + error.message,
+          colors.yellow
+        )
+      );
+    }
+  }
+
+  handleOrderMatchedEvent(buyer, seller, price, amount, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const priceFormatted = formatWithAutoDecimalDetection(price, 6, 2);
+    const amountFormatted = formatWithAutoDecimalDetection(amount, 18, 4);
+
+    // Create a notification box
+    const notification = `
+${colors.bgBlue}${colors.white}${
+      colors.bright
+    }                    🎯 ORDER MATCHED                     ${colors.reset}
+${
+  colors.brightBlue
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightBlue}│${colors.reset} ${colors.brightGreen}⚡ TRADE EXECUTED${
+      colors.reset
+    } ${colors.dim}at ${timestamp}${colors.reset}                    ${
+      colors.brightBlue
+    }│${colors.reset}
+${colors.brightBlue}│${
+      colors.reset
+    }                                                         ${
+      colors.brightBlue
+    }│${colors.reset}
+${colors.brightBlue}│${colors.reset} ${colors.brightCyan}💰 Price:${
+      colors.reset
+    } $${priceFormatted} USDC                           ${colors.brightBlue}│${
+      colors.reset
+    }
+${colors.brightBlue}│${colors.reset} ${colors.brightYellow}📊 Amount:${
+      colors.reset
+    } ${amountFormatted} ALU                            ${colors.brightBlue}│${
+      colors.reset
+    }
+${colors.brightBlue}│${
+      colors.reset
+    }                                                         ${
+      colors.brightBlue
+    }│${colors.reset}
+${colors.brightBlue}│${colors.reset} ${colors.green}👤 Buyer:${
+      colors.reset
+    } ${buyer.slice(0, 8)}...${buyer.slice(-6)}     ${colors.brightBlue}│${
+      colors.reset
+    }
+${colors.brightBlue}│${colors.reset} ${colors.red}👤 Seller:${
+      colors.reset
+    } ${seller.slice(0, 8)}...${seller.slice(-6)}    ${colors.brightBlue}│${
+      colors.reset
+    }
+${colors.brightBlue}│${
+      colors.reset
+    }                                                         ${
+      colors.brightBlue
+    }│${colors.reset}
+${colors.brightBlue}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightBlue
+    }│${colors.reset}
+${
+  colors.brightBlue
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+
+    // Play a sound notification (if terminal supports it)
+    process.stdout.write("\x07");
+  }
+
+  handleOrderPlacedEvent(
+    orderId,
+    trader,
+    price,
+    amount,
+    isBuy,
+    isMarginOrder,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const priceFormatted = formatWithAutoDecimalDetection(price, 6, 2);
+    const amountFormatted = formatWithAutoDecimalDetection(amount, 18, 4);
+    const side = isBuy ? "BUY" : "SELL";
+    const sideColor = isBuy ? colors.brightGreen : colors.brightRed;
+    const orderType = isMarginOrder ? "MARGIN" : "SPOT";
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${sideColor}📝 ${side} ORDER${colors.reset} ` +
+        `${colors.cyan}${orderType}${colors.reset} | ` +
+        `${colors.yellow}${amountFormatted} ALU${colors.reset} @ ` +
+        `${colors.green}$${priceFormatted}${colors.reset} | ` +
+        `${colors.dim}ID: ${orderId}${colors.reset}`
+    );
+  }
+
+  handleOrderCancelledEvent(orderId, trader, event) {
+    const timestamp = new Date().toLocaleTimeString();
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.red}❌ ORDER CANCELLED${colors.reset} | ` +
+        `${colors.dim}ID: ${orderId} | Trader: ${trader.slice(0, 8)}...${
+          colors.reset
+        }`
+    );
+  }
+
+  handleMatchingStartedEvent(
+    buyer,
+    remainingAmount,
+    maxPrice,
+    startingPrice,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const amountFormatted = formatWithAutoDecimalDetection(
+      remainingAmount,
+      18,
+      4
+    );
+    const maxPriceFormatted = formatWithAutoDecimalDetection(maxPrice, 6, 2);
+    const startPriceFormatted = formatWithAutoDecimalDetection(
+      startingPrice,
+      6,
+      2
+    );
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightBlue}🎯 MATCHING STARTED${colors.reset} | ` +
+        `${colors.cyan}Amount: ${amountFormatted} ALU${colors.reset} | ` +
+        `${colors.yellow}Max: $${maxPriceFormatted}${colors.reset} | ` +
+        `${colors.green}Start: $${startPriceFormatted}${colors.reset}`
+    );
+  }
+
+  handlePriceLevelEnteredEvent(
+    currentPrice,
+    levelExists,
+    totalAmountAtLevel,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const priceFormatted = formatWithAutoDecimalDetection(currentPrice, 6, 2);
+
+    if (levelExists) {
+      const amountFormatted = formatWithAutoDecimalDetection(
+        totalAmountAtLevel,
+        18,
+        4
+      );
+      console.log(
+        `${colors.dim}[${timestamp}]${colors.reset} ${colors.blue}📊 PRICE LEVEL${colors.reset} | ` +
+          `${colors.yellow}$${priceFormatted}${colors.reset} | ` +
+          `${colors.cyan}${amountFormatted} ALU available${colors.reset}`
+      );
+    } else {
+      console.log(
+        `${colors.dim}[${timestamp}]${colors.reset} ${colors.dim}📊 PRICE LEVEL${colors.reset} | ` +
+          `${colors.yellow}$${priceFormatted}${colors.reset} | ` +
+          `${colors.dim}No liquidity${colors.reset}`
+      );
+    }
+  }
+
+  handleOrderMatchAttemptEvent(
+    orderId,
+    seller,
+    sellOrderAmount,
+    matchAmount,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const sellAmountFormatted = formatWithAutoDecimalDetection(
+      sellOrderAmount,
+      18,
+      4
+    );
+    const matchAmountFormatted = formatWithAutoDecimalDetection(
+      matchAmount,
+      18,
+      4
+    );
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.magenta}🔄 ORDER MATCH${colors.reset} | ` +
+        `${colors.dim}ID: ${orderId}${colors.reset} | ` +
+        `${colors.cyan}Matching: ${matchAmountFormatted}/${sellAmountFormatted} ALU${colors.reset}`
+    );
+  }
+
+  handleSlippageProtectionTriggeredEvent(
+    currentPrice,
+    maxPrice,
+    remainingAmount,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const currentPriceFormatted = formatWithAutoDecimalDetection(
+      currentPrice,
+      6,
+      2
+    );
+    const maxPriceFormatted = formatWithAutoDecimalDetection(maxPrice, 6, 2);
+    const remainingFormatted = formatWithAutoDecimalDetection(
+      remainingAmount,
+      18,
+      4
+    );
+
+    const notification = `
+${colors.bgRed}${colors.white}${
+      colors.bright
+    }                🛡️ SLIPPAGE PROTECTION TRIGGERED                ${
+      colors.reset
+    }
+${colors.brightRed}┌─────────────────────────────────────────────────────────┐${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${
+      colors.brightYellow
+    }⚠️ SLIPPAGE LIMIT REACHED${colors.reset} ${colors.dim}at ${timestamp}${
+      colors.reset
+    }                ${colors.brightRed}│${colors.reset}
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.brightCyan}💰 Current Price:${
+      colors.reset
+    } $${currentPriceFormatted} USDC                    ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightYellow}🎯 Max Price:${
+      colors.reset
+    } $${maxPriceFormatted} USDC                        ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightMagenta}📊 Remaining:${
+      colors.reset
+    } ${remainingFormatted} ALU (cancelled)           ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}└─────────────────────────────────────────────────────────┘${
+      colors.reset
+    }
+    `;
+
+    console.log(notification);
+
+    // Play a sound notification (if terminal supports it)
+    process.stdout.write("\x07");
+  }
+
+  handleMatchingCompletedEvent(
+    buyer,
+    originalAmount,
+    filledAmount,
+    remainingAmount,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const originalFormatted = formatWithAutoDecimalDetection(
+      originalAmount,
+      18,
+      4
+    );
+    const filledFormatted = formatWithAutoDecimalDetection(filledAmount, 18, 4);
+    const remainingFormatted = formatWithAutoDecimalDetection(
+      remainingAmount,
+      18,
+      4
+    );
+    const fillRate =
+      originalAmount > 0 ? (filledAmount * 100n) / originalAmount : 0n;
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightGreen}✅ MATCHING COMPLETE${colors.reset} | ` +
+        `${colors.cyan}Filled: ${filledFormatted}/${originalFormatted} ALU${colors.reset} | ` +
+        `${colors.yellow}Rate: ${fillRate}%${colors.reset}` +
+        (remainingAmount > 0
+          ? ` | ${colors.red}Cancelled: ${remainingFormatted} ALU${colors.reset}`
+          : "")
+    );
+  }
+
+  // _executeTrade debug event handlers
+  handleTradeExecutionStartedEvent(
+    buyer,
+    seller,
+    price,
+    amount,
+    buyerMargin,
+    sellerMargin,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const priceFormatted = formatWithAutoDecimalDetection(price, 6, 2);
+    const amountFormatted = formatWithAutoDecimalDetection(amount, 18, 4);
+    const buyerType = this.formatUserDisplay(buyer);
+    const sellerType = this.formatUserDisplay(seller);
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightMagenta}🚀 TRADE EXECUTION STARTED${colors.reset} | ` +
+        `${colors.green}${buyerType}${colors.reset} ↔ ${colors.red}${sellerType}${colors.reset} | ` +
+        `${colors.cyan}${amountFormatted} ALU${colors.reset} @ ${colors.yellow}$${priceFormatted}${colors.reset} | ` +
+        `${colors.dim}Margin: ${buyerMargin ? "Y" : "N"}/${
+          sellerMargin ? "Y" : "N"
+        }${colors.reset}`
+    );
+  }
+
+  handleTradeValueCalculatedEvent(tradeValue, buyerFee, sellerFee, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const valueFormatted = formatWithAutoDecimalDetection(tradeValue, 6, 2);
+    const buyerFeeFormatted = formatWithAutoDecimalDetection(buyerFee, 6, 4);
+    const sellerFeeFormatted = formatWithAutoDecimalDetection(sellerFee, 6, 4);
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.blue}💰 TRADE VALUE${colors.reset} | ` +
+        `${colors.cyan}Value: $${valueFormatted}${colors.reset} | ` +
+        `${colors.yellow}Fees: $${buyerFeeFormatted}/$${sellerFeeFormatted}${colors.reset}`
+    );
+  }
+
+  handleTradeRecordedEvent(tradeId, event) {
+    const timestamp = new Date().toLocaleTimeString();
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.green}📝 TRADE RECORDED${colors.reset} | ` +
+        `${colors.dim}ID: ${tradeId}${colors.reset}`
+    );
+  }
+
+  handlePositionsRetrievedEvent(
+    buyer,
+    oldBuyerPosition,
+    seller,
+    oldSellerPosition,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const buyerPosFormatted = formatWithAutoDecimalDetection(
+      oldBuyerPosition,
+      18,
+      4
+    );
+    const sellerPosFormatted = formatWithAutoDecimalDetection(
+      oldSellerPosition,
+      18,
+      4
+    );
+    const buyerType = this.formatUserDisplay(buyer);
+    const sellerType = this.formatUserDisplay(seller);
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.cyan}📊 POSITIONS RETRIEVED${colors.reset} | ` +
+        `${colors.green}${buyerType}: ${buyerPosFormatted}${colors.reset} | ` +
+        `${colors.red}${sellerType}: ${sellerPosFormatted}${colors.reset}`
+    );
+  }
+
+  handlePositionsCalculatedEvent(newBuyerPosition, newSellerPosition, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const buyerPosFormatted = formatWithAutoDecimalDetection(
+      newBuyerPosition,
+      18,
+      4
+    );
+    const sellerPosFormatted = formatWithAutoDecimalDetection(
+      newSellerPosition,
+      18,
+      4
+    );
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightCyan}📈 NEW POSITIONS${colors.reset} | ` +
+        `${colors.green}Buyer: ${buyerPosFormatted}${colors.reset} | ` +
+        `${colors.red}Seller: ${sellerPosFormatted}${colors.reset}`
+    );
+  }
+
+  handleActiveTradersUpdatedEvent(
+    buyer,
+    buyerActive,
+    seller,
+    sellerActive,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const buyerType = this.formatUserDisplay(buyer);
+    const sellerType = this.formatUserDisplay(seller);
+    const buyerStatus = buyerActive ? "ACTIVE" : "INACTIVE";
+    const sellerStatus = sellerActive ? "ACTIVE" : "INACTIVE";
+    const buyerColor = buyerActive ? colors.green : colors.dim;
+    const sellerColor = sellerActive ? colors.green : colors.dim;
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.magenta}👥 TRADERS UPDATED${colors.reset} | ` +
+        `${buyerColor}${buyerType}: ${buyerStatus}${colors.reset} | ` +
+        `${sellerColor}${sellerType}: ${sellerStatus}${colors.reset}`
+    );
+  }
+
+  handleMarginValidationPassedEvent(buyerMargin, sellerMargin, event) {
+    const timestamp = new Date().toLocaleTimeString();
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.green}✅ MARGIN VALIDATION${colors.reset} | ` +
+        `${colors.cyan}Buyer: ${buyerMargin ? "Margin" : "Spot"}${
+          colors.reset
+        } | ` +
+        `${colors.cyan}Seller: ${sellerMargin ? "Margin" : "Spot"}${
+          colors.reset
+        }`
+    );
+  }
+
+  handleLiquidationTradeDetectedEvent(
+    isLiquidationTrade,
+    liquidationTarget,
+    liquidationClosesShort,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+
+    if (isLiquidationTrade) {
+      const targetType = this.formatUserDisplay(liquidationTarget);
+      const direction = liquidationClosesShort ? "CLOSES SHORT" : "CLOSES LONG";
+
+      console.log(
+        `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightRed}⚠️ LIQUIDATION TRADE${colors.reset} | ` +
+          `${colors.yellow}Target: ${targetType}${colors.reset} | ` +
+          `${colors.magenta}${direction}${colors.reset}`
+      );
+    } else {
+      console.log(
+        `${colors.dim}[${timestamp}]${colors.reset} ${colors.green}✅ NORMAL TRADE${colors.reset}`
+      );
+    }
+  }
+
+  handleMarginUpdatesStartedEvent(isLiquidationTrade, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const tradeType = isLiquidationTrade ? "LIQUIDATION" : "NORMAL";
+    const typeColor = isLiquidationTrade ? colors.red : colors.green;
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.yellow}🔄 MARGIN UPDATES STARTED${colors.reset} | ` +
+        `${typeColor}${tradeType} TRADE${colors.reset}`
+    );
+  }
+
+  handleMarginUpdatesCompletedEvent(event) {
+    const timestamp = new Date().toLocaleTimeString();
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightGreen}✅ MARGIN UPDATES COMPLETED${colors.reset}`
+    );
+  }
+
+  handleFeesDeductedEvent(buyer, buyerFee, seller, sellerFee, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const buyerFeeFormatted = formatWithAutoDecimalDetection(buyerFee, 6, 4);
+    const sellerFeeFormatted = formatWithAutoDecimalDetection(sellerFee, 6, 4);
+    const buyerType = this.formatUserDisplay(buyer);
+    const sellerType = this.formatUserDisplay(seller);
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.yellow}💸 FEES DEDUCTED${colors.reset} | ` +
+        `${colors.green}${buyerType}: $${buyerFeeFormatted}${colors.reset} | ` +
+        `${colors.red}${sellerType}: $${sellerFeeFormatted}${colors.reset}`
+    );
+  }
+
+  handlePriceUpdatedEvent(lastTradePrice, currentMarkPrice, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const tradePriceFormatted = formatWithAutoDecimalDetection(
+      lastTradePrice,
+      6,
+      2
+    );
+    const markPriceFormatted = formatWithAutoDecimalDetection(
+      currentMarkPrice,
+      6,
+      2
+    );
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightYellow}📊 PRICE UPDATED${colors.reset} | ` +
+        `${colors.cyan}Trade: $${tradePriceFormatted}${colors.reset} | ` +
+        `${colors.magenta}Mark: $${markPriceFormatted}${colors.reset}`
+    );
+  }
+
+  handleLiquidationCheckTriggeredEvent(currentMark, lastMarkPrice, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const currentFormatted = formatWithAutoDecimalDetection(currentMark, 6, 2);
+    const lastFormatted = formatWithAutoDecimalDetection(lastMarkPrice, 6, 2);
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightRed}🔍 LIQUIDATION CHECK${colors.reset} | ` +
+        `${colors.yellow}Current: $${currentFormatted}${colors.reset} | ` +
+        `${colors.dim}Last: $${lastFormatted}${colors.reset}`
+    );
+  }
+
+  handleTradeExecutionCompletedEvent(buyer, seller, price, amount, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const priceFormatted = formatWithAutoDecimalDetection(price, 6, 2);
+    const amountFormatted = formatWithAutoDecimalDetection(amount, 18, 4);
+    const buyerType = this.formatUserDisplay(buyer);
+    const sellerType = this.formatUserDisplay(seller);
+
+    const notification = `
+${colors.bgGreen}${colors.white}${
+      colors.bright
+    }                    ✅ TRADE EXECUTION COMPLETED                    ${
+      colors.reset
+    }
+${
+  colors.brightGreen
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightGreen}│${colors.reset} ${
+      colors.brightYellow
+    }🎉 TRADE SUCCESSFUL${colors.reset} ${colors.dim}at ${timestamp}${
+      colors.reset
+    }                     ${colors.brightGreen}│${colors.reset}
+${colors.brightGreen}│${
+      colors.reset
+    }                                                         ${
+      colors.brightGreen
+    }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.brightCyan}💰 Price:${
+      colors.reset
+    } $${priceFormatted} USDC                              ${
+      colors.brightGreen
+    }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.brightYellow}📊 Amount:${
+      colors.reset
+    } ${amountFormatted} ALU                             ${
+      colors.brightGreen
+    }│${colors.reset}
+${colors.brightGreen}│${
+      colors.reset
+    }                                                         ${
+      colors.brightGreen
+    }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.green}👤 Buyer:${
+      colors.reset
+    } ${buyerType.padEnd(15)}                        ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${colors.reset} ${colors.red}👤 Seller:${
+      colors.reset
+    } ${sellerType.padEnd(15)}                       ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${
+      colors.reset
+    }                                                         ${
+      colors.brightGreen
+    }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightGreen
+    }│${colors.reset}
+${
+  colors.brightGreen
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+
+    // Play a success sound notification (if terminal supports it)
+    process.stdout.write("\x07");
+  }
+
+  // _checkPositionsForLiquidation debug event handlers
+  handleLiquidationCheckStartedEvent(
+    markPrice,
+    tradersLength,
+    startIndex,
+    endIndex,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const markPriceFormatted = formatWithAutoDecimalDetection(markPrice, 6, 2);
+
+    const notification = `
+${colors.bgYellow}${colors.black}${
+      colors.bright
+    }                🔍 LIQUIDATION CHECK STARTED                ${colors.reset}
+${
+  colors.brightYellow
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightYellow}│${colors.reset} ${colors.brightRed}⚠️ LIQUIDATION SCAN${
+      colors.reset
+    } ${colors.dim}at ${timestamp}${colors.reset}                    ${
+      colors.brightYellow
+    }│${colors.reset}
+${colors.brightYellow}│${
+      colors.reset
+    }                                                         ${
+      colors.brightYellow
+    }│${colors.reset}
+${colors.brightYellow}│${colors.reset} ${colors.brightCyan}💰 Mark Price:${
+      colors.reset
+    } $${markPriceFormatted} USDC                        ${
+      colors.brightYellow
+    }│${colors.reset}
+${colors.brightYellow}│${colors.reset} ${
+      colors.brightMagenta
+    }👥 Total Traders:${
+      colors.reset
+    } ${tradersLength}                              ${colors.brightYellow}│${
+      colors.reset
+    }
+${colors.brightYellow}│${colors.reset} ${colors.brightBlue}📊 Checking:${
+      colors.reset
+    } ${startIndex} → ${endIndex} (batch)                   ${
+      colors.brightYellow
+    }│${colors.reset}
+${colors.brightYellow}│${
+      colors.reset
+    }                                                         ${
+      colors.brightYellow
+    }│${colors.reset}
+${colors.brightYellow}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightYellow
+    }│${colors.reset}
+${
+  colors.brightYellow
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+  }
+
+  handleLiquidationRecursionGuardSetEvent(inProgress, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const status = inProgress ? "BLOCKED" : "ALLOWED";
+    const statusColor = inProgress ? colors.red : colors.green;
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.yellow}🛡️ RECURSION GUARD${colors.reset} | ` +
+        `${statusColor}${status}${colors.reset}`
+    );
+  }
+
+  handleLiquidationTraderBeingCheckedEvent(trader, index, totalTraders, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const traderType = this.formatUserDisplay(trader);
+    const progress = Math.round(((index + 1) / totalTraders) * 100);
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.cyan}🔍 CHECKING TRADER${colors.reset} | ` +
+        `${colors.magenta}${traderType}${colors.reset} | ` +
+        `${colors.dim}${index + 1}/${totalTraders} (${progress}%)${
+          colors.reset
+        }`
+    );
+  }
+
+  handleLiquidationLiquidatableCheckEvent(
+    trader,
+    isLiquidatable,
+    markPrice,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const traderType = this.formatUserDisplay(trader);
+    const markPriceFormatted = formatWithAutoDecimalDetection(markPrice, 6, 2);
+    const status = isLiquidatable ? "LIQUIDATABLE" : "HEALTHY";
+    const statusColor = isLiquidatable ? colors.red : colors.green;
+    const icon = isLiquidatable ? "⚠️" : "✅";
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${statusColor}${icon} HEALTH CHECK${colors.reset} | ` +
+        `${colors.magenta}${traderType}${colors.reset} | ` +
+        `${statusColor}${status}${colors.reset} @ $${markPriceFormatted}`
+    );
+  }
+
+  handleLiquidationPositionRetrievedEvent(
+    trader,
+    size,
+    marginLocked,
+    unrealizedPnL,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const traderType = this.formatUserDisplay(trader);
+    const sizeFormatted = formatWithAutoDecimalDetection(size, 18, 4);
+    const marginFormatted = formatWithAutoDecimalDetection(marginLocked, 6, 2);
+    const pnlFormatted = formatWithAutoDecimalDetection(unrealizedPnL, 6, 2);
+    const sizeColor = size > 0 ? colors.green : colors.red;
+    const pnlColor = unrealizedPnL >= 0 ? colors.green : colors.red;
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.blue}📊 POSITION DATA${colors.reset} | ` +
+        `${colors.magenta}${traderType}${colors.reset} | ` +
+        `${sizeColor}${sizeFormatted} ALU${colors.reset} | ` +
+        `${colors.yellow}$${marginFormatted} margin${colors.reset} | ` +
+        `${pnlColor}$${pnlFormatted} PnL${colors.reset}`
+    );
+  }
+
+  handleLiquidationMarketOrderAttemptEvent(
+    trader,
+    amount,
+    isBuy,
+    markPrice,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const traderType = this.formatUserDisplay(trader);
+    const amountFormatted = formatWithAutoDecimalDetection(amount, 18, 4);
+    const markPriceFormatted = formatWithAutoDecimalDetection(markPrice, 6, 2);
+    const direction = isBuy ? "BUY" : "SELL";
+    const directionColor = isBuy ? colors.green : colors.red;
+    const positionType = isBuy ? "SHORT" : "LONG";
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightMagenta}🎯 MARKET ORDER${colors.reset} | ` +
+        `${colors.magenta}${traderType}${colors.reset} | ` +
+        `${directionColor}${direction} ${amountFormatted} ALU${colors.reset} | ` +
+        `${colors.dim}Closing ${positionType} @ $${markPriceFormatted}${colors.reset}`
+    );
+  }
+
+  handleLiquidationMarketOrderResultEvent(trader, success, reason, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const traderType = this.formatUserDisplay(trader);
+    const status = success ? "SUCCESS" : "FAILED";
+    const statusColor = success ? colors.green : colors.red;
+    const icon = success ? "✅" : "❌";
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${statusColor}${icon} MARKET RESULT${colors.reset} | ` +
+        `${colors.magenta}${traderType}${colors.reset} | ` +
+        `${statusColor}${status}${colors.reset} | ` +
+        `${colors.dim}${reason}${colors.reset}`
+    );
+  }
+
+  handleLiquidationSocializedLossAttemptEvent(trader, isLong, method, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const traderType = this.formatUserDisplay(trader);
+    const positionType = isLong ? "LONG" : "SHORT";
+    const positionColor = isLong ? colors.green : colors.red;
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightRed}⚡ SOCIALIZED LOSS${colors.reset} | ` +
+        `${colors.magenta}${traderType}${colors.reset} | ` +
+        `${positionColor}${positionType}${colors.reset} | ` +
+        `${colors.dim}${method}${colors.reset}`
+    );
+  }
+
+  handleLiquidationSocializedLossResultEvent(trader, success, method, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const traderType = this.formatUserDisplay(trader);
+    const status = success ? "SUCCESS" : "FAILED";
+    const statusColor = success ? colors.green : colors.red;
+    const icon = success ? "✅" : "❌";
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${statusColor}${icon} SOCIALIZED RESULT${colors.reset} | ` +
+        `${colors.magenta}${traderType}${colors.reset} | ` +
+        `${statusColor}${status}${colors.reset} | ` +
+        `${colors.dim}${method}${colors.reset}`
+    );
+  }
+
+  handleLiquidationCompletedEvent(
+    trader,
+    liquidationsTriggered,
+    method,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const traderType = this.formatUserDisplay(trader);
+
+    const notification = `
+${colors.bgRed}${colors.white}${
+      colors.bright
+    }                ⚡ LIQUIDATION COMPLETED                ${colors.reset}
+${colors.brightRed}┌─────────────────────────────────────────────────────────┐${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${
+      colors.brightYellow
+    }💥 POSITION LIQUIDATED${colors.reset} ${colors.dim}at ${timestamp}${
+      colors.reset
+    }               ${colors.brightRed}│${colors.reset}
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.brightMagenta}👤 Trader:${
+      colors.reset
+    } ${traderType.padEnd(15)}                        ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightCyan}⚡ Method:${
+      colors.reset
+    } ${method.padEnd(15)}                        ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${
+      colors.brightYellow
+    }📊 Total Liquidations:${
+      colors.reset
+    } ${liquidationsTriggered}                        ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}└─────────────────────────────────────────────────────────┘${
+      colors.reset
+    }
+    `;
+
+    console.log(notification);
+
+    // Play a warning sound notification (if terminal supports it)
+    process.stdout.write("\x07");
+  }
+
+  handleLiquidationIndexUpdatedEvent(oldIndex, newIndex, tradersLength, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const progress = Math.round((newIndex / tradersLength) * 100);
+    const isReset = newIndex === 0 && oldIndex > 0;
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.blue}📈 INDEX UPDATE${colors.reset} | ` +
+        `${colors.cyan}${oldIndex} → ${newIndex}${colors.reset} | ` +
+        `${colors.yellow}${progress}% complete${colors.reset}` +
+        (isReset ? ` | ${colors.magenta}CYCLE RESET${colors.reset}` : "")
+    );
+  }
+
+  handleLiquidationCheckFinishedEvent(
+    tradersChecked,
+    liquidationsTriggered,
+    nextStartIndex,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const hasLiquidations = liquidationsTriggered > 0;
+    const statusColor = hasLiquidations ? colors.red : colors.green;
+    const icon = hasLiquidations ? "⚠️" : "✅";
+
+    const notification = `
+${colors.bgBlue}${colors.white}${
+      colors.bright
+    }                🔍 LIQUIDATION CHECK FINISHED                ${
+      colors.reset
+    }
+${
+  colors.brightBlue
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightBlue}│${colors.reset} ${statusColor}${icon} SCAN COMPLETE${
+      colors.reset
+    } ${colors.dim}at ${timestamp}${colors.reset}                      ${
+      colors.brightBlue
+    }│${colors.reset}
+${colors.brightBlue}│${
+      colors.reset
+    }                                                         ${
+      colors.brightBlue
+    }│${colors.reset}
+${colors.brightBlue}│${colors.reset} ${colors.brightCyan}👥 Traders Checked:${
+      colors.reset
+    } ${tradersChecked}                            ${colors.brightBlue}│${
+      colors.reset
+    }
+${colors.brightBlue}│${colors.reset} ${statusColor}⚡ Liquidations:${
+      colors.reset
+    } ${liquidationsTriggered}                               ${
+      colors.brightBlue
+    }│${colors.reset}
+${colors.brightBlue}│${colors.reset} ${
+      colors.brightMagenta
+    }📊 Next Start Index:${
+      colors.reset
+    } ${nextStartIndex}                          ${colors.brightBlue}│${
+      colors.reset
+    }
+${colors.brightBlue}│${
+      colors.reset
+    }                                                         ${
+      colors.brightBlue
+    }│${colors.reset}
+${colors.brightBlue}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightBlue
+    }│${colors.reset}
+${
+  colors.brightBlue
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+  }
+
+  handleLiquidationMarginConfiscatedEvent(
+    trader,
+    marginAmount,
+    penalty,
+    liquidator,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const traderType = this.formatUserDisplay(trader);
+    const liquidatorType = this.formatUserDisplay(liquidator);
+    const marginFormatted = formatWithAutoDecimalDetection(marginAmount, 6, 2);
+    const penaltyFormatted = formatWithAutoDecimalDetection(penalty, 6, 2);
+
+    const notification = `
+${colors.bgMagenta}${colors.white}${
+      colors.bright
+    }                💸 MARGIN CONFISCATED                ${colors.reset}
+${
+  colors.brightMagenta
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${colors.brightRed}💸 MARGIN SEIZED${
+      colors.reset
+    } ${colors.dim}at ${timestamp}${colors.reset}                       ${
+      colors.brightMagenta
+    }│${colors.reset}
+${colors.brightMagenta}│${
+      colors.reset
+    }                                                         ${
+      colors.brightMagenta
+    }│${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${colors.brightYellow}👤 Trader:${
+      colors.reset
+    } ${traderType.padEnd(15)}                        ${colors.brightMagenta}│${
+      colors.reset
+    }
+${colors.brightMagenta}│${colors.reset} ${colors.brightCyan}💰 Margin:${
+      colors.reset
+    } $${marginFormatted} USDC                           ${
+      colors.brightMagenta
+    }│${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${colors.brightRed}⚡ Penalty:${
+      colors.reset
+    } $${penaltyFormatted} USDC                          ${
+      colors.brightMagenta
+    }│${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${colors.brightGreen}🎯 Liquidator:${
+      colors.reset
+    } ${liquidatorType.padEnd(15)}                   ${colors.brightMagenta}│${
+      colors.reset
+    }
+${colors.brightMagenta}│${
+      colors.reset
+    }                                                         ${
+      colors.brightMagenta
+    }│${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightMagenta
+    }│${colors.reset}
+${
+  colors.brightMagenta
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+
+    // Play a confiscation sound notification (if terminal supports it)
+    process.stdout.write("\x07\x07"); // Double beep for emphasis
+  }
+
+  handleCoreVaultMarginConfiscatedEvent(
+    user,
+    marginAmount,
+    totalLoss,
+    penalty,
+    liquidator,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const userType = this.formatUserDisplay(user);
+    const liquidatorType = this.formatUserDisplay(liquidator);
+    const marginFormatted = formatWithAutoDecimalDetection(marginAmount, 6, 2);
+    const totalLossFormatted = formatWithAutoDecimalDetection(totalLoss, 6, 2);
+    const penaltyFormatted = formatWithAutoDecimalDetection(penalty, 6, 4);
+
+    const notification = `
+${colors.bgRed}${colors.white}${
+      colors.bright
+    }                🔥 CORE VAULT MARGIN CONFISCATED                ${
+      colors.reset
+    }
+${colors.brightRed}┌─────────────────────────────────────────────────────────┐${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${
+      colors.brightYellow
+    }🔥 MARGIN SEIZED BY VAULT${colors.reset} ${colors.dim}at ${timestamp}${
+      colors.reset
+    }             ${colors.brightRed}│${colors.reset}
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.brightYellow}👤 User:${
+      colors.reset
+    } ${userType.padEnd(15)}                           ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightCyan}💰 Margin:${
+      colors.reset
+    } $${marginFormatted} USDC                           ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightMagenta}💸 Total Loss:${
+      colors.reset
+    } $${totalLossFormatted} USDC                      ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightYellow}⚡ Penalty:${
+      colors.reset
+    } $${penaltyFormatted} USDC                          ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightGreen}🎯 Liquidator:${
+      colors.reset
+    } ${liquidatorType.padEnd(15)}                   ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}└─────────────────────────────────────────────────────────┘${
+      colors.reset
+    }
+    `;
+
+    console.log(notification);
+
+    // Play a strong confiscation sound notification (if terminal supports it)
+    process.stdout.write("\x07\x07\x07"); // Triple beep for CoreVault confiscation
   }
 
   async loadUsers() {
@@ -556,6 +2078,12 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       colorText(`🏛️  DEXETRA TRADING TERMINAL - ${userType}`, colors.brightCyan)
     );
     console.log(colorText(`📅 ${timestamp}`, colors.dim));
+    console.log(
+      colorText(
+        `🎯 Event Listeners: ${colors.brightGreen}ACTIVE${colors.reset} ${colors.dim}(Trading, MatchingEngine, TradeExecution, Liquidation Debug)${colors.reset}`,
+        colors.dim
+      )
+    );
     console.log(gradient("═".repeat(80)));
   }
 
@@ -565,9 +2093,28 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       const balance = await this.contracts.mockUSDC.balanceOf(
         this.currentUser.address
       );
-      const marginSummary = await this.contracts.vault.getMarginSummary(
+      const [
+        unifiedTotalCollateral,
+        unifiedMarginUsedInPositions,
+        unifiedMarginReservedForOrders,
+        unifiedAvailableMargin,
+        unifiedRealizedPnL,
+        unifiedUnrealizedPnL,
+        unifiedTotalMarginCommitted,
+        unifiedIsMarginHealthy,
+      ] = await this.contracts.vault.getUnifiedMarginSummary(
         this.currentUser.address
       );
+
+      // Create compatible marginSummary object
+      const marginSummary = {
+        totalCollateral: unifiedTotalCollateral,
+        marginUsed: unifiedMarginUsedInPositions,
+        marginReserved: unifiedMarginReservedForOrders,
+        availableCollateral: unifiedAvailableMargin,
+        realizedPnL: unifiedRealizedPnL,
+        unrealizedPnL: unifiedUnrealizedPnL,
+      };
       const userOrders = await this.contracts.orderBook.getUserOrders(
         this.currentUser.address
       );
@@ -974,8 +2521,13 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         } else {
           console.log(
             colorText(
-              "│ ✅ All margin sources are synchronized                      │",
-              colors.green
+              `│ 🔒 Total Margin Locked: ${colorText(
+                comprehensiveMarginData.totals.totalMarginLocked
+                  .toFixed(2)
+                  .padEnd(16),
+                colors.yellow
+              )} USDC        │`,
+              colors.white
             )
           );
         }
@@ -2585,9 +4137,28 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
 
     try {
       // Get comprehensive data
-      const marginSummary = await this.contracts.vault.getMarginSummary(
+      const [
+        unifiedTotalCollateral2,
+        unifiedMarginUsedInPositions2,
+        unifiedMarginReservedForOrders2,
+        unifiedAvailableMargin2,
+        unifiedRealizedPnL2,
+        unifiedUnrealizedPnL2,
+        unifiedTotalMarginCommitted2,
+        unifiedIsMarginHealthy2,
+      ] = await this.contracts.vault.getUnifiedMarginSummary(
         this.currentUser.address
       );
+
+      // Create compatible marginSummary object
+      const marginSummary = {
+        totalCollateral: unifiedTotalCollateral2,
+        marginUsed: unifiedMarginUsedInPositions2,
+        marginReserved: unifiedMarginReservedForOrders2,
+        availableCollateral: unifiedAvailableMargin2,
+        realizedPnL: unifiedRealizedPnL2,
+        unrealizedPnL: unifiedUnrealizedPnL2,
+      };
       const positions = await this.contracts.vault.getUserPositions(
         this.currentUser.address
       );
@@ -4719,6 +6290,91 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       gradient("🌟 Thank you for using Dexetra Interactive Trader! 🌟")
     );
     console.log(colorText("\n🚀 Happy Trading! 🚀", colors.brightGreen));
+
+    // Clean up event listeners
+    try {
+      if (this.contracts.orderBook) {
+        // Basic trading events
+        this.contracts.orderBook.removeAllListeners("OrderMatched");
+        this.contracts.orderBook.removeAllListeners("OrderPlaced");
+        this.contracts.orderBook.removeAllListeners("OrderCancelled");
+
+        // Matching engine debug events
+        this.contracts.orderBook.removeAllListeners("MatchingStarted");
+        this.contracts.orderBook.removeAllListeners("PriceLevelEntered");
+        this.contracts.orderBook.removeAllListeners("OrderMatchAttempt");
+        this.contracts.orderBook.removeAllListeners(
+          "SlippageProtectionTriggered"
+        );
+        this.contracts.orderBook.removeAllListeners("MatchingCompleted");
+
+        // _executeTrade debug events
+        this.contracts.orderBook.removeAllListeners("TradeExecutionStarted");
+        this.contracts.orderBook.removeAllListeners("TradeValueCalculated");
+        this.contracts.orderBook.removeAllListeners("TradeRecorded");
+        this.contracts.orderBook.removeAllListeners("PositionsRetrieved");
+        this.contracts.orderBook.removeAllListeners("PositionsCalculated");
+        this.contracts.orderBook.removeAllListeners("ActiveTradersUpdated");
+        this.contracts.orderBook.removeAllListeners("MarginValidationPassed");
+        this.contracts.orderBook.removeAllListeners("LiquidationTradeDetected");
+        this.contracts.orderBook.removeAllListeners("MarginUpdatesStarted");
+        this.contracts.orderBook.removeAllListeners("MarginUpdatesCompleted");
+        this.contracts.orderBook.removeAllListeners("FeesDeducted");
+        this.contracts.orderBook.removeAllListeners("PriceUpdated");
+        this.contracts.orderBook.removeAllListeners(
+          "LiquidationCheckTriggered"
+        );
+        this.contracts.orderBook.removeAllListeners("TradeExecutionCompleted");
+
+        // _checkPositionsForLiquidation debug events
+        this.contracts.orderBook.removeAllListeners("LiquidationCheckStarted");
+        this.contracts.orderBook.removeAllListeners(
+          "LiquidationRecursionGuardSet"
+        );
+        this.contracts.orderBook.removeAllListeners(
+          "LiquidationTraderBeingChecked"
+        );
+        this.contracts.orderBook.removeAllListeners(
+          "LiquidationLiquidatableCheck"
+        );
+        this.contracts.orderBook.removeAllListeners(
+          "LiquidationPositionRetrieved"
+        );
+        this.contracts.orderBook.removeAllListeners(
+          "LiquidationMarketOrderAttempt"
+        );
+        this.contracts.orderBook.removeAllListeners(
+          "LiquidationMarketOrderResult"
+        );
+        this.contracts.orderBook.removeAllListeners(
+          "LiquidationSocializedLossAttempt"
+        );
+        this.contracts.orderBook.removeAllListeners(
+          "LiquidationSocializedLossResult"
+        );
+        this.contracts.orderBook.removeAllListeners("LiquidationCompleted");
+        this.contracts.orderBook.removeAllListeners("LiquidationIndexUpdated");
+        this.contracts.orderBook.removeAllListeners("LiquidationCheckFinished");
+        this.contracts.orderBook.removeAllListeners(
+          "LiquidationMarginConfiscated"
+        );
+
+        // Clean up CoreVault event listeners
+        if (this.contracts.coreVault) {
+          this.contracts.coreVault.removeAllListeners("MarginConfiscated");
+        }
+
+        console.log(colorText("✅ Event listeners cleaned up", colors.dim));
+      }
+    } catch (error) {
+      console.log(
+        colorText(
+          "⚠️ Warning: Could not clean up event listeners",
+          colors.yellow
+        )
+      );
+    }
+
     this.rl.close();
     this.isRunning = false;
     process.exit(0);
@@ -4766,7 +6422,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
    */
   async viewDetailedMarginAnalysis() {
     console.clear();
-    console.log(colorText("🔍 DETAILED MARGIN ANALYSIS", colors.brightCyan));
+    console.log(colorText("🔍 UNIFIED MARGIN ANALYSIS", colors.brightCyan));
     console.log(gradient("═".repeat(80)));
 
     try {
@@ -4783,13 +6439,64 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         return;
       }
 
-      // Display summary
-      console.log(colorText("\n📊 MARGIN SUMMARY", colors.brightYellow));
+      // Display unified margin summary
+      const unified = comprehensiveMarginData.sources.unifiedMargin;
+      console.log(
+        colorText("\n📊 KEY INSIGHTS & MARGIN BREAKDOWN", colors.brightYellow)
+      );
       console.log(colorText("─".repeat(60), colors.dim));
+
+      // Display margin ratio
+      const marginRatio = (
+        (Number(unified.totalMarginCommitted) /
+          Number(unified.totalCollateral)) *
+        100
+      ).toFixed(2);
+      const marginRatioColor =
+        Number(marginRatio) > 80
+          ? colors.red
+          : Number(marginRatio) > 60
+          ? colors.yellow
+          : colors.green;
+
+      console.log(colorText(`📈 KEY METRICS`, colors.brightCyan));
       console.log(
         colorText(
-          `Total Margin Used:     ${colorText(
-            comprehensiveMarginData.totals.totalMarginUsed.toFixed(6),
+          `   Margin Ratio:        ${colorText(
+            marginRatio + "%",
+            marginRatioColor
+          )} (Committed/Collateral)`,
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          `   Free Margin:         ${colorText(
+            (
+              (Number(unified.availableMargin) /
+                Number(unified.totalCollateral)) *
+              100
+            ).toFixed(2) + "%",
+            colors.brightGreen
+          )} of collateral`,
+          colors.white
+        )
+      );
+
+      console.log(colorText(`\n💰 MARGIN BREAKDOWN`, colors.brightCyan));
+      console.log(
+        colorText(
+          `   Total Collateral:     ${colorText(
+            unified.totalCollateral,
+            colors.green
+          )} USDC`,
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          `   Margin in Positions:  ${colorText(
+            unified.marginUsedInPositions,
             colors.yellow
           )} USDC`,
           colors.white
@@ -4797,8 +6504,8 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       );
       console.log(
         colorText(
-          `Total Margin Reserved: ${colorText(
-            comprehensiveMarginData.totals.totalMarginReserved.toFixed(6),
+          `   Reserved for Orders:  ${colorText(
+            unified.marginReservedForOrders,
             colors.orange
           )} USDC`,
           colors.white
@@ -4806,256 +6513,163 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       );
       console.log(
         colorText(
-          `Total Margin Locked:   ${colorText(
-            comprehensiveMarginData.totals.totalMarginLocked.toFixed(6),
+          `   Available Balance:    ${colorText(
+            unified.availableMargin,
+            colors.brightGreen
+          )} USDC`,
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          `   Total Committed:      ${colorText(
+            unified.totalMarginCommitted,
             colors.magenta
           )} USDC`,
           colors.white
         )
       );
 
-      // Display each source in detail
-      console.log(colorText("\n🏛️ COREVAULT SOURCES", colors.brightCyan));
-      console.log(colorText("─".repeat(60), colors.dim));
+      console.log(colorText(`\n📈 PROFIT & LOSS`, colors.brightCyan));
+      const realizedColor =
+        Number(unified.realizedPnL) >= 0 ? colors.green : colors.red;
+      const unrealizedColor =
+        Number(unified.unrealizedPnL) >= 0 ? colors.green : colors.red;
+      console.log(
+        colorText(
+          `   Realized P&L:        ${colorText(
+            unified.realizedPnL,
+            realizedColor
+          )} USDC`,
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          `   Unrealized P&L:      ${colorText(
+            unified.unrealizedPnL,
+            unrealizedColor
+          )} USDC`,
+          colors.white
+        )
+      );
 
-      // CoreVault Summary
-      if (comprehensiveMarginData.sources.coreVaultSummary) {
-        const summary = comprehensiveMarginData.sources.coreVaultSummary;
-        console.log(colorText(`\n📋 ${summary.source}`, colors.cyan));
-        console.log(
-          colorText(
-            `   Margin Used:        ${colorText(
-              summary.marginUsed,
-              colors.yellow
-            )} USDC`,
-            colors.white
-          )
-        );
-        console.log(
-          colorText(
-            `   Margin Reserved:    ${colorText(
-              summary.marginReserved,
-              colors.orange
-            )} USDC`,
-            colors.white
-          )
-        );
-        console.log(
-          colorText(
-            `   Total Collateral:   ${colorText(
-              summary.totalCollateral,
-              colors.green
-            )} USDC`,
-            colors.white
-          )
-        );
-        console.log(
-          colorText(
-            `   Available:          ${colorText(
-              summary.availableCollateral,
-              colors.brightGreen
-            )} USDC`,
-            colors.white
-          )
-        );
-        console.log(colorText(`   Raw Values:`, colors.dim));
-        console.log(
-          colorText(`     marginUsed: ${summary.raw.marginUsed}`, colors.dim)
-        );
-        console.log(
-          colorText(
-            `     marginReserved: ${summary.raw.marginReserved}`,
-            colors.dim
-          )
-        );
-      }
+      // Display margin utilization
+      const util = comprehensiveMarginData.sources.marginUtilization;
+      console.log(colorText(`\n📊 MARGIN UTILIZATION`, colors.brightCyan));
+      const utilizationColor =
+        Number(util.utilizationBps) > 8000
+          ? colors.red
+          : Number(util.utilizationBps) > 6000
+          ? colors.yellow
+          : colors.green;
+      console.log(
+        colorText(
+          `   Current Utilization: ${colorText(
+            util.utilizationPercent,
+            utilizationColor
+          )}`,
+          colors.white
+        )
+      );
 
-      // Direct margin mapping
-      if (comprehensiveMarginData.sources.coreVaultDirect) {
-        const direct = comprehensiveMarginData.sources.coreVaultDirect;
-        console.log(colorText(`\n🎯 ${direct.source}`, colors.cyan));
-        console.log(
-          colorText(
-            `   Margin Locked:      ${colorText(
-              direct.marginLocked,
-              colors.yellow
-            )} USDC`,
-            colors.white
-          )
-        );
-        console.log(colorText(`   Raw Value: ${direct.raw}`, colors.dim));
-      }
+      // Display position details
+      if (comprehensiveMarginData.sources.positions.positions.length > 0) {
+        console.log(colorText(`\n📍 POSITION DETAILS`, colors.brightCyan));
+        console.log(colorText("─".repeat(60), colors.dim));
 
-      // Position-embedded margin
-      if (comprehensiveMarginData.sources.coreVaultPositions) {
-        const positions = comprehensiveMarginData.sources.coreVaultPositions;
-        console.log(colorText(`\n📍 ${positions.source}`, colors.cyan));
-        console.log(
-          colorText(
-            `   Total from Positions: ${colorText(
-              positions.totalMarginFromPositions,
-              colors.yellow
-            )} USDC`,
-            colors.white
-          )
-        );
+        for (const pos of comprehensiveMarginData.sources.positions.positions) {
+          const sizeNum = Number(pos.size);
+          const sideColor = sizeNum >= 0 ? colors.green : colors.red;
+          const side = sizeNum >= 0 ? "LONG" : "SHORT";
 
-        if (positions.positions && positions.positions.length > 0) {
-          console.log(colorText(`   Position Details:`, colors.white));
-          for (const pos of positions.positions) {
-            console.log(
-              colorText(
-                `     Market: ${pos.marketId.substring(0, 8)}...`,
-                colors.dim
-              )
-            );
-            console.log(colorText(`     Size: ${pos.size} ALU`, colors.dim));
-            console.log(
-              colorText(`     Entry: ${pos.entryPrice} USDC`, colors.dim)
-            );
-            console.log(
-              colorText(
-                `     Margin: ${colorText(
-                  pos.marginLocked,
-                  colors.yellow
-                )} USDC`,
-                colors.white
-              )
-            );
-            console.log(colorText(`     Raw: ${pos.raw}`, colors.dim));
-          }
+          console.log(
+            colorText(
+              `   Market: ${pos.marketId.substring(0, 8)}...`,
+              colors.white
+            )
+          );
+          console.log(
+            colorText(`   Side:   ${colorText(side, sideColor)}`, colors.white)
+          );
+          console.log(
+            colorText(
+              `   Size:   ${colorText(
+                Math.abs(sizeNum).toFixed(4),
+                sideColor
+              )} ALU`,
+              colors.white
+            )
+          );
+          console.log(
+            colorText(`   Entry:  $${pos.entryPrice} USDC`, colors.white)
+          );
+          console.log(
+            colorText(
+              `   Margin: ${colorText(pos.marginLocked, colors.yellow)} USDC`,
+              colors.white
+            )
+          );
+          console.log(colorText("   " + "─".repeat(40), colors.dim));
         }
       }
 
-      // Global counter
-      if (comprehensiveMarginData.sources.coreVaultGlobal) {
-        const global = comprehensiveMarginData.sources.coreVaultGlobal;
-        console.log(colorText(`\n🌍 ${global.source}`, colors.cyan));
-        console.log(
-          colorText(
-            `   Global Total:       ${colorText(
-              global.totalMarginLocked,
-              colors.magenta
-            )} USDC`,
-            colors.white
-          )
-        );
-        console.log(colorText(`   Raw Value: ${global.raw}`, colors.dim));
-      }
-
-      // OrderBook sources
-      console.log(colorText("\n📋 ORDERBOOK SOURCES", colors.brightMagenta));
+      // Display health status
+      console.log(colorText(`\n🏥 MARGIN HEALTH STATUS`, colors.brightCyan));
       console.log(colorText("─".repeat(60), colors.dim));
+      const healthColor = unified.isMarginHealthy
+        ? colors.brightGreen
+        : colors.red;
+      const healthStatus = unified.isMarginHealthy
+        ? "HEALTHY ✅"
+        : "NEEDS ATTENTION ⚠️";
+      console.log(
+        colorText(
+          `   Status: ${colorText(healthStatus, healthColor)}`,
+          colors.white
+        )
+      );
 
-      if (comprehensiveMarginData.sources.orderBookPosition) {
-        const obPos = comprehensiveMarginData.sources.orderBookPosition;
-        console.log(colorText(`\n🎯 ${obPos.source}`, colors.magenta));
-        console.log(
-          colorText(
-            `   Position Size:      ${colorText(
-              obPos.positionSize,
-              colors.yellow
-            )} ALU`,
-            colors.white
-          )
-        );
-        console.log(colorText(`   Note: ${obPos.note}`, colors.dim));
-      }
-
-      if (comprehensiveMarginData.sources.orderBookOrders) {
-        const orders = comprehensiveMarginData.sources.orderBookOrders;
-        console.log(colorText(`\n📋 ${orders.source}`, colors.magenta));
-        console.log(
-          colorText(
-            `   Total from Orders:  ${colorText(
-              orders.totalMarginFromOrders,
-              colors.orange
-            )} USDC`,
-            colors.white
-          )
-        );
-
-        if (orders.orders && orders.orders.length > 0) {
-          console.log(colorText(`   Order Details:`, colors.white));
-          for (const order of orders.orders) {
-            console.log(
-              colorText(`     Order ID: ${order.orderId}`, colors.dim)
-            );
-            console.log(
-              colorText(
-                `     Amount: ${order.amount} ALU @ ${order.price} USDC`,
-                colors.dim
-              )
-            );
-            console.log(
-              colorText(
-                `     Type: ${order.isBuy ? "BUY" : "SELL"} ${
-                  order.isMarginOrder ? "(MARGIN)" : "(SPOT)"
-                }`,
-                colors.dim
-              )
-            );
-            console.log(
-              colorText(
-                `     Margin: ${colorText(
-                  order.marginRequired,
-                  colors.orange
-                )} USDC`,
-                colors.white
-              )
-            );
-            console.log(colorText(`     Raw: ${order.raw}`, colors.dim));
-          }
-        }
-      }
-
-      // Discrepancies
-      if (
-        comprehensiveMarginData.totals.discrepancies &&
-        comprehensiveMarginData.totals.discrepancies.length > 0
-      ) {
-        console.log(colorText("\n⚠️ DISCREPANCIES FOUND", colors.red));
+      // Display any synchronization warnings
+      if (comprehensiveMarginData.totals.discrepancies.length > 0) {
+        console.log(colorText(`\n⚠️ SYNCHRONIZATION WARNINGS`, colors.yellow));
         console.log(colorText("─".repeat(60), colors.dim));
 
         for (const discrepancy of comprehensiveMarginData.totals
           .discrepancies) {
-          console.log(colorText(`\n❌ ${discrepancy.type}`, colors.red));
+          console.log(colorText(`   ${discrepancy.type}:`, colors.red));
           console.log(colorText(`   ${discrepancy.description}`, colors.white));
           console.log(
-            colorText(
-              `   Difference: ${colorText(
-                discrepancy.difference,
-                colors.red
-              )} USDC`,
-              colors.white
-            )
+            colorText(`   Details: ${discrepancy.difference}`, colors.dim)
           );
         }
-
-        console.log(colorText("\n💡 RECOMMENDATIONS:", colors.brightYellow));
-        console.log(
-          colorText(
-            "   • Check for stale data in OrderBook local tracking",
-            colors.white
-          )
-        );
-        console.log(
-          colorText(
-            "   • Verify PositionManager netting is being called",
-            colors.white
-          )
-        );
-        console.log(
-          colorText(
-            "   • Look for direct margin mutations bypassing libraries",
-            colors.white
-          )
-        );
       } else {
-        console.log(colorText("\n✅ NO DISCREPANCIES FOUND", colors.green));
+        console.log(colorText(`\n🔒 LOCKED MARGIN DETAILS`, colors.yellow));
+        console.log(colorText("─".repeat(60), colors.dim));
         console.log(
           colorText(
-            "All margin sources are synchronized correctly.",
+            `   Margin in Positions: ${colorText(
+              unified.marginUsedInPositions,
+              colors.yellow
+            )} USDC`,
+            colors.white
+          )
+        );
+        console.log(
+          colorText(
+            `   Reserved for Orders: ${colorText(
+              unified.marginReservedForOrders,
+              colors.yellow
+            )} USDC`,
+            colors.white
+          )
+        );
+        console.log(
+          colorText(
+            `   Total Margin Locked: ${colorText(
+              unified.totalMarginCommitted,
+              colors.yellow
+            )} USDC`,
             colors.white
           )
         );
@@ -5097,163 +6711,104 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     };
 
     try {
-      // 1. CoreVault - Primary margin tracking
-      console.log("🔍 Fetching margin data from CoreVault...");
+      // Get unified margin data from CoreVault's single source of truth
+      console.log("🔍 Fetching unified margin data from CoreVault...");
 
-      // Get margin summary (aggregated view)
-      const marginSummary = await this.contracts.vault.getMarginSummary(
+      const [
+        totalCollateral,
+        marginUsedInPositions,
+        marginReservedForOrders,
+        availableMargin,
+        realizedPnL,
+        unrealizedPnL,
+        totalMarginCommitted,
+        isMarginHealthy,
+      ] = await this.contracts.vault.getUnifiedMarginSummary(
         this.currentUser.address
       );
-      marginData.sources.coreVaultSummary = {
-        source: "CoreVault.getMarginSummary()",
-        marginUsed: formatWithAutoDecimalDetection(marginSummary.marginUsed, 6),
-        marginReserved: formatUSDC(marginSummary.marginReserved),
-        totalCollateral: formatWithAutoDecimalDetection(
-          marginSummary.totalCollateral,
-          6
-        ),
-        availableCollateral: formatWithAutoDecimalDetection(
-          marginSummary.availableCollateral,
-          6
-        ),
+      // Store unified margin data
+      marginData.sources.unifiedMargin = {
+        source: "CoreVault.getUnifiedMarginSummary()",
+        totalCollateral: formatUSDC(totalCollateral),
+        marginUsedInPositions: formatUSDC(marginUsedInPositions),
+        marginReservedForOrders: formatUSDC(marginReservedForOrders),
+        availableMargin: formatUSDC(availableMargin),
+        realizedPnL: formatWithAutoDecimalDetection(realizedPnL, 6),
+        unrealizedPnL: formatWithAutoDecimalDetection(unrealizedPnL, 6),
+        totalMarginCommitted: formatUSDC(totalMarginCommitted),
+        isMarginHealthy,
         raw: {
-          marginUsed: marginSummary.marginUsed.toString(),
-          marginReserved: marginSummary.marginReserved.toString(),
-          totalCollateral: marginSummary.totalCollateral.toString(),
-          availableCollateral: marginSummary.availableCollateral.toString(),
+          totalCollateral: totalCollateral.toString(),
+          marginUsedInPositions: marginUsedInPositions.toString(),
+          marginReservedForOrders: marginReservedForOrders.toString(),
+          availableMargin: availableMargin.toString(),
+          realizedPnL: realizedPnL.toString(),
+          unrealizedPnL: unrealizedPnL.toString(),
+          totalMarginCommitted: totalMarginCommitted.toString(),
         },
       };
 
-      // Get direct margin mapping
-      const directMargin = await this.contracts.vault.userMarginByMarket(
-        this.currentUser.address,
-        marketId
+      // Get margin utilization ratio
+      const utilizationBps = await this.contracts.vault.getMarginUtilization(
+        this.currentUser.address
       );
-      marginData.sources.coreVaultDirect = {
-        source: "CoreVault.userMarginByMarket[user][marketId]",
-        marginLocked: formatUSDC(directMargin),
-        raw: directMargin.toString(),
+      marginData.sources.marginUtilization = {
+        source: "CoreVault.getMarginUtilization()",
+        utilizationBps: utilizationBps.toString(),
+        utilizationPercent: (Number(utilizationBps) / 100).toFixed(2) + "%",
       };
 
-      // Get positions with embedded margin
+      // Get positions for detailed view
       const positions = await this.contracts.vault.getUserPositions(
         this.currentUser.address
       );
-      let positionMarginTotal = 0;
-      const positionMargins = [];
-      for (let i = 0; i < positions.length; i++) {
-        const pos = positions[i];
-        positionMarginTotal += parseFloat(formatUSDC(pos.marginLocked));
-        positionMargins.push({
+      const positionDetails = [];
+      for (const pos of positions) {
+        positionDetails.push({
           marketId: pos.marketId,
-          size: pos.size.toString(),
+          size: formatWithAutoDecimalDetection(pos.size, 18),
           entryPrice: formatUSDC(pos.entryPrice),
           marginLocked: formatUSDC(pos.marginLocked),
-          raw: pos.marginLocked.toString(),
         });
       }
-      marginData.sources.coreVaultPositions = {
-        source: "CoreVault.userPositions[user][i].marginLocked",
-        totalMarginFromPositions: positionMarginTotal.toFixed(6),
-        positions: positionMargins,
+      marginData.sources.positions = {
+        source: "CoreVault.getUserPositions()",
+        positions: positionDetails,
       };
 
-      // Get global margin counter
-      const globalMarginLocked = await this.contracts.vault.totalMarginLocked();
-      marginData.sources.coreVaultGlobal = {
-        source: "CoreVault.totalMarginLocked (global counter)",
-        totalMarginLocked: formatUSDC(globalMarginLocked),
-        raw: globalMarginLocked.toString(),
-      };
+      // Calculate totals from unified source
+      marginData.totals.totalMarginUsed = Number(
+        formatUSDC(marginUsedInPositions)
+      );
+      marginData.totals.totalMarginReserved = Number(
+        formatUSDC(marginReservedForOrders)
+      );
+      marginData.totals.totalMarginLocked = Number(
+        formatUSDC(totalMarginCommitted)
+      );
 
-      // 2. OrderBook - Local position tracking
-      console.log("🔍 Fetching margin data from OrderBook...");
-
-      // Get OrderBook's local position
+      // Get OrderBook's view for verification
+      console.log("🔍 Verifying OrderBook synchronization...");
       const orderBookPosition = await this.contracts.orderBook.getUserPosition(
         this.currentUser.address
       );
-      marginData.sources.orderBookPosition = {
-        source: "OrderBook.userPositions[user] (local tracking)",
+      marginData.sources.orderBookView = {
+        source: "OrderBook position tracking",
         positionSize: orderBookPosition.toString(),
-        note: "This is OrderBook's local position size tracking (int256)",
       };
 
-      // Get user orders and their margin requirements
-      const userOrders = await this.contracts.orderBook.getUserOrders(
-        this.currentUser.address
-      );
-      let orderMarginTotal = 0;
-      const orderMargins = [];
-      for (const orderId of userOrders) {
-        try {
-          const order = await this.contracts.orderBook.getOrder(orderId);
-          if (
-            order &&
-            order.trader !== "0x0000000000000000000000000000000000000000"
-          ) {
-            orderMarginTotal += parseFloat(formatUSDC(order.marginRequired));
-            orderMargins.push({
-              orderId: orderId.toString(),
-              marginRequired: formatUSDC(order.marginRequired),
-              amount: formatALU(order.amount),
-              price: formatUSDC(order.price),
-              isBuy: order.isBuy,
-              isMarginOrder: order.isMarginOrder,
-              raw: order.marginRequired.toString(),
-            });
-          }
-        } catch (error) {
-          console.log(`⚠️ Could not fetch order ${orderId}: ${error.message}`);
-        }
-      }
-      marginData.sources.orderBookOrders = {
-        source: "OrderBook.orders[orderId].marginRequired",
-        totalMarginFromOrders: orderMarginTotal.toFixed(6),
-        orders: orderMargins,
-      };
-
-      // 3. Calculate totals and identify discrepancies
-      const summaryMarginUsed = parseFloat(
-        marginData.sources.coreVaultSummary.marginUsed
-      );
-      const summaryMarginReserved = parseFloat(
-        marginData.sources.coreVaultSummary.marginReserved
-      );
-      const directMarginValue = parseFloat(
-        marginData.sources.coreVaultDirect.marginLocked
-      );
-      const positionMarginValue = parseFloat(
-        marginData.sources.coreVaultPositions.totalMarginFromPositions
-      );
-
-      marginData.totals.totalMarginUsed = summaryMarginUsed;
-      marginData.totals.totalMarginReserved = summaryMarginReserved;
-      marginData.totals.totalMarginLocked =
-        summaryMarginUsed + summaryMarginReserved;
-
-      // Check for discrepancies
-      const tolerance = 0.000001; // 1 micro USDC tolerance
-
-      if (Math.abs(directMarginValue - positionMarginValue) > tolerance) {
-        marginData.totals.discrepancies.push({
-          type: "CoreVault Internal Mismatch",
-          description: `userMarginByMarket (${directMarginValue}) ≠ sum of position.marginLocked (${positionMarginValue})`,
-          difference: (directMarginValue - positionMarginValue).toFixed(6),
-        });
+      // Check for any synchronization issues
+      let vaultTotalSize = 0n;
+      for (const pos of positions) {
+        // Use the raw position data instead of formatted strings
+        vaultTotalSize += BigInt(pos.size.toString());
       }
 
-      if (
-        Math.abs(
-          summaryMarginUsed - Math.max(directMarginValue, positionMarginValue)
-        ) > tolerance
-      ) {
+      if (vaultTotalSize !== orderBookPosition) {
         marginData.totals.discrepancies.push({
-          type: "Summary vs Direct Mismatch",
-          description: `getMarginSummary.marginUsed (${summaryMarginUsed}) ≠ direct margin queries`,
-          difference: (
-            summaryMarginUsed - Math.max(directMarginValue, positionMarginValue)
-          ).toFixed(6),
+          type: "Position Sync Warning",
+          description: "OrderBook position tracking differs from CoreVault",
+          difference: `OrderBook: ${orderBookPosition}, CoreVault: ${vaultTotalSize}`,
         });
       }
 

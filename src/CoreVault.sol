@@ -44,7 +44,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     mapping(address => PositionManager.Position[]) public userPositions;
     mapping(address => VaultAnalytics.PendingOrder[]) public userPendingOrders;
     mapping(address => bytes32[]) public userMarketIds;
-    mapping(address => mapping(bytes32 => uint256)) public userMarginByMarket;
+    // REMOVED: userMarginByMarket - margin now tracked exclusively in Position structs
     
     // Market management
     mapping(bytes32 => address) public marketToOrderBook;
@@ -69,6 +69,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     event MarginUnreserved(address indexed user, bytes32 indexed orderId, uint256 amount);
     event MarketAuthorized(bytes32 indexed marketId, address indexed orderBook);
     event LiquidationExecuted(address indexed user, bytes32 indexed marketId, address indexed liquidator, uint256 totalLoss, uint256 remainingCollateral);
+    event MarginConfiscated(address indexed user, uint256 marginAmount, uint256 totalLoss, uint256 penalty, address indexed liquidator);
     event PositionUpdated(address indexed user, bytes32 indexed marketId, int256 oldSize, int256 newSize, uint256 entryPrice, uint256 marginLocked);
     event SocializedLossApplied(bytes32 indexed marketId, uint256 lossAmount, address indexed liquidatedUser);
 
@@ -125,7 +126,6 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     ) external onlyRole(ORDERBOOK_ROLE) nonReentrant {
         PositionManager.NettingResult memory result = PositionManager.executePositionNetting(
             userPositions[user],
-            userMarginByMarket[user],
             user,
             marketId,
             sizeDelta,
@@ -152,6 +152,262 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         } else if (!result.positionExists) {
             PositionManager.addMarketIdToUser(userMarketIds[user], marketId);
         }
+    }
+
+    /**
+     * @dev Update position with margin confiscation for liquidations
+     * @param user User being liquidated
+     * @param marketId Market identifier
+     * @param sizeDelta Position size change (should close the position)
+     * @param executionPrice Liquidation execution price
+     * @param liquidator Address of the liquidator
+     */
+    function updatePositionWithLiquidation(
+        address user,
+        bytes32 marketId,
+        int256 sizeDelta,
+        uint256 executionPrice,
+        address liquidator
+    ) external onlyRole(ORDERBOOK_ROLE) nonReentrant {
+        // Find the position being liquidated
+        PositionManager.Position[] storage positions = userPositions[user];
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size != 0) {
+                // Ensure this is actually closing the position (or a significant portion)
+                int256 oldSize = positions[i].size;
+                int256 newSize = oldSize + sizeDelta;
+                
+                // Only proceed if this significantly reduces the position (at least 50% closure)
+                uint256 closurePercentage = uint256(sizeDelta > 0 ? sizeDelta : -sizeDelta) * 100 / uint256(oldSize > 0 ? oldSize : -oldSize);
+                if (closurePercentage < 50) {
+                    // Not a significant liquidation, treat as normal trade
+                    PositionManager.NettingResult memory partialResult = PositionManager.executePositionNetting(
+                        positions,
+                        user,
+                        marketId,
+                        sizeDelta,
+                        executionPrice,
+                        0 // No additional margin required for liquidation
+                    );
+                    
+                    // Handle margin changes normally
+                    if (partialResult.marginToLock > 0) {
+                        totalMarginLocked += partialResult.marginToLock;
+                    }
+                    if (partialResult.marginToRelease > 0) {
+                        totalMarginLocked -= partialResult.marginToRelease;
+                    }
+                    
+                    if (partialResult.realizedPnL != 0) {
+                        userRealizedPnL[user] += partialResult.realizedPnL;
+                    }
+                    return;
+                }
+                
+                // This is a significant liquidation - confiscate margin
+                uint256 marginToConfiscate = positions[i].marginLocked;
+                uint256 entryPrice = positions[i].entryPrice;
+                
+                // Calculate trading loss
+                uint256 tradingLoss = 0;
+                if ((oldSize > 0 && executionPrice < entryPrice) || (oldSize < 0 && executionPrice > entryPrice)) {
+                    // Position is at a loss
+                    uint256 lossPerUnit = oldSize > 0 ? (entryPrice - executionPrice) : (executionPrice - entryPrice);
+                    tradingLoss = (lossPerUnit * uint256(oldSize > 0 ? oldSize : -oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
+                }
+                
+                // Apply liquidation penalty
+                uint256 penalty = (marginToConfiscate * LIQUIDATION_PENALTY_BPS) / 10000;
+                uint256 totalLoss = tradingLoss + penalty;
+                
+                // Cap total loss at user's available collateral
+                if (totalLoss > userCollateral[user]) {
+                    totalLoss = userCollateral[user];
+                }
+                
+                // Confiscate the margin and apply losses
+                if (totalLoss > 0) {
+                    userCollateral[user] -= totalLoss;
+                    
+                    // Give liquidator the penalty portion only
+                    uint256 liquidatorReward = penalty;
+                    if (liquidatorReward > totalLoss) {
+                        liquidatorReward = totalLoss;
+                    }
+                    if (liquidatorReward > 0) {
+                        userCollateral[liquidator] += liquidatorReward;
+                    }
+                    
+                    // Emit event to track actual margin confiscation
+                    emit MarginConfiscated(user, marginToConfiscate, totalLoss, penalty, liquidator);
+                }
+                
+                // CRITICAL FIX: Manually update position without releasing margin
+                // We need to update the position but NOT release the margin since it's been confiscated
+                
+                // Calculate realized P&L for the liquidation
+                int256 realizedPnL = 0;
+                if (oldSize != 0) {
+                    // Calculate P&L: (execution_price - entry_price) * size_closed
+                    int256 priceDiff = int256(executionPrice) - int256(entryPrice);
+                    realizedPnL = (priceDiff * sizeDelta) / int256(TICK_PRECISION);
+                }
+                
+                // Update position size directly without releasing margin
+                positions[i].size = newSize;
+                
+                // If position is fully closed, remove it entirely
+                if (newSize == 0) {
+                    // Remove the position from the array (swap with last and pop)
+                    if (i < positions.length - 1) {
+                        positions[i] = positions[positions.length - 1];
+                    }
+                    positions.pop();
+                    
+                    // Remove market ID from user's list
+                    PositionManager.removeMarketIdFromUser(userMarketIds[user], marketId);
+                    
+                    // CRITICAL: Reduce totalMarginLocked by the confiscated amount
+                    // This represents the margin that was locked but is now confiscated (not released to user)
+                    if (marginToConfiscate <= totalMarginLocked) {
+                        totalMarginLocked -= marginToConfiscate;
+                    }
+                } else {
+                    // Position partially closed - recalculate required margin for remaining position
+                    uint256 newRequiredMargin = _calculateExecutionMargin(newSize, executionPrice);
+                    uint256 marginDifference = 0;
+                    
+                    if (newRequiredMargin < positions[i].marginLocked) {
+                        // Less margin needed for smaller position
+                        marginDifference = positions[i].marginLocked - newRequiredMargin;
+                        positions[i].marginLocked = newRequiredMargin;
+                        
+                        // CRITICAL: Don't release this margin difference - it's confiscated
+                        // Reduce totalMarginLocked by the confiscated portion
+                        if (marginDifference <= totalMarginLocked) {
+                            totalMarginLocked -= marginDifference;
+                        }
+                    } else if (newRequiredMargin > positions[i].marginLocked) {
+                        // More margin needed (shouldn't happen in liquidation, but handle safely)
+                        uint256 additionalMargin = newRequiredMargin - positions[i].marginLocked;
+                        if (additionalMargin <= userCollateral[user]) {
+                            positions[i].marginLocked = newRequiredMargin;
+                            totalMarginLocked += additionalMargin;
+                        }
+                        // If user doesn't have enough collateral, keep current margin locked
+                    }
+                }
+                
+                // Handle realized P&L (this includes the liquidation loss)
+                if (realizedPnL != 0) {
+                    userRealizedPnL[user] += realizedPnL;
+                }
+                
+                emit LiquidationExecuted(user, marketId, liquidator, totalLoss, userCollateral[user]);
+                emit PositionUpdated(user, marketId, oldSize, newSize, entryPrice, newSize == 0 ? 0 : positions[i].marginLocked);
+                return;
+            }
+        }
+        
+        // No position found - this shouldn't happen in liquidation, but handle gracefully
+        revert("No position found for liquidation");
+    }
+
+    /**
+     * @dev Calculate margin required for a trade execution
+     * @param amount Trade amount (can be negative for short positions)
+     * @param executionPrice Actual execution price
+     * @return Margin required for this execution
+     */
+    function _calculateExecutionMargin(int256 amount, uint256 executionPrice) internal pure returns (uint256) {
+        // Calculate margin based on actual execution price
+        uint256 absAmount = uint256(amount >= 0 ? amount : -amount);
+        uint256 notionalValue = (absAmount * executionPrice) / (10**18);
+        
+        // Apply different margin requirements based on position type
+        // Long positions (positive amount): 100% margin (10000 bps)
+        // Short positions (negative amount): 150% margin (15000 bps)
+        uint256 marginBps = amount >= 0 ? 10000 : 15000;
+        return (notionalValue * marginBps) / 10000;
+    }
+
+    // ============ Unified Margin Management Interface ============
+    
+    /**
+     * @dev Get comprehensive margin data for a user - single source of truth
+     * @param user User address
+     * @return totalCollateral Total user collateral
+     * @return marginUsedInPositions Margin locked in active positions
+     * @return marginReservedForOrders Margin reserved for pending orders  
+     * @return availableMargin Available margin for new positions/orders
+     * @return realizedPnL Realized profit and loss
+     * @return unrealizedPnL Unrealized profit and loss
+     * @return totalMarginCommitted Total margin committed (used + reserved)
+     * @return isMarginHealthy Whether margin position is healthy
+     */
+    function getUnifiedMarginSummary(address user) external view returns (
+        uint256 totalCollateral,
+        uint256 marginUsedInPositions,
+        uint256 marginReservedForOrders,
+        uint256 availableMargin,
+        int256 realizedPnL,
+        int256 unrealizedPnL,
+        uint256 totalMarginCommitted,
+        bool isMarginHealthy
+    ) {
+        // Get basic collateral and P&L
+        totalCollateral = userCollateral[user];
+        realizedPnL = userRealizedPnL[user];
+        
+        // Calculate margin used in active positions
+        marginUsedInPositions = 0;
+        for (uint256 i = 0; i < userPositions[user].length; i++) {
+            marginUsedInPositions += userPositions[user][i].marginLocked;
+        }
+        
+        // Calculate margin reserved for pending orders
+        marginReservedForOrders = 0;
+        for (uint256 i = 0; i < userPendingOrders[user].length; i++) {
+            marginReservedForOrders += userPendingOrders[user][i].marginReserved;
+        }
+        
+        // Calculate unrealized P&L
+        unrealizedPnL = 0;
+        for (uint256 i = 0; i < userPositions[user].length; i++) {
+            uint256 markPrice = getMarkPrice(userPositions[user][i].marketId);
+            if (markPrice > 0) {
+                int256 priceDiff = int256(markPrice) - int256(userPositions[user][i].entryPrice);
+                unrealizedPnL += (priceDiff * userPositions[user][i].size) / int256(TICK_PRECISION);
+            }
+        }
+        
+        totalMarginCommitted = marginUsedInPositions + marginReservedForOrders;
+        availableMargin = totalCollateral > totalMarginCommitted ? 
+            totalCollateral - totalMarginCommitted : 0;
+        
+        // Simple health check: available margin should be positive
+        isMarginHealthy = (int256(totalCollateral) + realizedPnL + unrealizedPnL) > int256(totalMarginCommitted);
+    }
+    
+    /**
+     * @dev Get margin utilization ratio for a user
+     * @param user User address
+     * @return utilizationBps Margin utilization in basis points (0-10000)
+     */
+    function getMarginUtilization(address user) external view returns (uint256 utilizationBps) {
+        uint256 totalCollateral = userCollateral[user];
+        if (totalCollateral == 0) return 0;
+        
+        uint256 totalMarginUsed = 0;
+        for (uint256 i = 0; i < userPositions[user].length; i++) {
+            totalMarginUsed += userPositions[user][i].marginLocked;
+        }
+        for (uint256 i = 0; i < userPendingOrders[user].length; i++) {
+            totalMarginUsed += userPendingOrders[user][i].marginReserved;
+        }
+        
+        utilizationBps = (totalMarginUsed * 10000) / totalCollateral;
+        if (utilizationBps > 10000) utilizationBps = 10000;
     }
 
     // ============ View Functions (Delegated to VaultAnalytics) ============
@@ -289,26 +545,48 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         userCollateral[to] += amount;
     }
 
-    // Lock margin directly to a market (position margin)
+    // Lock margin directly to a market (position margin) - Updated for consolidated tracking
     function lockMargin(address user, bytes32 marketId, uint256 amount) external onlyRole(ORDERBOOK_ROLE) {
         require(user != address(0) && amount > 0, "invalid");
         require(marketToOrderBook[marketId] != address(0), "market!");
         uint256 avail = getAvailableCollateral(user);
         require(avail >= amount, "insufficient collateral");
-        userMarginByMarket[user][marketId] += amount;
+        
+        // Find and update position margin, or revert if no position exists
+        bool positionFound = false;
+        for (uint256 i = 0; i < userPositions[user].length; i++) {
+            if (userPositions[user][i].marketId == marketId) {
+                userPositions[user][i].marginLocked += amount;
+                positionFound = true;
+                emit MarginLocked(user, marketId, amount, userPositions[user][i].marginLocked);
+                break;
+            }
+        }
+        require(positionFound, "No position found for market");
+        
         totalMarginLocked += amount;
-        emit MarginLocked(user, marketId, amount, userMarginByMarket[user][marketId]);
     }
 
     function releaseMargin(address user, bytes32 marketId, uint256 amount) external onlyRole(ORDERBOOK_ROLE) {
         require(user != address(0) && amount > 0, "invalid");
-        uint256 locked = userMarginByMarket[user][marketId];
-        require(locked >= amount, "insufficient locked");
-        userMarginByMarket[user][marketId] = locked - amount;
+        
+        // Find and update position margin
+        bool positionFound = false;
+        for (uint256 i = 0; i < userPositions[user].length; i++) {
+            if (userPositions[user][i].marketId == marketId) {
+                uint256 locked = userPositions[user][i].marginLocked;
+                require(locked >= amount, "insufficient locked");
+                userPositions[user][i].marginLocked = locked - amount;
+                positionFound = true;
+                emit MarginReleased(user, marketId, amount, userPositions[user][i].marginLocked);
+                break;
+            }
+        }
+        require(positionFound, "No position found for market");
+        
         if (totalMarginLocked >= amount) {
             totalMarginLocked -= amount;
         }
-        emit MarginReleased(user, marketId, amount, userMarginByMarket[user][marketId]);
     }
 
     // ===== Margin reservation API (compat with CentralizedVault) =====
@@ -424,10 +702,10 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         PositionManager.Position[] storage positions = userPositions[user];
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId) {
-                return (positions[i].size, positions[i].entryPrice, userMarginByMarket[user][marketId]);
+                return (positions[i].size, positions[i].entryPrice, positions[i].marginLocked);
             }
         }
-        return (0, 0, userMarginByMarket[user][marketId]);
+        return (0, 0, 0);
     }
 
     function isLiquidatable(
@@ -466,7 +744,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size < 0) {
                 int256 oldSize = positions[i].size;
-                uint256 locked = userMarginByMarket[user][marketId];
+                uint256 locked = positions[i].marginLocked;
                 uint256 entryPrice = positions[i].entryPrice;
                 uint256 markPrice = getMarkPrice(marketId);
 
@@ -500,7 +778,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 }
 
                 // Release all locked margin and remove position
-                userMarginByMarket[user][marketId] = 0;
+                // No need to update separate margin tracking - position removal handles this
                 if (locked <= totalMarginLocked) {
                     totalMarginLocked -= locked;
                 }
@@ -540,7 +818,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size > 0) {
                 int256 oldSize = positions[i].size;
-                uint256 locked = userMarginByMarket[user][marketId];
+                uint256 locked = positions[i].marginLocked;
                 uint256 entryPrice = positions[i].entryPrice;
                 uint256 markPrice = getMarkPrice(marketId);
 
@@ -574,7 +852,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 }
 
                 // Release all locked margin and remove position
-                userMarginByMarket[user][marketId] = 0;
+                // No need to update separate margin tracking - position removal handles this
                 if (locked <= totalMarginLocked) {
                     totalMarginLocked -= locked;
                 }
