@@ -25,7 +25,8 @@ const path = require("path");
 
 // Configuration
 const USDC_PER_USER = "10000"; // 10,000 USDC per user
-const COLLATERAL_PER_USER = "1000"; // 1,000 USDC collateral per user
+const COLLATERAL_PER_USER = "1000"; // 1,000 USDC collateral per user (default)
+const USER3_COLLATERAL = "20"; // 15 USDC collateral for User 3
 const NUM_USERS = 4; // Setup 4 trading accounts
 
 async function main() {
@@ -293,14 +294,16 @@ async function main() {
         await mockUSDC.mint(user.address, mintAmount);
         console.log(`     ✅ Minted ${USDC_PER_USER} USDC`);
 
-        // Deposit collateral (including deployer)
-        const collateralAmount = ethers.parseUnits(COLLATERAL_PER_USER, 6);
+        // Deposit collateral (User 3 gets special amount)
+        const collateralAmountStr =
+          i === 3 ? USER3_COLLATERAL : COLLATERAL_PER_USER;
+        const collateralAmount = ethers.parseUnits(collateralAmountStr, 6);
         await mockUSDC
           .connect(user)
           .approve(contracts.CORE_VAULT, collateralAmount);
         await coreVault.connect(user).depositCollateral(collateralAmount);
         console.log(
-          `     ✅ Deposited ${COLLATERAL_PER_USER} USDC as collateral`
+          `     ✅ Deposited ${collateralAmountStr} USDC as collateral`
         );
 
         // Show final balances
@@ -470,9 +473,12 @@ async function main() {
 
     console.log("\n💰 TRADING ACCOUNTS:");
     console.log("  • Each user has 10,000 USDC");
-    console.log("  • Users 1-3 have 1,000 USDC deposited as collateral");
-    console.log("  • Users 1-3 have 9,000 USDC available in wallet");
-    console.log("  • Deployer has all 10,000 USDC in wallet");
+    console.log(
+      "  • Deployer & Users 1-2 have 1,000 USDC deposited as collateral"
+    );
+    console.log("  • User 3 has 15 USDC deposited as collateral");
+    console.log("  • Deployer & Users 1-2 have 9,000 USDC available in wallet");
+    console.log("  • User 3 has 9,985 USDC available in wallet");
 
     console.log("\n🏭 ALUMINUM MARKET:");
     console.log("  • Symbol: ALU-USD");

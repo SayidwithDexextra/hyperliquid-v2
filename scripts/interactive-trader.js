@@ -628,10 +628,15 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
 
   async setupEventListeners() {
     console.log(
-      colorText("🎯 Setting up real-time event listeners...", colors.cyan)
+      colorText(
+        "🎯 ISOLATED MODE: Setting up ONLY ADL event listeners...",
+        colors.brightYellow
+      )
     );
 
     try {
+      // ============ COMMENTED OUT: ALL NON-ADL EVENTS FOR ISOLATION ============
+      /*
       // Listen for OrderMatched events from the matching engine
       this.contracts.orderBook.on(
         "OrderMatched",
@@ -807,6 +812,9 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         }
       );
 
+      */
+      // COMMENTED OUT: Old liquidation debugging events
+      /*
       this.contracts.orderBook.on(
         "LiquidationTradeDetected",
         (
@@ -830,6 +838,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           this.handleMarginUpdatesStartedEvent(isLiquidationTrade, event);
         }
       );
+      */
 
       this.contracts.orderBook.on("MarginUpdatesCompleted", (event) => {
         this.handleMarginUpdatesCompletedEvent(event);
@@ -855,6 +864,8 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         }
       );
 
+      // COMMENTED OUT: Old liquidation debugging events continued
+      /*
       this.contracts.orderBook.on(
         "LiquidationCheckTriggered",
         (currentMark, lastMarkPrice, event) => {
@@ -865,6 +876,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           );
         }
       );
+      */
 
       this.contracts.orderBook.on(
         "TradeExecutionCompleted",
@@ -879,6 +891,8 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         }
       );
 
+      // COMMENTED OUT: Old liquidation debugging events continued
+      /*
       // Listen for _checkPositionsForLiquidation debug events
       this.contracts.orderBook.on(
         "LiquidationCheckStarted",
@@ -1034,7 +1048,8 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           );
         }
       );
-
+      */
+      /*
       // Listen for CoreVault margin confiscation events
       if (this.contracts.coreVault) {
         this.contracts.coreVault.on(
@@ -1051,9 +1066,183 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           }
         );
       }
+      */
+
+      // ============ ONLY ADL EVENT LISTENERS ACTIVE ============
+      console.log(
+        colorText(
+          "🎯 ISOLATED MODE: Only ADL events will be displayed",
+          colors.brightYellow
+        )
+      );
+
+      if (this.contracts.coreVault) {
+        this.contracts.coreVault.on(
+          "SocializationStarted",
+          (marketId, totalLossAmount, liquidatedUser, timestamp, event) => {
+            this.handleSocializationStartedEvent(
+              marketId,
+              totalLossAmount,
+              liquidatedUser,
+              timestamp,
+              event
+            );
+          }
+        );
+
+        this.contracts.coreVault.on(
+          "ProfitablePositionFound",
+          (
+            user,
+            marketId,
+            positionSize,
+            entryPrice,
+            markPrice,
+            unrealizedPnL,
+            profitScore,
+            event
+          ) => {
+            this.handleProfitablePositionFoundEvent(
+              user,
+              marketId,
+              positionSize,
+              entryPrice,
+              markPrice,
+              unrealizedPnL,
+              profitScore,
+              event
+            );
+          }
+        );
+
+        this.contracts.coreVault.on(
+          "AdministrativePositionClosure",
+          (
+            user,
+            marketId,
+            sizeBeforeReduction,
+            sizeAfterReduction,
+            realizedProfit,
+            newEntryPrice,
+            event
+          ) => {
+            this.handleAdministrativePositionClosureEvent(
+              user,
+              marketId,
+              sizeBeforeReduction,
+              sizeAfterReduction,
+              realizedProfit,
+              newEntryPrice,
+              event
+            );
+          }
+        );
+
+        this.contracts.coreVault.on(
+          "SocializationCompleted",
+          (
+            marketId,
+            totalLossCovered,
+            remainingLoss,
+            positionsAffected,
+            liquidatedUser,
+            event
+          ) => {
+            this.handleSocializationCompletedEvent(
+              marketId,
+              totalLossCovered,
+              remainingLoss,
+              positionsAffected,
+              liquidatedUser,
+              event
+            );
+          }
+        );
+
+        this.contracts.coreVault.on(
+          "SocializationFailed",
+          (marketId, lossAmount, reason, liquidatedUser, event) => {
+            this.handleSocializationFailedEvent(
+              marketId,
+              lossAmount,
+              reason,
+              liquidatedUser,
+              event
+            );
+          }
+        );
+
+        // Debug event listeners for detailed tracking
+        this.contracts.coreVault.on(
+          "DebugProfitCalculation",
+          (
+            user,
+            marketId,
+            entryPrice,
+            markPrice,
+            positionSize,
+            unrealizedPnL,
+            profitScore,
+            event
+          ) => {
+            this.handleDebugProfitCalculationEvent(
+              user,
+              marketId,
+              entryPrice,
+              markPrice,
+              positionSize,
+              unrealizedPnL,
+              profitScore,
+              event
+            );
+          }
+        );
+
+        this.contracts.coreVault.on(
+          "DebugPositionReduction",
+          (
+            user,
+            marketId,
+            originalSize,
+            reductionAmount,
+            newSize,
+            realizedPnL,
+            event
+          ) => {
+            this.handleDebugPositionReductionEvent(
+              user,
+              marketId,
+              originalSize,
+              reductionAmount,
+              newSize,
+              realizedPnL,
+              event
+            );
+          }
+        );
+
+        this.contracts.coreVault.on(
+          "DebugSocializationState",
+          (
+            marketId,
+            remainingLoss,
+            totalProfitableUsers,
+            processedUsers,
+            event
+          ) => {
+            this.handleDebugSocializationStateEvent(
+              marketId,
+              remainingLoss,
+              totalProfitableUsers,
+              processedUsers,
+              event
+            );
+          }
+        );
+      }
 
       console.log(
-        colorText("✅ Event listeners activated!", colors.brightGreen)
+        colorText("✅ ADL-ONLY Event listeners activated!", colors.brightGreen)
       );
     } catch (error) {
       console.log(
@@ -1491,6 +1680,8 @@ ${colors.brightRed}└───────────────────�
     );
   }
 
+  // ============ COMMENTED OUT: Old Liquidation Handler Functions ============
+  /*
   handleLiquidationTradeDetectedEvent(
     isLiquidationTrade,
     liquidationTarget,
@@ -2063,6 +2254,8 @@ ${
     // Play a confiscation sound notification (if terminal supports it)
     process.stdout.write("\x07\x07"); // Double beep for emphasis
   }
+  */
+  // ============ END COMMENTED OUT: Old Liquidation Handler Functions ============
 
   handleCoreVaultMarginConfiscatedEvent(
     user,
@@ -2142,6 +2335,527 @@ ${colors.brightRed}└───────────────────�
 
     // Play a strong confiscation sound notification (if terminal supports it)
     process.stdout.write("\x07\x07\x07"); // Triple beep for CoreVault confiscation
+  }
+
+  // ============ NEW: Administrative Position Closure (ADL) Event Handlers ============
+
+  handleSocializationStartedEvent(
+    marketId,
+    totalLossAmount,
+    liquidatedUser,
+    timestamp,
+    event
+  ) {
+    console.log("🔥 ADL EVENT DETECTED: SocializationStarted");
+    const eventTimestamp = new Date().toLocaleTimeString();
+    const lossFormatted = formatWithAutoDecimalDetection(totalLossAmount, 6, 2);
+    const liquidatedUserType = this.formatUserDisplay(liquidatedUser);
+    const marketName = this.getMarketDisplayName(marketId);
+
+    const notification = `
+${colors.bgYellow}${colors.black}${
+      colors.bright
+    }                🏦 SOCIALIZED LOSS STARTED                ${colors.reset}
+${
+  colors.brightYellow
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightYellow}│${colors.reset} ${
+      colors.brightRed
+    }🏦 ADL SYSTEM ACTIVATED${colors.reset} ${colors.dim}at ${eventTimestamp}${
+      colors.reset
+    }             ${colors.brightYellow}│${colors.reset}
+${colors.brightYellow}│${
+      colors.reset
+    }                                                         ${
+      colors.brightYellow
+    }│${colors.reset}
+${colors.brightYellow}│${colors.reset} ${colors.brightCyan}📊 Market:${
+      colors.reset
+    } ${marketName.padEnd(15)}                       ${colors.brightYellow}│${
+      colors.reset
+    }
+${colors.brightYellow}│${colors.reset} ${colors.brightMagenta}💸 Loss Amount:${
+      colors.reset
+    } $${lossFormatted} USDC                 ${colors.brightYellow}│${
+      colors.reset
+    }
+${colors.brightYellow}│${colors.reset} ${colors.brightRed}👤 Liquidated:${
+      colors.reset
+    } ${liquidatedUserType.padEnd(15)}           ${colors.brightYellow}│${
+      colors.reset
+    }
+${colors.brightYellow}│${
+      colors.reset
+    }                                                         ${
+      colors.brightYellow
+    }│${colors.reset}
+${colors.brightYellow}│${colors.reset} ${
+      colors.dim
+    }🔍 Searching for profitable positions to reduce...${colors.reset} ${
+      colors.brightYellow
+    }│${colors.reset}
+${colors.brightYellow}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightYellow
+    }│${colors.reset}
+${
+  colors.brightYellow
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+    process.stdout.write("\x07"); // Alert sound
+  }
+
+  handleProfitablePositionFoundEvent(
+    user,
+    marketId,
+    positionSize,
+    entryPrice,
+    markPrice,
+    unrealizedPnL,
+    profitScore,
+    event
+  ) {
+    console.log("🔥 ADL EVENT DETECTED: ProfitablePositionFound");
+    const timestamp = new Date().toLocaleTimeString();
+    const userType = this.formatUserDisplay(user);
+    const marketName = this.getMarketDisplayName(marketId);
+    const sizeFormatted = formatWithAutoDecimalDetection(
+      Math.abs(positionSize),
+      18,
+      4
+    );
+    const entryPriceFormatted = formatWithAutoDecimalDetection(
+      entryPrice,
+      6,
+      2
+    );
+    const markPriceFormatted = formatWithAutoDecimalDetection(markPrice, 6, 2);
+    const pnlFormatted = formatWithAutoDecimalDetection(unrealizedPnL, 6, 2);
+    const scoreFormatted = formatWithAutoDecimalDetection(profitScore, 18, 2);
+    const positionType = positionSize >= 0 ? "LONG" : "SHORT";
+    const positionColor = positionSize >= 0 ? colors.green : colors.red;
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightGreen}🎯 PROFITABLE POSITION FOUND${colors.reset} | ` +
+        `${colors.cyan}${userType}${colors.reset} | ` +
+        `${positionColor}${positionType} ${sizeFormatted}${colors.reset} | ` +
+        `${colors.yellow}Entry: $${entryPriceFormatted}${colors.reset} | ` +
+        `${colors.magenta}Mark: $${markPriceFormatted}${colors.reset} | ` +
+        `${colors.brightGreen}PnL: +$${pnlFormatted}${colors.reset} | ` +
+        `${colors.brightCyan}Score: ${scoreFormatted}${colors.reset}`
+    );
+  }
+
+  handleAdministrativePositionClosureEvent(
+    user,
+    marketId,
+    sizeBeforeReduction,
+    sizeAfterReduction,
+    realizedProfit,
+    newEntryPrice,
+    event
+  ) {
+    console.log("🔥 ADL EVENT DETECTED: AdministrativePositionClosure");
+    const timestamp = new Date().toLocaleTimeString();
+    const userType = this.formatUserDisplay(user);
+    const marketName = this.getMarketDisplayName(marketId);
+    const beforeFormatted = formatWithAutoDecimalDetection(
+      sizeBeforeReduction,
+      18,
+      4
+    );
+    const afterFormatted = formatWithAutoDecimalDetection(
+      sizeAfterReduction,
+      18,
+      4
+    );
+    const profitFormatted = formatWithAutoDecimalDetection(
+      realizedProfit,
+      6,
+      2
+    );
+    const entryFormatted = formatWithAutoDecimalDetection(newEntryPrice, 6, 2);
+    const reductionAmount = sizeBeforeReduction - sizeAfterReduction;
+    const reductionFormatted = formatWithAutoDecimalDetection(
+      reductionAmount,
+      18,
+      4
+    );
+
+    const notification = `
+${colors.bgMagenta}${colors.white}${
+      colors.bright
+    }                💸 POSITION REDUCED (ADL)                ${colors.reset}
+${
+  colors.brightMagenta
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${
+      colors.brightYellow
+    }💸 ADMINISTRATIVE CLOSURE${colors.reset} ${colors.dim}at ${timestamp}${
+      colors.reset
+    }         ${colors.brightMagenta}│${colors.reset}
+${colors.brightMagenta}│${
+      colors.reset
+    }                                                         ${
+      colors.brightMagenta
+    }│${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${colors.brightCyan}👤 User:${
+      colors.reset
+    } ${userType.padEnd(15)}                        ${colors.brightMagenta}│${
+      colors.reset
+    }
+${colors.brightMagenta}│${colors.reset} ${colors.brightBlue}📊 Market:${
+      colors.reset
+    } ${marketName.padEnd(15)}                     ${colors.brightMagenta}│${
+      colors.reset
+    }
+${colors.brightMagenta}│${
+      colors.reset
+    }                                                         ${
+      colors.brightMagenta
+    }│${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${colors.brightRed}📉 Size Before:${
+      colors.reset
+    } ${beforeFormatted} ALU                   ${colors.brightMagenta}│${
+      colors.reset
+    }
+${colors.brightMagenta}│${colors.reset} ${colors.brightGreen}📈 Size After:${
+      colors.reset
+    } ${afterFormatted} ALU                    ${colors.brightMagenta}│${
+      colors.reset
+    }
+${colors.brightMagenta}│${colors.reset} ${colors.brightYellow}🔻 Reduction:${
+      colors.reset
+    } ${reductionFormatted} ALU                  ${colors.brightMagenta}│${
+      colors.reset
+    }
+${colors.brightMagenta}│${
+      colors.reset
+    }                                                         ${
+      colors.brightMagenta
+    }│${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${
+      colors.brightGreen
+    }💰 Realized Profit:${colors.reset} $${profitFormatted} USDC             ${
+      colors.brightMagenta
+    }│${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${colors.cyan}🎯 Entry Price:${
+      colors.reset
+    } $${entryFormatted} (unchanged)         ${colors.brightMagenta}│${
+      colors.reset
+    }
+${colors.brightMagenta}│${
+      colors.reset
+    }                                                         ${
+      colors.brightMagenta
+    }│${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightMagenta
+    }│${colors.reset}
+${
+  colors.brightMagenta
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+    process.stdout.write("\x07\x07"); // Double beep for position closure
+  }
+
+  handleSocializationCompletedEvent(
+    marketId,
+    totalLossCovered,
+    remainingLoss,
+    positionsAffected,
+    liquidatedUser,
+    event
+  ) {
+    console.log("🔥 ADL EVENT DETECTED: SocializationCompleted");
+    const timestamp = new Date().toLocaleTimeString();
+    const marketName = this.getMarketDisplayName(marketId);
+    const coveredFormatted = formatWithAutoDecimalDetection(
+      totalLossCovered,
+      6,
+      2
+    );
+    const remainingFormatted = formatWithAutoDecimalDetection(
+      remainingLoss,
+      6,
+      2
+    );
+    const liquidatedUserType = this.formatUserDisplay(liquidatedUser);
+    const coveragePercent =
+      totalLossCovered > 0
+        ? Math.round(
+            (totalLossCovered / (totalLossCovered + remainingLoss)) * 100
+          )
+        : 0;
+
+    const notification = `
+${colors.bgGreen}${colors.white}${
+      colors.bright
+    }                ✅ SOCIALIZATION COMPLETED                ${colors.reset}
+${
+  colors.brightGreen
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightGreen}│${colors.reset} ${
+      colors.brightYellow
+    }✅ ADL SYSTEM COMPLETED${colors.reset} ${colors.dim}at ${timestamp}${
+      colors.reset
+    }           ${colors.brightGreen}│${colors.reset}
+${colors.brightGreen}│${
+      colors.reset
+    }                                                         ${
+      colors.brightGreen
+    }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.brightCyan}📊 Market:${
+      colors.reset
+    } ${marketName.padEnd(15)}                       ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${colors.reset} ${colors.brightRed}👤 Liquidated:${
+      colors.reset
+    } ${liquidatedUserType.padEnd(15)}           ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${
+      colors.reset
+    }                                                         ${
+      colors.brightGreen
+    }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.brightGreen}💰 Loss Covered:${
+      colors.reset
+    } $${coveredFormatted} USDC                ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${colors.reset} ${colors.brightYellow}💸 Remaining Loss:${
+      colors.reset
+    } $${remainingFormatted} USDC           ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${colors.reset} ${colors.brightCyan}📈 Coverage:${
+      colors.reset
+    } ${coveragePercent}%                             ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${colors.reset} ${
+      colors.brightMagenta
+    }👥 Positions Affected:${
+      colors.reset
+    } ${positionsAffected}                    ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${
+      colors.reset
+    }                                                         ${
+      colors.brightGreen
+    }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightGreen
+    }│${colors.reset}
+${
+  colors.brightGreen
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+    process.stdout.write("\x07\x07\x07"); // Triple beep for completion
+  }
+
+  handleSocializationFailedEvent(
+    marketId,
+    lossAmount,
+    reason,
+    liquidatedUser,
+    event
+  ) {
+    console.log("🔥 ADL EVENT DETECTED: SocializationFailed");
+    const timestamp = new Date().toLocaleTimeString();
+    const marketName = this.getMarketDisplayName(marketId);
+    const lossFormatted = formatWithAutoDecimalDetection(lossAmount, 6, 2);
+    const liquidatedUserType = this.formatUserDisplay(liquidatedUser);
+
+    const notification = `
+${colors.bgRed}${colors.white}${
+      colors.bright
+    }                ❌ SOCIALIZATION FAILED                ${colors.reset}
+${colors.brightRed}┌─────────────────────────────────────────────────────────┐${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightYellow}❌ ADL SYSTEM FAILED${
+      colors.reset
+    } ${colors.dim}at ${timestamp}${colors.reset}              ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.brightCyan}📊 Market:${
+      colors.reset
+    } ${marketName.padEnd(15)}                       ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightMagenta}💸 Loss Amount:${
+      colors.reset
+    } $${lossFormatted} USDC                 ${colors.brightRed}│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.brightYellow}👤 Liquidated:${
+      colors.reset
+    } ${liquidatedUserType.padEnd(15)}           ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.brightRed}⚠️ Reason:${
+      colors.reset
+    } ${reason.padEnd(30)}                ${colors.brightRed}│${colors.reset}
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.dim}💀 This loss becomes bad debt${
+      colors.reset
+    }                      ${colors.brightRed}│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}└─────────────────────────────────────────────────────────┘${
+      colors.reset
+    }
+    `;
+
+    console.log(notification);
+    process.stdout.write("\x07\x07\x07\x07"); // Quad beep for failure alert
+  }
+
+  // Debug event handlers for detailed tracking
+  handleDebugProfitCalculationEvent(
+    user,
+    marketId,
+    entryPrice,
+    markPrice,
+    positionSize,
+    unrealizedPnL,
+    profitScore,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const userType = this.formatUserDisplay(user);
+    const marketName = this.getMarketDisplayName(marketId);
+    const entryFormatted = formatWithAutoDecimalDetection(entryPrice, 6, 2);
+    const markFormatted = formatWithAutoDecimalDetection(markPrice, 6, 2);
+    const sizeFormatted = formatWithAutoDecimalDetection(
+      Math.abs(positionSize),
+      18,
+      4
+    );
+    const pnlFormatted = formatWithAutoDecimalDetection(
+      Math.abs(unrealizedPnL),
+      6,
+      2
+    );
+    const scoreFormatted = formatWithAutoDecimalDetection(profitScore, 18, 2);
+    const pnlSign = unrealizedPnL >= 0 ? "+" : "-";
+    const pnlColor = unrealizedPnL >= 0 ? colors.green : colors.red;
+    const positionType = positionSize >= 0 ? "LONG" : "SHORT";
+    const positionColor = positionSize >= 0 ? colors.green : colors.red;
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.cyan}🔍 DEBUG PROFIT CALC${colors.reset} | ` +
+        `${colors.magenta}${userType}${colors.reset} | ` +
+        `${positionColor}${positionType} ${sizeFormatted}${colors.reset} | ` +
+        `${colors.yellow}${entryFormatted}→${markFormatted}${colors.reset} | ` +
+        `${pnlColor}${pnlSign}$${pnlFormatted}${colors.reset} | ` +
+        `${colors.cyan}Score: ${scoreFormatted}${colors.reset}`
+    );
+  }
+
+  handleDebugPositionReductionEvent(
+    user,
+    marketId,
+    originalSize,
+    reductionAmount,
+    newSize,
+    realizedPnL,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const userType = this.formatUserDisplay(user);
+    const marketName = this.getMarketDisplayName(marketId);
+    const originalFormatted = formatWithAutoDecimalDetection(
+      originalSize,
+      18,
+      4
+    );
+    const reductionFormatted = formatWithAutoDecimalDetection(
+      reductionAmount,
+      18,
+      4
+    );
+    const newFormatted = formatWithAutoDecimalDetection(newSize, 18, 4);
+    const pnlFormatted = formatWithAutoDecimalDetection(realizedPnL, 6, 2);
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.yellow}🔧 DEBUG POSITION REDUCTION${colors.reset} | ` +
+        `${colors.magenta}${userType}${colors.reset} | ` +
+        `${colors.brightRed}${originalFormatted}${colors.reset} → ` +
+        `${colors.brightYellow}-${reductionFormatted}${colors.reset} → ` +
+        `${colors.brightGreen}${newFormatted}${colors.reset} | ` +
+        `${colors.brightGreen}Realized: +$${pnlFormatted}${colors.reset}`
+    );
+  }
+
+  handleDebugSocializationStateEvent(
+    marketId,
+    remainingLoss,
+    totalProfitableUsers,
+    processedUsers,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const marketName = this.getMarketDisplayName(marketId);
+    const lossFormatted = formatWithAutoDecimalDetection(remainingLoss, 6, 2);
+    const progress =
+      totalProfitableUsers > 0
+        ? Math.round((processedUsers / totalProfitableUsers) * 100)
+        : 0;
+
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.cyan}📊 DEBUG ADL STATE${colors.reset} | ` +
+        `${colors.brightMagenta}${marketName}${colors.reset} | ` +
+        `${colors.brightYellow}Remaining: $${lossFormatted}${colors.reset} | ` +
+        `${colors.brightCyan}Progress: ${processedUsers}/${totalProfitableUsers} (${progress}%)${colors.reset}`
+    );
+  }
+
+  // Helper function to get market display name from market ID
+  getMarketDisplayName(marketId) {
+    // Convert marketId (bytes32) to string for display
+    try {
+      const hexString = marketId.toString();
+      // Try to decode as UTF-8 string first, fallback to hex display
+      if (hexString.startsWith("0x")) {
+        const bytes = ethers.getBytes(hexString);
+        let result = ethers.toUtf8String(bytes).replace(/\0/g, ""); // Remove null bytes
+        return result.length > 0 ? result : hexString.slice(0, 10) + "...";
+      }
+      return hexString.slice(0, 15);
+    } catch (error) {
+      return marketId.toString().slice(0, 15);
+    }
   }
 
   async loadUsers() {
@@ -3131,8 +3845,8 @@ ${colors.brightRed}└───────────────────�
             try {
               const entryPriceNum = parseFloat(entryPrice);
               if (positionSize < 0n && entryPriceNum > 0) {
-                // Short: P_liq = (2.5E)/(1+m), m = maintenanceMarginBps/10000 (default 10%)
-                let mmBps = 1000;
+                // Short: P_liq = (2.5E)/(1+m), m = maintenanceMarginBps/10000 (hard-coded 10%)
+                let mmBps = 1000; // Hard-coded 10% maintenance margin
                 try {
                   if (
                     typeof this.contracts.vault.maintenanceMarginBps ===
@@ -5037,7 +5751,7 @@ ${colors.brightRed}└───────────────────�
             let liqDisplay = "N/A";
             try {
               if (positionSize < 0n) {
-                let mmBps = 1000;
+                let mmBps = 1000; // Hard-coded 10% maintenance margin
                 try {
                   if (
                     typeof this.contracts.vault.maintenanceMarginBps ===
