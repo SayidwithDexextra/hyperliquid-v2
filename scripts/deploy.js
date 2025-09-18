@@ -246,6 +246,10 @@ async function main() {
     await coreVault.grantRole(ORDERBOOK_ROLE, contracts.ALUMINUM_ORDERBOOK);
     console.log("     ✅ ORDERBOOK_ROLE granted to OrderBook");
 
+    // Grant SETTLEMENT_ROLE to the OrderBook (needed for updateMarkPrice calls)
+    await coreVault.grantRole(SETTLEMENT_ROLE, contracts.ALUMINUM_ORDERBOOK);
+    console.log("     ✅ SETTLEMENT_ROLE granted to OrderBook");
+
     // Configure margin requirements for 1:1 longs, 150% shorts (no leverage)
     console.log("  🔧 Configuring margin requirements...");
     const orderBook = await ethers.getContractAt(

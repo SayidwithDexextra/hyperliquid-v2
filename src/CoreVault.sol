@@ -277,10 +277,10 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 uint256 penalty = (marginToConfiscate * LIQUIDATION_PENALTY_BPS) / 10000;
                 uint256 totalLoss = tradingLoss + penalty;
                 
-                // Cap total loss at user's available collateral
-                if (totalLoss > userCollateral[user]) {
-                    totalLoss = userCollateral[user];
-                }
+                // Calculate uncovered loss for ADL
+                uint256 coveredByUser = totalLoss > userCollateral[user] ? userCollateral[user] : totalLoss;
+                uint256 uncoveredLoss = totalLoss - coveredByUser;
+                totalLoss = coveredByUser; // Only take what user can cover
                 
                 // Confiscate the margin and apply losses
                 if (totalLoss > 0) {
@@ -361,6 +361,11 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 // Handle realized P&L (this includes the liquidation loss)
                 if (realizedPnL != 0) {
                     userRealizedPnL[user] += realizedPnL;
+                }
+                
+                // 🔧 CRITICAL FIX: Trigger ADL for uncovered losses
+                if (uncoveredLoss > 0) {
+                    _socializeLoss(marketId, uncoveredLoss, user);
                 }
                 
                 emit LiquidationExecuted(user, marketId, liquidator, totalLoss, userCollateral[user]);
@@ -955,6 +960,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         // no long position found; ignore
     }
 
+
     // ============ Enhanced Liquidation Functions ============
     
     /**
@@ -1060,8 +1066,22 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                     closureResult.newEntryPrice
                 );
                 
-                // Update user's realized PnL to reflect the closure
-                userRealizedPnL[profitablePos.user] += int256(closureResult.realizedProfit);
+                // CRITICAL FIX: Confiscate the realized profit from the user to cover the socialized loss
+                // The profit should be taken from the user, not given back to them
+                if (closureResult.realizedProfit <= userCollateral[profitablePos.user]) {
+                    // Deduct profit from user's collateral to cover the loss
+                    userCollateral[profitablePos.user] -= closureResult.realizedProfit;
+                    emit UserLossSocialized(profitablePos.user, closureResult.realizedProfit, userCollateral[profitablePos.user]);
+                } else {
+                    // If user doesn't have enough collateral, take what they have
+                    uint256 availableCollateral = userCollateral[profitablePos.user];
+                    userCollateral[profitablePos.user] = 0;
+                    emit UserLossSocialized(profitablePos.user, availableCollateral, 0);
+                    
+                    // Update the actual loss covered to reflect what was actually taken
+                    totalLossCovered = totalLossCovered - closureResult.realizedProfit + availableCollateral;
+                    remainingLoss = remainingLoss + closureResult.realizedProfit - availableCollateral;
+                }
                 
             } else {
                 // DEBUG: Position closure failed

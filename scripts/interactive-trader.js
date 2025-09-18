@@ -635,6 +635,135 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     );
 
     try {
+      // 🔍 DEBUG: Contract validation
+      console.log(
+        colorText("🔍 Debugging contract connections...", colors.cyan)
+      );
+
+      if (this.contracts.vault) {
+        const vaultAddress = await this.contracts.vault.getAddress();
+        console.log(
+          colorText(`✅ CoreVault loaded at: ${vaultAddress}`, colors.green)
+        );
+
+        // Test basic contract functionality
+        try {
+          // Try to call a simple view function to verify the contract is working
+          const contractCode =
+            await this.contracts.vault.runner.provider.getCode(vaultAddress);
+          if (contractCode === "0x") {
+            console.log(
+              colorText(
+                "❌ Contract has no code! Address might be wrong.",
+                colors.red
+              )
+            );
+          } else {
+            console.log(
+              colorText(
+                `✅ Contract code found (${contractCode.length / 2 - 1} bytes)`,
+                colors.green
+              )
+            );
+          }
+        } catch (codeError) {
+          console.log(
+            colorText(
+              `⚠️ Could not verify contract code: ${codeError.message}`,
+              colors.yellow
+            )
+          );
+        }
+
+        // Test if we can call basic functions
+        try {
+          // Get provider properly - try multiple methods
+          let provider;
+          if (this.contracts.vault.provider) {
+            provider = this.contracts.vault.provider;
+          } else if (
+            this.contracts.vault.runner &&
+            this.contracts.vault.runner.provider
+          ) {
+            provider = this.contracts.vault.runner.provider;
+          } else {
+            // Fall back to ethers default provider
+            const { ethers } = require("hardhat");
+            provider = ethers.provider;
+          }
+
+          if (provider) {
+            const network = await provider.getNetwork();
+            console.log(
+              colorText(
+                `🌐 Connected to network: ${network.name} (${network.chainId})`,
+                colors.blue
+              )
+            );
+
+            const blockNumber = await provider.getBlockNumber();
+            console.log(
+              colorText(`📦 Current block: ${blockNumber}`, colors.blue)
+            );
+          } else {
+            console.log(
+              colorText("⚠️ No provider found on contract", colors.yellow)
+            );
+          }
+        } catch (providerError) {
+          console.log(
+            colorText(
+              `⚠️ Provider issues: ${providerError.message}`,
+              colors.yellow
+            )
+          );
+        }
+
+        // Test contract method calls
+        try {
+          console.log(
+            colorText("🧪 Testing contract method calls...", colors.blue)
+          );
+
+          // Try to get a simple address - this tests if the ABI is working
+          const mockUSDCAddress = await this.contracts.vault.mockUSDC();
+          console.log(
+            colorText(
+              `📍 MockUSDC address from contract: ${mockUSDCAddress}`,
+              colors.green
+            )
+          );
+        } catch (methodError) {
+          console.log(
+            colorText(
+              `⚠️ Contract method call failed: ${methodError.message}`,
+              colors.yellow
+            )
+          );
+          console.log(
+            colorText(
+              "   This might indicate ABI mismatch or contract issues",
+              colors.dim
+            )
+          );
+        }
+      } else {
+        console.log(
+          colorText("❌ CoreVault contract is null/undefined!", colors.red)
+        );
+        return;
+      }
+
+      if (this.contracts.orderBook) {
+        const orderBookAddress = await this.contracts.orderBook.getAddress();
+        console.log(
+          colorText(`✅ OrderBook loaded at: ${orderBookAddress}`, colors.green)
+        );
+      } else {
+        console.log(
+          colorText("❌ OrderBook contract is null/undefined!", colors.red)
+        );
+      }
       // ============ COMMENTED OUT: ALL NON-ADL EVENTS FOR ISOLATION ============
       /*
       // Listen for OrderMatched events from the matching engine
@@ -813,8 +942,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       );
 
       */
-      // COMMENTED OUT: Old liquidation debugging events
-      /*
+      // UNCOMMENTED: Old liquidation debugging events
       this.contracts.orderBook.on(
         "LiquidationTradeDetected",
         (
@@ -838,7 +966,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           this.handleMarginUpdatesStartedEvent(isLiquidationTrade, event);
         }
       );
-      */
 
       this.contracts.orderBook.on("MarginUpdatesCompleted", (event) => {
         this.handleMarginUpdatesCompletedEvent(event);
@@ -864,8 +991,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         }
       );
 
-      // COMMENTED OUT: Old liquidation debugging events continued
-      /*
+      // UNCOMMENTED: Old liquidation debugging events continued
       this.contracts.orderBook.on(
         "LiquidationCheckTriggered",
         (currentMark, lastMarkPrice, event) => {
@@ -876,7 +1002,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           );
         }
       );
-      */
 
       this.contracts.orderBook.on(
         "TradeExecutionCompleted",
@@ -891,8 +1016,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         }
       );
 
-      // COMMENTED OUT: Old liquidation debugging events continued
-      /*
+      // UNCOMMENTED: Old liquidation debugging events continued
       // Listen for _checkPositionsForLiquidation debug events
       this.contracts.orderBook.on(
         "LiquidationCheckStarted",
@@ -1048,11 +1172,9 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           );
         }
       );
-      */
-      /*
       // Listen for CoreVault margin confiscation events
-      if (this.contracts.coreVault) {
-        this.contracts.coreVault.on(
+      if (this.contracts.vault) {
+        this.contracts.vault.on(
           "MarginConfiscated",
           (user, marginAmount, totalLoss, penalty, liquidator, event) => {
             this.handleCoreVaultMarginConfiscatedEvent(
@@ -1066,18 +1188,17 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           }
         );
       }
-      */
 
-      // ============ ONLY ADL EVENT LISTENERS ACTIVE ============
+      // ============ ADL + LIQUIDATION DEBUG EVENT LISTENERS ACTIVE ============
       console.log(
         colorText(
-          "🎯 ISOLATED MODE: Only ADL events will be displayed",
+          "🎯 ENHANCED MODE: ADL + Liquidation Debug events will be displayed",
           colors.brightYellow
         )
       );
 
-      if (this.contracts.coreVault) {
-        this.contracts.coreVault.on(
+      if (this.contracts.vault) {
+        this.contracts.vault.on(
           "SocializationStarted",
           (marketId, totalLossAmount, liquidatedUser, timestamp, event) => {
             this.handleSocializationStartedEvent(
@@ -1090,7 +1211,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           }
         );
 
-        this.contracts.coreVault.on(
+        this.contracts.vault.on(
           "ProfitablePositionFound",
           (
             user,
@@ -1115,7 +1236,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           }
         );
 
-        this.contracts.coreVault.on(
+        this.contracts.vault.on(
           "AdministrativePositionClosure",
           (
             user,
@@ -1138,7 +1259,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           }
         );
 
-        this.contracts.coreVault.on(
+        this.contracts.vault.on(
           "SocializationCompleted",
           (
             marketId,
@@ -1159,7 +1280,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           }
         );
 
-        this.contracts.coreVault.on(
+        this.contracts.vault.on(
           "SocializationFailed",
           (marketId, lossAmount, reason, liquidatedUser, event) => {
             this.handleSocializationFailedEvent(
@@ -1173,7 +1294,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         );
 
         // Debug event listeners for detailed tracking
-        this.contracts.coreVault.on(
+        this.contracts.vault.on(
           "DebugProfitCalculation",
           (
             user,
@@ -1198,7 +1319,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           }
         );
 
-        this.contracts.coreVault.on(
+        this.contracts.vault.on(
           "DebugPositionReduction",
           (
             user,
@@ -1221,7 +1342,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           }
         );
 
-        this.contracts.coreVault.on(
+        this.contracts.vault.on(
           "DebugSocializationState",
           (
             marketId,
@@ -1239,17 +1360,440 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             );
           }
         );
+
+        // ADO Event: Position Updates - tracks all position changes during ADL
+        this.contracts.vault.on(
+          "PositionUpdated",
+          (
+            user,
+            marketId,
+            oldSize,
+            newSize,
+            entryPrice,
+            marginLocked,
+            event
+          ) => {
+            this.handlePositionUpdatedEvent(
+              user,
+              marketId,
+              oldSize,
+              newSize,
+              entryPrice,
+              marginLocked,
+              event
+            );
+          }
+        );
+
+        // ADO Event: Socialized Loss Applied - tracks when losses are socialized
+        this.contracts.vault.on(
+          "SocializedLossApplied",
+          (marketId, lossAmount, liquidatedUser, event) => {
+            this.handleSocializedLossAppliedEvent(
+              marketId,
+              lossAmount,
+              liquidatedUser,
+              event
+            );
+          }
+        );
+
+        // ADO Event: User Loss Socialized - tracks individual user loss socialization
+        this.contracts.vault.on(
+          "UserLossSocialized",
+          (user, lossAmount, remainingCollateral, event) => {
+            this.handleUserLossSocializedEvent(
+              user,
+              lossAmount,
+              remainingCollateral,
+              event
+            );
+          }
+        );
+
+        // ADO Event: Available Collateral Confiscated - tracks gap loss coverage
+        this.contracts.vault.on(
+          "AvailableCollateralConfiscated",
+          (user, amount, remainingAvailable, event) => {
+            this.handleAvailableCollateralConfiscatedEvent(
+              user,
+              amount,
+              remainingAvailable,
+              event
+            );
+          }
+        );
       }
 
+      // Listen for GapLoss and Liquidation Processing events from OrderBook
+      if (this.contracts.orderBook) {
+        this.contracts.orderBook.on(
+          "GapLossDetected",
+          (
+            trader,
+            marketId,
+            gapLossAmount,
+            liquidationPrice,
+            executionPrice,
+            positionSize,
+            event
+          ) => {
+            this.handleGapLossDetectedEvent(
+              trader,
+              marketId,
+              gapLossAmount,
+              liquidationPrice,
+              executionPrice,
+              positionSize,
+              event
+            );
+          }
+        );
+
+        this.contracts.orderBook.on(
+          "LiquidationPositionProcessed",
+          (trader, positionSize, executionPrice, event) => {
+            this.handleLiquidationPositionProcessedEvent(
+              trader,
+              positionSize,
+              executionPrice,
+              event
+            );
+          }
+        );
+
+        this.contracts.orderBook.on(
+          "LiquidationProcessingFailed",
+          (trader, reason, event) => {
+            this.handleLiquidationProcessingFailedEvent(trader, reason, event);
+          }
+        );
+      }
+
+      // 🔍 DEBUG: Confirm event listeners are attached
+      console.log(colorText("🔍 Verifying event listeners...", colors.cyan));
+      const vaultListenerCount = this.contracts.vault.listenerCount();
+      const orderBookListenerCount = this.contracts.orderBook
+        ? this.contracts.orderBook.listenerCount()
+        : 0;
       console.log(
-        colorText("✅ ADL-ONLY Event listeners activated!", colors.brightGreen)
+        colorText(
+          `📊 CoreVault has ${vaultListenerCount} active listeners`,
+          colors.blue
+        )
       );
+      console.log(
+        colorText(
+          `📊 OrderBook has ${orderBookListenerCount} active listeners`,
+          colors.blue
+        )
+      );
+
+      // Add a test event listener to verify connectivity
+      this.contracts.vault.once("*", (eventObject) => {
+        console.log(
+          colorText(
+            "🎉 FIRST EVENT RECEIVED! Event system is working!",
+            colors.brightGreen
+          )
+        );
+
+        // Extract event name for quick display
+        const eventName =
+          eventObject?.event || eventObject?.fragment?.name || "Unknown Event";
+        console.log(
+          colorText(
+            `Event: ${eventName} at block ${eventObject?.blockNumber}`,
+            colors.dim
+          )
+        );
+      });
+
+      console.log(
+        colorText(
+          "✅ Complete ADO + Liquidation Debug System Activated!",
+          colors.brightGreen
+        )
+      );
+      console.log(
+        colorText(
+          "   📊 ADL Events: SocializationStarted, ProfitablePositionFound, AdministrativePositionClosure",
+          colors.dim
+        )
+      );
+      console.log(
+        colorText(
+          "   📊 ADL Events: SocializationCompleted, SocializationFailed, PositionUpdated",
+          colors.dim
+        )
+      );
+      console.log(
+        colorText(
+          "   📊 ADL Events: SocializedLossApplied, UserLossSocialized, AvailableCollateralConfiscated",
+          colors.dim
+        )
+      );
+      console.log(
+        colorText(
+          "   📊 Liquidation Debug: LiquidationCheckTriggered, LiquidationCheckStarted, RecursionGuard",
+          colors.dim
+        )
+      );
+      console.log(
+        colorText(
+          "   📊 Liquidation Debug: TraderBeingChecked, LiquidatableCheck, MarketOrderAttempt/Result",
+          colors.dim
+        )
+      );
+      console.log(
+        colorText(
+          "   📊 Gap Loss & Margin: GapLossDetected, MarginConfiscated, MarginUpdatesStarted",
+          colors.dim
+        )
+      );
+      console.log(
+        colorText(
+          "   📊 Vault Processing: LiquidationPositionProcessed, LiquidationProcessingFailed",
+          colors.dim
+        )
+      );
+
+      // 🔍 DEBUG: Add connectivity test
+      console.log(
+        colorText("🔍 Testing event connectivity in 3 seconds...", colors.dim)
+      );
+      setTimeout(async () => {
+        await this.testEventConnectivity();
+      }, 3000);
     } catch (error) {
       console.log(
         colorText(
           "⚠️ Warning: Could not set up event listeners: " + error.message,
           colors.yellow
         )
+      );
+      console.log(
+        colorText(`📋 Full error details: ${error.stack}`, colors.red)
+      );
+    }
+  }
+
+  async testEventConnectivity() {
+    console.log(
+      colorText(
+        "🔍 CONNECTIVITY TEST: Checking if events are working...",
+        colors.cyan
+      )
+    );
+
+    try {
+      // Test 1: Check if we can query past events
+      console.log(colorText("📋 Test 1: Querying past events...", colors.blue));
+
+      // Get provider properly - try multiple methods
+      let provider;
+      if (this.contracts.vault.provider) {
+        provider = this.contracts.vault.provider;
+      } else if (
+        this.contracts.vault.runner &&
+        this.contracts.vault.runner.provider
+      ) {
+        provider = this.contracts.vault.runner.provider;
+      } else {
+        // Fall back to ethers default provider
+        const { ethers } = require("hardhat");
+        provider = ethers.provider;
+      }
+
+      console.log(
+        colorText(
+          `🔗 Using provider: ${provider ? "Connected" : "Not found"}`,
+          colors.blue
+        )
+      );
+
+      if (!provider) {
+        console.log(
+          colorText("❌ No provider available! Cannot test events.", colors.red)
+        );
+        return;
+      }
+
+      const currentBlock = await provider.getBlockNumber();
+      const fromBlock = Math.max(0, currentBlock - 1000); // Last 1000 blocks
+
+      console.log(
+        colorText(
+          `📦 Scanning blocks ${fromBlock} to ${currentBlock}`,
+          colors.blue
+        )
+      );
+
+      const depositFilter = this.contracts.vault.filters.CollateralDeposited();
+      const withdrawFilter = this.contracts.vault.filters.CollateralWithdrawn();
+
+      const depositEvents = await this.contracts.vault.queryFilter(
+        depositFilter,
+        fromBlock,
+        currentBlock
+      );
+      const withdrawEvents = await this.contracts.vault.queryFilter(
+        withdrawFilter,
+        fromBlock,
+        currentBlock
+      );
+
+      console.log(
+        colorText(
+          `📊 Found ${depositEvents.length} deposit events in last 1000 blocks`,
+          colors.green
+        )
+      );
+      console.log(
+        colorText(
+          `📊 Found ${withdrawEvents.length} withdraw events in last 1000 blocks`,
+          colors.green
+        )
+      );
+
+      // Test 2: Check listener count
+      console.log(
+        colorText("📋 Test 2: Checking active listeners...", colors.blue)
+      );
+      const listenerCount = this.contracts.vault.listenerCount();
+      console.log(
+        colorText(
+          `📊 Active listeners on CoreVault: ${listenerCount}`,
+          colors.green
+        )
+      );
+
+      if (listenerCount === 0) {
+        console.log(
+          colorText(
+            "❌ NO LISTENERS ATTACHED! This is the problem.",
+            colors.red
+          )
+        );
+        return;
+      }
+
+      // List all the event names we're listening for
+      const eventNames = [
+        "SocializationStarted",
+        "ProfitablePositionFound",
+        "AdministrativePositionClosure",
+        "SocializationCompleted",
+        "SocializationFailed",
+        "PositionUpdated",
+        "SocializedLossApplied",
+        "UserLossSocialized",
+        "AvailableCollateralConfiscated",
+      ];
+      console.log(
+        colorText(
+          `📋 Listening for events: ${eventNames.join(", ")}`,
+          colors.blue
+        )
+      );
+
+      // Test 3: Try to detect ANY activity
+      console.log(
+        colorText(
+          "📋 Test 3: Listening for ANY new events (30 second test)...",
+          colors.blue
+        )
+      );
+      let eventReceived = false;
+
+      const timeout = setTimeout(() => {
+        if (!eventReceived) {
+          console.log(
+            colorText(
+              "⏰ No events received in 30 seconds. This suggests:",
+              colors.yellow
+            )
+          );
+          console.log(
+            colorText("   • No trading activity happening", colors.dim)
+          );
+          console.log(
+            colorText("   • Contract addresses might be wrong", colors.dim)
+          );
+          console.log(colorText("   • Network connection issues", colors.dim));
+          console.log(
+            colorText("💡 Try making a trade to generate events!", colors.cyan)
+          );
+        }
+      }, 30000);
+
+      this.contracts.vault.once("*", (eventObject) => {
+        eventReceived = true;
+        clearTimeout(timeout);
+        console.log(
+          colorText("🎉 SUCCESS! Event system is working!", colors.brightGreen)
+        );
+
+        // Extract meaningful event information
+        try {
+          const eventInfo = {
+            event: eventObject.event || eventObject.eventName,
+            fragment: eventObject.fragment?.name,
+            blockNumber: eventObject.blockNumber,
+            transactionHash: eventObject.transactionHash,
+            address: eventObject.address,
+            args: eventObject.args ? Array.from(eventObject.args) : undefined,
+          };
+
+          console.log(colorText("📋 Event Details:", colors.cyan));
+          console.log(
+            colorText(
+              `   Event Name: ${
+                eventInfo.event || eventInfo.fragment || "Unknown"
+              }`,
+              colors.green
+            )
+          );
+          console.log(
+            colorText(`   Block: ${eventInfo.blockNumber}`, colors.blue)
+          );
+          console.log(
+            colorText(
+              `   Tx: ${eventInfo.transactionHash?.slice(0, 10)}...`,
+              colors.blue
+            )
+          );
+          console.log(
+            colorText(`   Contract: ${eventInfo.address}`, colors.dim)
+          );
+
+          if (eventInfo.args && eventInfo.args.length > 0) {
+            console.log(
+              colorText(
+                `   Args: [${eventInfo.args.length} parameters]`,
+                colors.dim
+              )
+            );
+          }
+        } catch (parseError) {
+          console.log(
+            colorText(`Event object type: ${typeof eventObject}`, colors.dim)
+          );
+          console.log(
+            colorText(
+              `Event constructor: ${eventObject?.constructor?.name}`,
+              colors.dim
+            )
+          );
+        }
+      });
+
+      console.log(
+        colorText("⏳ Waiting for events... (make a trade to test)", colors.dim)
+      );
+    } catch (error) {
+      console.log(
+        colorText(`❌ Connectivity test failed: ${error.message}`, colors.red)
       );
     }
   }
@@ -2402,6 +2946,536 @@ ${colors.brightYellow}│${colors.reset} ${colors.dim}Block: ${
 ${
   colors.brightYellow
 }└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+    process.stdout.write("\x07"); // Alert sound
+  }
+
+  handleGapLossDetectedEvent(
+    trader,
+    marketId,
+    gapLossAmount,
+    liquidationPrice,
+    executionPrice,
+    positionSize,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const traderType = this.formatUserDisplay(trader);
+    const marketName = this.getMarketDisplayName(marketId);
+    const gapLossFormatted = formatWithAutoDecimalDetection(
+      gapLossAmount,
+      6,
+      4
+    );
+    const liquidationPriceFormatted = formatWithAutoDecimalDetection(
+      liquidationPrice,
+      6,
+      2
+    );
+    const executionPriceFormatted = formatWithAutoDecimalDetection(
+      executionPrice,
+      6,
+      2
+    );
+    const positionSizeFormatted = formatWithAutoDecimalDetection(
+      Math.abs(positionSize),
+      18,
+      4
+    );
+    const positionType = positionSize >= 0 ? "LONG" : "SHORT";
+    const positionColor = positionSize >= 0 ? colors.green : colors.red;
+
+    const notification = `
+${colors.bgRed}${colors.white}${
+      colors.bright
+    }                ⚠️  GAP LOSS DETECTED                 ${colors.reset}
+${colors.brightRed}┌─────────────────────────────────────────────────────────┐${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${
+      colors.brightYellow
+    }⚠️  LIQUIDATION GAP LOSS${colors.reset} ${colors.dim}at ${timestamp}${
+      colors.reset
+    }      ${colors.brightRed}│${colors.reset}
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.brightCyan}📊 Market:${
+      colors.reset
+    } ${marketName.padEnd(15)}                       ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightMagenta}👤 Trader:${
+      colors.reset
+    } ${traderType.padEnd(15)}                       ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${positionColor}📍 Position:${
+      colors.reset
+    } ${positionType} ${positionSizeFormatted}              ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.brightYellow}💰 Gap Loss:${
+      colors.reset
+    } $${gapLossFormatted} USDC                    ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightBlue}🎯 Liquidation Price:${
+      colors.reset
+    } $${liquidationPriceFormatted}              ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightRed}💥 Execution Price:${
+      colors.reset
+    } $${executionPriceFormatted}                ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}└─────────────────────────────────────────────────────────┘${
+      colors.reset
+    }
+    `;
+
+    console.log(notification);
+    process.stdout.write("\x07"); // Alert sound
+  }
+
+  handlePositionUpdatedEvent(
+    user,
+    marketId,
+    oldSize,
+    newSize,
+    entryPrice,
+    marginLocked,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const userType = this.formatUserDisplay(user);
+    const marketName = this.getMarketDisplayName(marketId);
+    const oldSizeFormatted = formatWithAutoDecimalDetection(
+      Math.abs(oldSize),
+      18,
+      4
+    );
+    const newSizeFormatted = formatWithAutoDecimalDetection(
+      Math.abs(newSize),
+      18,
+      4
+    );
+    const entryPriceFormatted = formatWithAutoDecimalDetection(
+      entryPrice,
+      6,
+      2
+    );
+    const marginLockedFormatted = formatWithAutoDecimalDetection(
+      marginLocked,
+      6,
+      2
+    );
+
+    const oldPositionType = oldSize >= 0 ? "LONG" : "SHORT";
+    const newPositionType = newSize >= 0 ? "LONG" : "SHORT";
+    const oldPositionColor = oldSize >= 0 ? colors.green : colors.red;
+    const newPositionColor = newSize >= 0 ? colors.green : colors.red;
+
+    const isPositionClosed = newSize === 0 && oldSize !== 0;
+    const isNewPosition = oldSize === 0 && newSize !== 0;
+    const isPositionReduced = Math.abs(newSize) < Math.abs(oldSize);
+
+    console.log("🔥 ADL EVENT DETECTED: PositionUpdated");
+
+    const notification = `
+${colors.bgBlue}${colors.white}${
+      colors.bright
+    }                📊 POSITION UPDATED                 ${colors.reset}
+${
+  colors.brightBlue
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightBlue}│${colors.reset} ${
+      colors.brightCyan
+    }📊 ADL POSITION CHANGE${colors.reset} ${colors.dim}at ${timestamp}${
+      colors.reset
+    }        ${colors.brightBlue}│${colors.reset}
+${colors.brightBlue}│${
+      colors.reset
+    }                                                         ${
+      colors.brightBlue
+    }│${colors.reset}
+${colors.brightBlue}│${colors.reset} ${colors.brightCyan}📊 Market:${
+      colors.reset
+    } ${marketName.padEnd(15)}                       ${colors.brightBlue}│${
+      colors.reset
+    }
+${colors.brightBlue}│${colors.reset} ${colors.brightMagenta}👤 Trader:${
+      colors.reset
+    } ${userType.padEnd(15)}                       ${colors.brightBlue}│${
+      colors.reset
+    }
+${colors.brightBlue}│${colors.reset} ${oldPositionColor}📍 Old:${
+      colors.reset
+    } ${oldPositionType} ${oldSizeFormatted}${
+      isPositionClosed ? " (CLOSED)" : ""
+    }                    ${colors.brightBlue}│${colors.reset}
+${colors.brightBlue}│${colors.reset} ${newPositionColor}📍 New:${
+      colors.reset
+    } ${newPositionType} ${newSizeFormatted}${
+      isNewPosition ? " (NEW)" : isPositionReduced ? " (REDUCED)" : ""
+    }                     ${colors.brightBlue}│${colors.reset}
+${colors.brightBlue}│${colors.reset} ${colors.brightYellow}💰 Entry Price:${
+      colors.reset
+    } $${entryPriceFormatted}                     ${colors.brightBlue}│${
+      colors.reset
+    }
+${colors.brightBlue}│${colors.reset} ${colors.brightGreen}🔒 Margin Locked:${
+      colors.reset
+    } $${marginLockedFormatted}                 ${colors.brightBlue}│${
+      colors.reset
+    }
+${colors.brightBlue}│${
+      colors.reset
+    }                                                         ${
+      colors.brightBlue
+    }│${colors.reset}
+${colors.brightBlue}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightBlue
+    }│${colors.reset}
+${
+  colors.brightBlue
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+  }
+
+  handleSocializedLossAppliedEvent(
+    marketId,
+    lossAmount,
+    liquidatedUser,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const marketName = this.getMarketDisplayName(marketId);
+    const lossFormatted = formatWithAutoDecimalDetection(lossAmount, 6, 2);
+    const liquidatedUserType = this.formatUserDisplay(liquidatedUser);
+
+    console.log("🔥 ADL EVENT DETECTED: SocializedLossApplied");
+
+    const notification = `
+${colors.bgMagenta}${colors.white}${
+      colors.bright
+    }              🌐 SOCIALIZED LOSS APPLIED              ${colors.reset}
+${
+  colors.brightMagenta
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${
+      colors.brightYellow
+    }🌐 LOSS SOCIALIZATION${colors.reset} ${colors.dim}at ${timestamp}${
+      colors.reset
+    }         ${colors.brightMagenta}│${colors.reset}
+${colors.brightMagenta}│${
+      colors.reset
+    }                                                         ${
+      colors.brightMagenta
+    }│${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${colors.brightCyan}📊 Market:${
+      colors.reset
+    } ${marketName.padEnd(15)}                       ${colors.brightMagenta}│${
+      colors.reset
+    }
+${colors.brightMagenta}│${colors.reset} ${colors.brightRed}💸 Loss Amount:${
+      colors.reset
+    } $${lossFormatted} USDC                 ${colors.brightMagenta}│${
+      colors.reset
+    }
+${colors.brightMagenta}│${colors.reset} ${colors.brightRed}👤 Liquidated:${
+      colors.reset
+    } ${liquidatedUserType.padEnd(15)}           ${colors.brightMagenta}│${
+      colors.reset
+    }
+${colors.brightMagenta}│${
+      colors.reset
+    }                                                         ${
+      colors.brightMagenta
+    }│${colors.reset}
+${colors.brightMagenta}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightMagenta
+    }│${colors.reset}
+${
+  colors.brightMagenta
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+    process.stdout.write("\x07"); // Alert sound
+  }
+
+  handleUserLossSocializedEvent(user, lossAmount, remainingCollateral, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const userType = this.formatUserDisplay(user);
+    const lossFormatted = formatWithAutoDecimalDetection(lossAmount, 6, 2);
+    const remainingFormatted = formatWithAutoDecimalDetection(
+      remainingCollateral,
+      6,
+      2
+    );
+
+    console.log("🔥 ADL EVENT DETECTED: UserLossSocialized");
+
+    const notification = `
+${colors.bgYellow}${colors.black}${
+      colors.bright
+    }             👤 USER LOSS SOCIALIZED               ${colors.reset}
+${
+  colors.brightYellow
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightYellow}│${colors.reset} ${colors.brightRed}👤 INDIVIDUAL LOSS${
+      colors.reset
+    } ${colors.dim}at ${timestamp}${colors.reset}           ${
+      colors.brightYellow
+    }│${colors.reset}
+${colors.brightYellow}│${
+      colors.reset
+    }                                                         ${
+      colors.brightYellow
+    }│${colors.reset}
+${colors.brightYellow}│${colors.reset} ${
+      colors.brightMagenta
+    }👤 Affected User:${colors.reset} ${userType.padEnd(15)}             ${
+      colors.brightYellow
+    }│${colors.reset}
+${colors.brightYellow}│${colors.reset} ${colors.brightRed}💸 Loss Amount:${
+      colors.reset
+    } $${lossFormatted} USDC                   ${colors.brightYellow}│${
+      colors.reset
+    }
+${colors.brightYellow}│${colors.reset} ${colors.brightGreen}💰 Remaining:${
+      colors.reset
+    } $${remainingFormatted} USDC                     ${colors.brightYellow}│${
+      colors.reset
+    }
+${colors.brightYellow}│${
+      colors.reset
+    }                                                         ${
+      colors.brightYellow
+    }│${colors.reset}
+${colors.brightYellow}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightYellow
+    }│${colors.reset}
+${
+  colors.brightYellow
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+  }
+
+  handleAvailableCollateralConfiscatedEvent(
+    user,
+    amount,
+    remainingAvailable,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const userType = this.formatUserDisplay(user);
+    const amountFormatted = formatWithAutoDecimalDetection(amount, 6, 2);
+    const remainingFormatted = formatWithAutoDecimalDetection(
+      remainingAvailable,
+      6,
+      2
+    );
+
+    console.log("🔥 ADL EVENT DETECTED: AvailableCollateralConfiscated");
+
+    const notification = `
+${colors.bgRed}${colors.white}${
+      colors.bright
+    }           🏦 COLLATERAL CONFISCATED              ${colors.reset}
+${colors.brightRed}┌─────────────────────────────────────────────────────────┐${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightYellow}🏦 GAP LOSS COVERAGE${
+      colors.reset
+    } ${colors.dim}at ${timestamp}${colors.reset}          ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.brightMagenta}👤 Affected User:${
+      colors.reset
+    } ${userType.padEnd(15)}             ${colors.brightRed}│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.brightYellow}💰 Confiscated:${
+      colors.reset
+    } $${amountFormatted} USDC                  ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightGreen}💰 Remaining:${
+      colors.reset
+    } $${remainingFormatted} USDC                     ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}└─────────────────────────────────────────────────────────┘${
+      colors.reset
+    }
+    `;
+
+    console.log(notification);
+    process.stdout.write("\x07"); // Alert sound
+  }
+
+  handleLiquidationPositionProcessedEvent(
+    trader,
+    positionSize,
+    executionPrice,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const traderType = this.formatUserDisplay(trader);
+    const positionSizeFormatted = formatWithAutoDecimalDetection(
+      Math.abs(positionSize),
+      18,
+      4
+    );
+    const executionPriceFormatted = formatWithAutoDecimalDetection(
+      executionPrice,
+      6,
+      2
+    );
+    const positionType = positionSize >= 0 ? "LONG" : "SHORT";
+    const positionColor = positionSize >= 0 ? colors.green : colors.red;
+
+    const notification = `
+${colors.bgGreen}${colors.black}${
+      colors.bright
+    }              ✅ LIQUIDATION PROCESSED              ${colors.reset}
+${
+  colors.brightGreen
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightGreen}│${colors.reset} ${
+      colors.brightYellow
+    }✅ VAULT LIQUIDATION${colors.reset} ${colors.dim}at ${timestamp}${
+      colors.reset
+    }         ${colors.brightGreen}│${colors.reset}
+${colors.brightGreen}│${
+      colors.reset
+    }                                                         ${
+      colors.brightGreen
+    }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.brightMagenta}👤 Trader:${
+      colors.reset
+    } ${traderType.padEnd(15)}                       ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${colors.reset} ${positionColor}📍 Position:${
+      colors.reset
+    } ${positionType} ${positionSizeFormatted}              ${
+      colors.brightGreen
+    }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.brightBlue}💰 Execution:${
+      colors.reset
+    } $${executionPriceFormatted}                   ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${colors.reset} ${colors.brightCyan}🎯 Status:${
+      colors.reset
+    } Liquidation & ADL Check Complete     ${colors.brightGreen}│${colors.reset}
+${colors.brightGreen}│${
+      colors.reset
+    }                                                         ${
+      colors.brightGreen
+    }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightGreen
+    }│${colors.reset}
+${
+  colors.brightGreen
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+  }
+
+  handleLiquidationProcessingFailedEvent(trader, reason, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const traderType = this.formatUserDisplay(trader);
+    const reasonString = typeof reason === "string" ? reason : "Unknown error";
+
+    const notification = `
+${colors.bgRed}${colors.white}${
+      colors.bright
+    }           ❌ LIQUIDATION PROCESSING FAILED           ${colors.reset}
+${colors.brightRed}┌─────────────────────────────────────────────────────────┐${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${
+      colors.brightYellow
+    }❌ VAULT PROCESSING ERROR${colors.reset} ${colors.dim}at ${timestamp}${
+      colors.reset
+    }   ${colors.brightRed}│${colors.reset}
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.brightMagenta}👤 Trader:${
+      colors.reset
+    } ${traderType.padEnd(15)}                       ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightYellow}⚠️  Reason:${
+      colors.reset
+    } ${reasonString.slice(0, 25).padEnd(25)}        ${colors.brightRed}│${
+      colors.reset
+    }
+${colors.brightRed}│${colors.reset} ${colors.brightCyan}🔄 Fallback:${
+      colors.reset
+    } Gap loss processing continues      ${colors.brightRed}│${colors.reset}
+${colors.brightRed}│${
+      colors.reset
+    }                                                         ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
+      event.blockNumber
+    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+      colors.brightRed
+    }│${colors.reset}
+${colors.brightRed}└─────────────────────────────────────────────────────────┘${
+      colors.reset
+    }
     `;
 
     console.log(notification);
@@ -7321,8 +8395,8 @@ ${colors.brightRed}└───────────────────�
         );
 
         // Clean up CoreVault event listeners
-        if (this.contracts.coreVault) {
-          this.contracts.coreVault.removeAllListeners("MarginConfiscated");
+        if (this.contracts.vault) {
+          this.contracts.vault.removeAllListeners("MarginConfiscated");
         }
 
         console.log(colorText("✅ Event listeners cleaned up", colors.dim));

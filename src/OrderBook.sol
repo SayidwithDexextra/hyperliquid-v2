@@ -35,6 +35,9 @@ interface ICoreVault {
     // Enhanced liquidation functions
     function confiscateAvailableCollateralForGapLoss(address user, uint256 gapLossAmount) external;
     function socializeLoss(bytes32 marketId, uint256 lossAmount, address liquidatedUser) external;
+    
+    // Mark price management
+    function updateMarkPrice(bytes32 marketId, uint256 price) external;
 }
 
 /**
@@ -349,10 +352,11 @@ contract OrderBook {
                     liquidationCompleted = true;
                 }
                 
-                // If market order failed, use socialized loss as backup
+                // If market order failed, use vault liquidation as backup
                 if (!marketOrderSuccess) {
-                    // DEBUG: PAST - Market order failed, attempting socialized loss liquidation
+                    // DEBUG: PAST - Market order failed, attempting direct vault liquidation
                     // This section handles liquidation when no market liquidity is available
+                    // The vault liquidation methods will automatically trigger ADL if needed
                     
                     if (size > 0) {
                         // Try long liquidation
@@ -383,7 +387,7 @@ contract OrderBook {
                     }
                 } else {
                     liquidationCompleted = true;
-                    // DEBUG: PAST - Market order liquidation successful, no socialized loss needed
+                    // DEBUG: PAST - Market order liquidation successful, vault liquidation processing includes ADL check
                 }
                 
                 if (liquidationCompleted) {
@@ -454,7 +458,7 @@ contract OrderBook {
         }
         
         // Check if there's any liquidity available
-        if (isBuy && bestAsk == 0) {
+        if (isBuy && bestAsk == type(uint256).max) {
             return result; // No asks available for buy order
         }
         if (!isBuy && bestBid == 0) {
@@ -575,6 +579,16 @@ contract OrderBook {
                     positionSize,
                     gapLoss
                 );
+                
+                // Emit focused gap loss event for easy monitoring
+                emit GapLossDetected(
+                    trader,
+                    marketId,
+                    gapLoss,
+                    liquidationTriggerPrice,
+                    executionResult.worstExecutionPrice,
+                    positionSize
+                );
             }
         }
         
@@ -589,11 +603,59 @@ contract OrderBook {
             uint256 totalMarginCommitted,
             bool isMarginHealthy
         ) {
-            // Layer 1: Normal liquidation processing (handled by vault's updatePositionWithLiquidation)
-            // This is already done by the standard liquidation mechanism
-            layer1LockedMargin = marginUsed; // This gets confiscated normally
+            // ============ CRITICAL FIX: ENSURE VAULT LIQUIDATION PROCESSING ============
+            // Layer 1: Process the actual liquidation through the vault first
+            // This ensures the position is properly closed and ADL is triggered if needed
             
-            // Layer 2: Use available collateral to cover gap loss
+            // STEP 1: Process the liquidation through vault's liquidation mechanism
+            // This will handle position closure, margin confiscation, and trigger ADL if user's collateral is insufficient
+            bool vaultLiquidationSuccess = false;
+            
+            if (positionSize > 0) {
+                // Long position liquidation
+                // 🔧 CRITICAL FIX: Ensure mark price is synchronized before ADL
+                uint256 currentMarkPrice = _calculateMarkPrice();
+                vault.updateMarkPrice(marketId, currentMarkPrice);
+                
+                try vault.liquidateLong(trader, marketId, address(this)) {
+                    vaultLiquidationSuccess = true;
+                    emit LiquidationPositionProcessed(trader, positionSize, executionResult.averageExecutionPrice);
+                } catch (bytes memory reason) {
+                    emit LiquidationProcessingFailed(trader, reason);
+                }
+            } else {
+                // Short position liquidation  
+                // 🔧 CRITICAL FIX: Ensure mark price is synchronized before ADL
+                uint256 currentMarkPrice = _calculateMarkPrice();
+                vault.updateMarkPrice(marketId, currentMarkPrice);
+                
+                // 🔍 DEBUG: About to call vault.liquidateShort
+                emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort");
+                try vault.liquidateShort(trader, marketId, address(this)) {
+                    vaultLiquidationSuccess = true;
+                    emit LiquidationPositionProcessed(trader, positionSize, executionResult.averageExecutionPrice);
+                    emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort_SUCCESS");
+                } catch (bytes memory reason) {
+                    emit LiquidationProcessingFailed(trader, reason);
+                    emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort_FAILED");
+                }
+            }
+            
+            // Get updated margin info after vault processing
+            if (vaultLiquidationSuccess) {
+                try vault.getPositionSummary(trader, marketId) returns (int256 newSize, uint256 newEntryPrice, uint256 newMarginLocked) {
+                    layer1LockedMargin = newMarginLocked; // This reflects what was actually confiscated
+                } catch {
+                    layer1LockedMargin = marginUsed; // Fallback to original estimate
+                }
+            } else {
+                // Vault liquidation failed - proceed with gap loss processing as fallback
+                layer1LockedMargin = marginUsed;
+            }
+            
+            // Layer 2: Use available collateral to cover any additional gap loss
+            // Note: The vault's liquidation processing above may have already triggered ADL
+            // if the user's total collateral was insufficient for the base liquidation loss
             if (gapLoss > 0 && availableMargin > 0) {
                 uint256 availableForGapCoverage = availableMargin;
                 uint256 gapCoveredByAvailable = gapLoss < availableForGapCoverage ? gapLoss : availableForGapCoverage;
@@ -944,6 +1006,54 @@ contract OrderBook {
         uint256 totalLoss
     );
 
+    /**
+     * @dev Emitted when gap loss is detected during liquidation - focused event for monitoring
+     * @param trader Address of the trader being liquidated
+     * @param marketId The market where gap loss occurred
+     * @param gapLossAmount The amount of gap loss detected (in collateral terms)
+     * @param liquidationPrice The intended liquidation price
+     * @param executionPrice The actual execution price that caused the gap
+     * @param positionSize The position size involved in the gap loss
+     */
+    event GapLossDetected(
+        address indexed trader,
+        bytes32 indexed marketId,
+        uint256 gapLossAmount,
+        uint256 liquidationPrice,
+        uint256 executionPrice,
+        int256 positionSize
+    );
+
+    /**
+     * @dev Emitted when liquidation position is successfully processed through the vault
+     * @param trader Address of the trader being liquidated
+     * @param positionSize The size of the position that was liquidated
+     * @param executionPrice The average execution price of the liquidation
+     */
+    event LiquidationPositionProcessed(
+        address indexed trader,
+        int256 positionSize,
+        uint256 executionPrice
+    );
+
+    /**
+     * @dev Emitted when liquidation position processing fails
+     * @param trader Address of the trader being liquidated
+     * @param reason The failure reason from the vault
+     */
+    event LiquidationProcessingFailed(
+        address indexed trader,
+        bytes reason
+    );
+    
+    // Debug event for liquidation flow tracing
+    event DebugLiquidationCall(
+        address indexed trader,
+        bytes32 indexed marketId, 
+        int256 positionSize,
+        string stage
+    );
+
     // Modifiers
     modifier validOrder(uint256 price, uint256 amount) {
         require(price > 0, "Price must be greater than 0");
@@ -1193,7 +1303,11 @@ contract OrderBook {
 
         // Get reference price for slippage calculation
         uint256 referencePrice = isBuy ? bestAsk : bestBid;
-        require(referencePrice > 0, "OrderBook: no liquidity available");
+        if (isBuy) {
+            require(referencePrice != 0 && referencePrice < type(uint256).max, "OrderBook: no liquidity available");
+        } else {
+            require(referencePrice > 0, "OrderBook: no liquidity available");
+        }
         
         // For margin market orders, check available collateral upfront
         if (isMarginOrder) {
@@ -1380,9 +1494,20 @@ contract OrderBook {
                     }
                 }
                 
-                remainingAmount -= matchAmount;
-                sellOrder.amount -= matchAmount;
-                level.totalAmount -= matchAmount;
+                // Safe decrements to prevent underflow when simultaneous reservations/updates occur
+                unchecked {
+                    remainingAmount -= matchAmount;
+                }
+                if (sellOrder.amount > matchAmount) {
+                    sellOrder.amount -= matchAmount;
+                } else {
+                    sellOrder.amount = 0;
+                }
+                if (level.totalAmount > matchAmount) {
+                    level.totalAmount -= matchAmount;
+                } else {
+                    level.totalAmount = 0;
+                }
                 
                 // Track filled amount for this order
                 filledAmounts[currentOrderId] += matchAmount;
@@ -1407,7 +1532,8 @@ contract OrderBook {
             
             // Update bestAsk if this level is now empty
             if (!sellLevels[currentPrice].exists && currentPrice == bestAsk) {
-                bestAsk = _getNextSellPrice(currentPrice);
+                uint256 next = _getNextSellPrice(currentPrice);
+                bestAsk = next == 0 ? type(uint256).max : next;
             }
             
             currentPrice = _getNextSellPrice(currentPrice);
@@ -1501,9 +1627,19 @@ contract OrderBook {
                     }
                 }
                 
-                remainingAmount -= matchAmount;
-                buyOrder.amount -= matchAmount;
-                level.totalAmount -= matchAmount;
+                unchecked {
+                    remainingAmount -= matchAmount;
+                }
+                if (buyOrder.amount > matchAmount) {
+                    buyOrder.amount -= matchAmount;
+                } else {
+                    buyOrder.amount = 0;
+                }
+                if (level.totalAmount > matchAmount) {
+                    level.totalAmount -= matchAmount;
+                } else {
+                    level.totalAmount = 0;
+                }
                 
                 // Track filled amount for this order
                 filledAmounts[currentOrderId] += matchAmount;
@@ -1595,9 +1731,19 @@ contract OrderBook {
                 _executeTrade(buyOrder.trader, sellOrder.trader, currentPrice, matchAmount, buyOrder.isMarginOrder, sellOrder.isMarginOrder);
                 emit OrderMatched(buyOrder.trader, sellOrder.trader, currentPrice, matchAmount);
                 
-                remainingAmount -= matchAmount;
-                sellOrder.amount -= matchAmount;
-                level.totalAmount -= matchAmount;
+                unchecked {
+                    remainingAmount -= matchAmount;
+                }
+                if (sellOrder.amount > matchAmount) {
+                    sellOrder.amount -= matchAmount;
+                } else {
+                    sellOrder.amount = 0;
+                }
+                if (level.totalAmount > matchAmount) {
+                    level.totalAmount -= matchAmount;
+                } else {
+                    level.totalAmount = 0;
+                }
                 
                 // Track filled amount for this order
                 filledAmounts[currentOrderId] += matchAmount;
@@ -1622,7 +1768,8 @@ contract OrderBook {
             
             // Update bestAsk if this level is now empty
             if (!sellLevels[currentPrice].exists && currentPrice == bestAsk) {
-                bestAsk = _getNextSellPrice(currentPrice);
+                uint256 next = _getNextSellPrice(currentPrice);
+                bestAsk = next == 0 ? type(uint256).max : next;
             }
             
             currentPrice = _getNextSellPrice(currentPrice);
@@ -1664,9 +1811,19 @@ contract OrderBook {
                 _executeTrade(buyOrder.trader, sellOrder.trader, currentPrice, matchAmount, buyOrder.isMarginOrder, sellOrder.isMarginOrder);
                 emit OrderMatched(buyOrder.trader, sellOrder.trader, currentPrice, matchAmount);
                 
-                remainingAmount -= matchAmount;
-                buyOrder.amount -= matchAmount;
-                level.totalAmount -= matchAmount;
+                unchecked {
+                    remainingAmount -= matchAmount;
+                }
+                if (buyOrder.amount > matchAmount) {
+                    buyOrder.amount -= matchAmount;
+                } else {
+                    buyOrder.amount = 0;
+                }
+                if (level.totalAmount > matchAmount) {
+                    level.totalAmount -= matchAmount;
+                } else {
+                    level.totalAmount = 0;
+                }
                 
                 // Track filled amount for this order
                 filledAmounts[currentOrderId] += matchAmount;
@@ -1780,7 +1937,8 @@ contract OrderBook {
         
         // Update best ask if necessary
         if (price == bestAsk && !sellLevels[price].exists) {
-            bestAsk = _findNewBestAsk();
+            uint256 next = _findNewBestAsk();
+            bestAsk = next == 0 ? type(uint256).max : next;
         }
     }
 
@@ -1791,7 +1949,11 @@ contract OrderBook {
         PriceLevel storage level = isBuy ? buyLevels[price] : sellLevels[price];
         Order storage order = orders[orderId];
         
-        level.totalAmount -= order.amount;
+        if (level.totalAmount > order.amount) {
+            level.totalAmount -= order.amount;
+        } else {
+            level.totalAmount = 0;
+        }
         
         if (level.firstOrderId == orderId) {
             level.firstOrderId = order.nextOrderId;
@@ -2208,7 +2370,11 @@ contract OrderBook {
         lastTradePrice = price;
         uint256 currentMark = _calculateMarkPrice();
         
-        // DEBUG: Price updated
+        // 🔧 CRITICAL FIX: Synchronize mark price with CoreVault for ADL system
+        // The CoreVault's ADL system depends on accurate mark prices to find profitable positions
+        vault.updateMarkPrice(marketId, currentMark);
+        
+        // DEBUG: Price updated and synchronized with vault
         emit PriceUpdated(lastTradePrice, currentMark);
         
         // CRITICAL FIX: Only check liquidations if not already in liquidation process
