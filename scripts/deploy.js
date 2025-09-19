@@ -26,7 +26,7 @@ const path = require("path");
 // Configuration
 const USDC_PER_USER = "10000"; // 10,000 USDC per user
 const COLLATERAL_PER_USER = "1000"; // 1,000 USDC collateral per user (default)
-const USER3_COLLATERAL = "20"; // 15 USDC collateral for User 3
+const USER3_COLLATERAL = "1000"; // 15 USDC collateral for User 3
 const NUM_USERS = 4; // Setup 4 trading accounts
 
 async function main() {
@@ -37,8 +37,34 @@ async function main() {
   );
   console.log("✅ All contracts under 24,576 byte limit!");
 
-  const [deployer] = await ethers.getSigners();
+  // Get network info
+  const network = await ethers.provider.getNetwork();
+  const networkName = process.env.HARDHAT_NETWORK || "unknown";
+  console.log(`🌐 Network: ${networkName} (Chain ID: ${network.chainId})`);
+
+  // Get all signers and validate we have enough
+  const signers = await ethers.getSigners();
+  if (signers.length < NUM_USERS) {
+    throw new Error(
+      `❌ Need at least ${NUM_USERS} signers, but only ${signers.length} available. Check your .env file has all 4 private keys.`
+    );
+  }
+
+  const [deployer] = signers;
   console.log("📋 Deployer:", deployer.address);
+  console.log(`👥 Available signers: ${signers.length}/${NUM_USERS} users`);
+
+  // Check deployer balance for gas
+  const deployerBalance = await ethers.provider.getBalance(deployer.address);
+  console.log(
+    `💰 Deployer balance: ${ethers.formatEther(deployerBalance)} ETH`
+  );
+
+  if (deployerBalance === 0n) {
+    console.log(
+      "⚠️  WARNING: Deployer has 0 balance. Make sure you have native tokens for gas!"
+    );
+  }
 
   const contracts = {};
 
@@ -52,7 +78,9 @@ async function main() {
     // Deploy MockUSDC
     console.log("  1️⃣ Deploying MockUSDC...");
     const MockUSDC = await ethers.getContractFactory("MockUSDC");
+    console.log("     ⏳ Deploying contract...");
     const mockUSDC = await MockUSDC.deploy(deployer.address);
+    console.log("     ⏳ Waiting for deployment confirmation...");
     await mockUSDC.waitForDeployment();
     contracts.MOCK_USDC = await mockUSDC.getAddress();
     console.log("     ✅ MockUSDC deployed at:", contracts.MOCK_USDC);
@@ -435,10 +463,16 @@ async function main() {
 
     // Save deployment info
     const deploymentInfo = {
-      network: "localhost",
+      network: networkName,
+      chainId: Number(network.chainId),
       timestamp: new Date().toISOString(),
       contracts: contracts,
       deployer: deployer.address,
+      allUsers: signers.slice(0, NUM_USERS).map((signer, index) => ({
+        index,
+        address: signer.address,
+        role: index === 0 ? "deployer" : `user${index}`,
+      })),
       aluminumMarket: {
         marketId: actualMarketId,
         symbol: marketSymbol,
@@ -448,7 +482,7 @@ async function main() {
 
     const deploymentPath = path.join(
       __dirname,
-      "../deployments/localhost-deployment.json"
+      `../deployments/${networkName}-deployment.json`
     );
     fs.writeFileSync(deploymentPath, JSON.stringify(deploymentInfo, null, 2));
     console.log("  ✅ Saved deployment info");
@@ -499,7 +533,12 @@ async function main() {
     console.log("  • User3 now has active short position: -10 ALU @ $1.00");
     console.log("  • User2 limit buy order: 20 ALU @ $2.50 (active bid)");
     console.log("  • Order book now has liquidity at $2.50 level");
-    console.log("  • Run: node trade.js");
+    console.log(
+      `  • Run: npx hardhat run scripts/interactive-trader.js --network ${networkName}`
+    );
+    console.log(
+      `  • Deployment saved: deployments/${networkName}-deployment.json`
+    );
     console.log("═".repeat(80));
   } catch (error) {
     console.error("\n❌ DEPLOYMENT FAILED:", error.message);

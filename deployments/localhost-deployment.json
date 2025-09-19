@@ -1,19 +1,42 @@
 {
   "network": "localhost",
-  "timestamp": "2025-09-18T21:46:45.234Z",
+  "chainId": 31337,
+  "timestamp": "2025-09-19T18:16:50.856Z",
   "contracts": {
-    "MOCK_USDC": "0x10d16E2A026C4b5264A2aAC51cA65749cDf2037E",
-    "VAULT_ANALYTICS": "0xAf7868a9BB72E16B930D50636519038d7F057470",
-    "POSITION_MANAGER": "0x4B7099FD879435a087C364aD2f9E7B3f94d20bBe",
-    "CORE_VAULT": "0x99aA73dA6309b8eC484eF2C95e96C131C1BBF7a0",
-    "FUTURES_MARKET_FACTORY": "0x98721EFD3D09A7Ae662C4D63156286DF673FC50B",
-    "TRADING_ROUTER": "0xFBc00Fa47a7d3bbE3e82B5Aa560B47008c1bD64c",
-    "ALUMINUM_ORDERBOOK": "0x6540b8f49168c6896d85f05b5ca8AdAaaEB65be0"
+    "MOCK_USDC": "0x7Ab5ae9512284fcdE1eB550BE8f9854B4E425702",
+    "VAULT_ANALYTICS": "0x34688c002Af519fbEf122b43B6099802A12AbE82",
+    "POSITION_MANAGER": "0x58B3E7BA79FeFf7Fa7dd9d15f861FF19eDa98D8C",
+    "CORE_VAULT": "0x086ce0Da44C88Dac96cF0Dc4c5b2237eACca2E71",
+    "FUTURES_MARKET_FACTORY": "0x998D98e9480A8f52A5252Faf316d129765773294",
+    "TRADING_ROUTER": "0xa00F03Ea2d0a6e4961CaAFcA61A78334049c1848",
+    "ALUMINUM_ORDERBOOK": "0xbd778d25F1aB2c8200f91FDFa294E2869F1a3634"
   },
   "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "allUsers": [
+    {
+      "index": 0,
+      "address": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "role": "deployer"
+    },
+    {
+      "index": 1,
+      "address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      "role": "user1"
+    },
+    {
+      "index": 2,
+      "address": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+      "role": "user2"
+    },
+    {
+      "index": 3,
+      "address": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+      "role": "user3"
+    }
+  ],
   "aluminumMarket": {
-    "marketId": "0xbd8c29d7bd24f0c239179254ddd08eadc25df346f4f9a995da3206e261850b17",
+    "marketId": "0xaa8e02a563269142b129f5c130f7226189c0de00a65efd73ea864907b24290ab",
     "symbol": "ALU-USD",
-    "orderBook": "0x6540b8f49168c6896d85f05b5ca8AdAaaEB65be0"
+    "orderBook": "0xbd778d25F1aB2c8200f91FDFa294E2869F1a3634"
   }
 }

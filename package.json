@@ -7,10 +7,15 @@
     "compile": "hardhat compile",
     "test": "hardhat test",
     "deploy": "hardhat run scripts/deploy.js",
-    "deploy:testnet": "hardhat run scripts/deploy.js --network testnet",
-    "deploy:mainnet": "hardhat run scripts/deploy.js --network mainnet",
+    "deploy:localhost": "hardhat run scripts/deploy.js --network localhost",
+    "deploy:hyperliquid": "hardhat run scripts/deploy.js --network hyperliquid",
+    "deploy:hyperliquid-testnet": "hardhat run scripts/deploy.js --network hyperliquid_testnet",
+    "deploy:polygon": "hardhat run scripts/deploy.js --network polygon",
     "trade": "hardhat run scripts/interactive-trader.js --network localhost",
-    "viewer": "hardhat run scripts/live-orderbook-viewer.js --network localhost"
+    "trade:hyperliquid": "hardhat run scripts/interactive-trader.js --network hyperliquid",
+    "viewer": "hardhat run scripts/live-orderbook-viewer.js --network localhost",
+    "accounts": "hardhat accounts",
+    "accounts:hyperliquid": "hardhat accounts --network hyperliquid"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^4.0.0",
