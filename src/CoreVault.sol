@@ -1315,11 +1315,17 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 }
                 
                 // Calculate reduction ratio to achieve target profit
-                uint256 totalProfitAvailable = uint256(totalUnrealizedPnL);
-                uint256 actualTargetProfit = targetProfit > totalProfitAvailable ? totalProfitAvailable : targetProfit;
+                uint256 totalProfitAvailable = uint256(totalUnrealizedPnL); // 6 decimals (USDC P&L)
                 
-                // Calculate position reduction amount
-                uint256 reductionRatio = (actualTargetProfit * 1e18) / totalProfitAvailable; // 18 decimal precision
+                // CRITICAL PRECISION FIX: Scale targetProfit from 6 decimals (USDC) to 18 decimals (ALU)
+                // Both targetProfit and totalProfitAvailable are in USDC (6 decimals)
+                // But we need 18-decimal precision for position size calculations
+                uint256 targetProfitScaled = targetProfit * 1e12; // Scale 6 decimals -> 18 decimals  
+                uint256 totalProfitScaled = totalProfitAvailable * 1e12; // Scale 6 decimals -> 18 decimals
+                uint256 actualTargetProfit = targetProfitScaled > totalProfitScaled ? totalProfitScaled : targetProfitScaled;
+                
+                // Calculate position reduction amount (now in proper 18-decimal precision)
+                uint256 reductionRatio = (actualTargetProfit * 1e18) / totalProfitScaled; // 18 decimal precision
                 uint256 sizeReduction = (absCurrentSize * reductionRatio) / 1e18;
                 
                 if (sizeReduction == 0) {

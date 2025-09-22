@@ -2896,6 +2896,53 @@ ${colors.brightRed}└───────────────────�
     const liquidatedUserType = this.formatUserDisplay(liquidatedUser);
     const marketName = this.getMarketDisplayName(marketId);
 
+    // Enhanced parameter display
+    console.log(
+      `\n${colors.brightYellow}📋 COMPLETE EVENT PARAMETERS:${colors.reset}`
+    );
+    console.log(`${colors.cyan}   📊 Market ID:${colors.reset} ${marketId}`);
+    console.log(
+      `${colors.cyan}   📊 Market Name:${colors.reset} ${marketName}`
+    );
+    console.log(
+      `${colors.red}   💸 Total Loss Amount:${
+        colors.reset
+      } ${totalLossAmount.toString()} (raw) = $${lossFormatted} USDC`
+    );
+    console.log(
+      `${colors.red}   👤 Liquidated User:${colors.reset} ${liquidatedUser}`
+    );
+    console.log(
+      `${colors.red}   👤 User Type:${colors.reset} ${liquidatedUserType}`
+    );
+    console.log(
+      `${colors.dim}   ⏰ Event Timestamp:${colors.reset} ${timestamp} (blockchain) | ${eventTimestamp} (local)`
+    );
+    console.log(
+      `${colors.dim}   🧱 Block Number:${colors.reset} ${event.blockNumber}`
+    );
+    console.log(
+      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${event.transactionHash}`
+    );
+    console.log(
+      `${colors.dim}   📄 Log Index:${colors.reset} ${event.logIndex}`
+    );
+    console.log(
+      `${colors.dim}   📄 Transaction Index:${colors.reset} ${event.transactionIndex}`
+    );
+    if (event.gasUsed)
+      console.log(
+        `${colors.dim}   ⛽ Gas Used:${
+          colors.reset
+        } ${event.gasUsed.toString()}`
+      );
+    if (event.effectiveGasPrice)
+      console.log(
+        `${colors.dim}   ⛽ Gas Price:${
+          colors.reset
+        } ${event.effectiveGasPrice.toString()}`
+      );
+
     const notification = `
 ${colors.bgYellow}${colors.black}${
       colors.bright
@@ -3094,8 +3141,106 @@ ${colors.brightRed}└───────────────────�
     const isPositionClosed = newSize === 0 && oldSize !== 0;
     const isNewPosition = oldSize === 0 && newSize !== 0;
     const isPositionReduced = Math.abs(newSize) < Math.abs(oldSize);
+    const sizeChange = newSize - oldSize;
+    const sizeChangeFormatted = formatWithAutoDecimalDetection(
+      Math.abs(sizeChange),
+      18,
+      4
+    );
 
-    console.log("🔥 ADL EVENT DETECTED: PositionUpdated");
+    console.log("🔥 POSITION EVENT DETECTED: PositionUpdated");
+
+    // Enhanced parameter display - POSITION UPDATE DETAILS
+    console.log(
+      `\n${colors.brightBlue}📋 COMPLETE EVENT PARAMETERS - POSITION UPDATED:${colors.reset}`
+    );
+    console.log(`${colors.cyan}   👤 User:${colors.reset} ${user}`);
+    console.log(`${colors.cyan}   👤 User Type:${colors.reset} ${userType}`);
+    console.log(`${colors.cyan}   📊 Market ID:${colors.reset} ${marketId}`);
+    console.log(
+      `${colors.cyan}   📊 Market Name:${colors.reset} ${marketName}`
+    );
+    console.log(
+      `${oldPositionColor}   📊 Old Position Size:${
+        colors.reset
+      } ${oldSize.toString()} (raw) = ${oldPositionType} ${oldSizeFormatted} ALU`
+    );
+    console.log(
+      `${newPositionColor}   📊 New Position Size:${
+        colors.reset
+      } ${newSize.toString()} (raw) = ${newPositionType} ${newSizeFormatted} ALU`
+    );
+    console.log(
+      `${colors.brightYellow}   📈 Size Change:${
+        colors.reset
+      } ${sizeChange.toString()} (raw) = ${
+        sizeChange >= 0 ? "+" : "-"
+      }${sizeChangeFormatted} ALU`
+    );
+    console.log(
+      `${colors.yellow}   💰 Entry Price:${
+        colors.reset
+      } ${entryPrice.toString()} (raw) = $${entryPriceFormatted}`
+    );
+    console.log(
+      `${colors.brightGreen}   🔒 Margin Locked:${
+        colors.reset
+      } ${marginLocked.toString()} (raw) = $${marginLockedFormatted} USDC`
+    );
+    console.log(
+      `${colors.magenta}   📊 Position Status:${colors.reset} ${
+        isPositionClosed
+          ? "CLOSED"
+          : isNewPosition
+          ? "NEW"
+          : isPositionReduced
+          ? "REDUCED"
+          : "INCREASED"
+      }`
+    );
+    console.log(
+      `${colors.brightCyan}   📊 Size Change %:${colors.reset} ${
+        oldSize !== 0
+          ? ((Math.abs(sizeChange) / Math.abs(oldSize)) * 100).toFixed(2)
+          : "N/A"
+      }%`
+    );
+    console.log(
+      `${colors.dim}   ⏰ Local Timestamp:${colors.reset} ${timestamp}`
+    );
+    console.log(
+      `${colors.dim}   🧱 Block Number:${colors.reset} ${event.blockNumber}`
+    );
+    console.log(
+      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${event.transactionHash}`
+    );
+    console.log(
+      `${colors.dim}   📄 Log Index:${colors.reset} ${event.logIndex}`
+    );
+    console.log(
+      `${colors.dim}   📄 Transaction Index:${colors.reset} ${event.transactionIndex}`
+    );
+    console.log(
+      `${colors.dim}   📋 Event Name:${colors.reset} ${
+        event.eventName || "PositionUpdated"
+      }`
+    );
+    if (event.gasUsed)
+      console.log(
+        `${colors.dim}   ⛽ Gas Used:${
+          colors.reset
+        } ${event.gasUsed.toString()}`
+      );
+    if (event.effectiveGasPrice)
+      console.log(
+        `${colors.dim}   ⛽ Gas Price:${
+          colors.reset
+        } ${event.effectiveGasPrice.toString()}`
+      );
+    if (event.address)
+      console.log(
+        `${colors.dim}   📍 Contract Address:${colors.reset} ${event.address}`
+      );
 
     const notification = `
 ${colors.bgBlue}${colors.white}${
@@ -3175,6 +3320,58 @@ ${
 
     console.log("🔥 ADL EVENT DETECTED: SocializedLossApplied");
 
+    // Enhanced parameter display
+    console.log(
+      `\n${colors.brightMagenta}📋 COMPLETE EVENT PARAMETERS:${colors.reset}`
+    );
+    console.log(`${colors.cyan}   📊 Market ID:${colors.reset} ${marketId}`);
+    console.log(
+      `${colors.cyan}   📊 Market Name:${colors.reset} ${marketName}`
+    );
+    console.log(
+      `${colors.red}   💸 Loss Amount:${
+        colors.reset
+      } ${lossAmount.toString()} (raw) = $${lossFormatted} USDC`
+    );
+    console.log(
+      `${colors.red}   👤 Liquidated User:${colors.reset} ${liquidatedUser}`
+    );
+    console.log(
+      `${colors.red}   👤 User Type:${colors.reset} ${liquidatedUserType}`
+    );
+    console.log(
+      `${colors.dim}   ⏰ Local Timestamp:${colors.reset} ${timestamp}`
+    );
+    console.log(
+      `${colors.dim}   🧱 Block Number:${colors.reset} ${event.blockNumber}`
+    );
+    console.log(
+      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${event.transactionHash}`
+    );
+    console.log(
+      `${colors.dim}   📄 Log Index:${colors.reset} ${event.logIndex}`
+    );
+    console.log(
+      `${colors.dim}   📄 Transaction Index:${colors.reset} ${event.transactionIndex}`
+    );
+    console.log(
+      `${colors.dim}   📋 Event Name:${colors.reset} ${
+        event.eventName || "SocializedLossApplied"
+      }`
+    );
+    if (event.gasUsed)
+      console.log(
+        `${colors.dim}   ⛽ Gas Used:${
+          colors.reset
+        } ${event.gasUsed.toString()}`
+      );
+    if (event.effectiveGasPrice)
+      console.log(
+        `${colors.dim}   ⛽ Gas Price:${
+          colors.reset
+        } ${event.effectiveGasPrice.toString()}`
+      );
+
     const notification = `
 ${colors.bgMagenta}${colors.white}${
       colors.bright
@@ -3237,6 +3434,66 @@ ${
     );
 
     console.log("🔥 ADL EVENT DETECTED: UserLossSocialized");
+
+    // Enhanced parameter display
+    console.log(
+      `\n${colors.brightYellow}📋 COMPLETE EVENT PARAMETERS:${colors.reset}`
+    );
+    console.log(`${colors.cyan}   👤 Affected User:${colors.reset} ${user}`);
+    console.log(`${colors.cyan}   👤 User Type:${colors.reset} ${userType}`);
+    console.log(
+      `${colors.red}   💸 Loss Amount:${
+        colors.reset
+      } ${lossAmount.toString()} (raw) = $${lossFormatted} USDC`
+    );
+    console.log(
+      `${colors.green}   💰 Remaining Collateral:${
+        colors.reset
+      } ${remainingCollateral.toString()} (raw) = $${remainingFormatted} USDC`
+    );
+    console.log(
+      `${colors.yellow}   📊 Loss Impact:${colors.reset} ${(
+        (parseFloat(lossFormatted) /
+          (parseFloat(lossFormatted) + parseFloat(remainingFormatted))) *
+        100
+      ).toFixed(1)}% of total collateral`
+    );
+    console.log(
+      `${colors.dim}   ⏰ Local Timestamp:${colors.reset} ${timestamp}`
+    );
+    console.log(
+      `${colors.dim}   🧱 Block Number:${colors.reset} ${event.blockNumber}`
+    );
+    console.log(
+      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${event.transactionHash}`
+    );
+    console.log(
+      `${colors.dim}   📄 Log Index:${colors.reset} ${event.logIndex}`
+    );
+    console.log(
+      `${colors.dim}   📄 Transaction Index:${colors.reset} ${event.transactionIndex}`
+    );
+    console.log(
+      `${colors.dim}   📋 Event Name:${colors.reset} ${
+        event.eventName || "UserLossSocialized"
+      }`
+    );
+    if (event.gasUsed)
+      console.log(
+        `${colors.dim}   ⛽ Gas Used:${
+          colors.reset
+        } ${event.gasUsed.toString()}`
+      );
+    if (event.effectiveGasPrice)
+      console.log(
+        `${colors.dim}   ⛽ Gas Price:${
+          colors.reset
+        } ${event.effectiveGasPrice.toString()}`
+      );
+    if (event.address)
+      console.log(
+        `${colors.dim}   📍 Contract Address:${colors.reset} ${event.address}`
+      );
 
     const notification = `
 ${colors.bgYellow}${colors.black}${
@@ -3512,6 +3769,86 @@ ${colors.brightRed}└───────────────────�
     const positionType = positionSize >= 0 ? "LONG" : "SHORT";
     const positionColor = positionSize >= 0 ? colors.green : colors.red;
 
+    // Enhanced parameter display
+    console.log(
+      `\n${colors.brightGreen}📋 COMPLETE EVENT PARAMETERS:${colors.reset}`
+    );
+    console.log(`${colors.cyan}   👤 User:${colors.reset} ${user}`);
+    console.log(`${colors.cyan}   👤 User Type:${colors.reset} ${userType}`);
+    console.log(`${colors.cyan}   📊 Market ID:${colors.reset} ${marketId}`);
+    console.log(
+      `${colors.cyan}   📊 Market Name:${colors.reset} ${marketName}`
+    );
+    console.log(
+      `${positionColor}   📊 Position Size:${
+        colors.reset
+      } ${positionSize.toString()} (raw) = ${positionType} ${sizeFormatted} ALU`
+    );
+    console.log(
+      `${colors.yellow}   💰 Entry Price:${
+        colors.reset
+      } ${entryPrice.toString()} (raw) = $${entryPriceFormatted}`
+    );
+    console.log(
+      `${colors.magenta}   📈 Mark Price:${
+        colors.reset
+      } ${markPrice.toString()} (raw) = $${markPriceFormatted}`
+    );
+    console.log(
+      `${colors.brightGreen}   💸 Unrealized PnL:${
+        colors.reset
+      } ${unrealizedPnL.toString()} (raw) = +$${pnlFormatted} USDC`
+    );
+    console.log(
+      `${colors.brightCyan}   🎯 Profit Score:${
+        colors.reset
+      } ${profitScore.toString()} (raw) = ${scoreFormatted}`
+    );
+    console.log(
+      `${colors.yellow}   📊 Price Difference:${colors.reset} $${(
+        parseFloat(markPriceFormatted) - parseFloat(entryPriceFormatted)
+      ).toFixed(4)} (${(
+        (parseFloat(markPriceFormatted) / parseFloat(entryPriceFormatted) - 1) *
+        100
+      ).toFixed(2)}%)`
+    );
+    console.log(
+      `${colors.dim}   ⏰ Local Timestamp:${colors.reset} ${timestamp}`
+    );
+    console.log(
+      `${colors.dim}   🧱 Block Number:${colors.reset} ${event.blockNumber}`
+    );
+    console.log(
+      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${event.transactionHash}`
+    );
+    console.log(
+      `${colors.dim}   📄 Log Index:${colors.reset} ${event.logIndex}`
+    );
+    console.log(
+      `${colors.dim}   📄 Transaction Index:${colors.reset} ${event.transactionIndex}`
+    );
+    console.log(
+      `${colors.dim}   📋 Event Name:${colors.reset} ${
+        event.eventName || "ProfitablePositionFound"
+      }`
+    );
+    if (event.gasUsed)
+      console.log(
+        `${colors.dim}   ⛽ Gas Used:${
+          colors.reset
+        } ${event.gasUsed.toString()}`
+      );
+    if (event.effectiveGasPrice)
+      console.log(
+        `${colors.dim}   ⛽ Gas Price:${
+          colors.reset
+        } ${event.effectiveGasPrice.toString()}`
+      );
+    if (event.address)
+      console.log(
+        `${colors.dim}   📍 Contract Address:${colors.reset} ${event.address}`
+      );
+
     console.log(
       `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightGreen}🎯 PROFITABLE POSITION FOUND${colors.reset} | ` +
         `${colors.cyan}${userType}${colors.reset} | ` +
@@ -3558,6 +3895,89 @@ ${colors.brightRed}└───────────────────�
       18,
       4
     );
+
+    // Enhanced parameter display - CRITICAL ADL EVENT
+    console.log(
+      `\n${colors.brightMagenta}📋 COMPLETE EVENT PARAMETERS - POSITION SIZE REDUCTION:${colors.reset}`
+    );
+    console.log(`${colors.cyan}   👤 Affected User:${colors.reset} ${user}`);
+    console.log(`${colors.cyan}   👤 User Type:${colors.reset} ${userType}`);
+    console.log(`${colors.cyan}   📊 Market ID:${colors.reset} ${marketId}`);
+    console.log(
+      `${colors.cyan}   📊 Market Name:${colors.reset} ${marketName}`
+    );
+    console.log(
+      `${colors.red}   📊 Size Before Reduction:${
+        colors.reset
+      } ${sizeBeforeReduction.toString()} (raw) = ${beforeFormatted} ALU`
+    );
+    console.log(
+      `${colors.green}   📊 Size After Reduction:${
+        colors.reset
+      } ${sizeAfterReduction.toString()} (raw) = ${afterFormatted} ALU`
+    );
+    console.log(
+      `${colors.brightYellow}   📉 POSITION SIZE REDUCTION:${
+        colors.reset
+      } ${reductionAmount.toString()} (raw) = ${reductionFormatted} ALU`
+    );
+    console.log(
+      `${colors.brightGreen}   💰 Realized Profit:${
+        colors.reset
+      } ${realizedProfit.toString()} (raw) = $${profitFormatted} USDC`
+    );
+    console.log(
+      `${colors.yellow}   💰 New Entry Price:${
+        colors.reset
+      } ${newEntryPrice.toString()} (raw) = $${entryFormatted}`
+    );
+    console.log(
+      `${colors.magenta}   📊 Position Reduction %:${colors.reset} ${(
+        (parseFloat(reductionFormatted) / parseFloat(beforeFormatted)) *
+        100
+      ).toFixed(2)}%`
+    );
+    console.log(
+      `${colors.brightCyan}   💸 Profit per Unit:${colors.reset} $${(
+        parseFloat(profitFormatted) / parseFloat(reductionFormatted)
+      ).toFixed(6)} USDC/ALU`
+    );
+    console.log(
+      `${colors.dim}   ⏰ Local Timestamp:${colors.reset} ${timestamp}`
+    );
+    console.log(
+      `${colors.dim}   🧱 Block Number:${colors.reset} ${event.blockNumber}`
+    );
+    console.log(
+      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${event.transactionHash}`
+    );
+    console.log(
+      `${colors.dim}   📄 Log Index:${colors.reset} ${event.logIndex}`
+    );
+    console.log(
+      `${colors.dim}   📄 Transaction Index:${colors.reset} ${event.transactionIndex}`
+    );
+    console.log(
+      `${colors.dim}   📋 Event Name:${colors.reset} ${
+        event.eventName || "AdministrativePositionClosure"
+      }`
+    );
+    if (event.gasUsed)
+      console.log(
+        `${colors.dim}   ⛽ Gas Used:${
+          colors.reset
+        } ${event.gasUsed.toString()}`
+      );
+    if (event.effectiveGasPrice)
+      console.log(
+        `${colors.dim}   ⛽ Gas Price:${
+          colors.reset
+        } ${event.effectiveGasPrice.toString()}`
+      );
+    if (event.address)
+      console.log(
+        `${colors.dim}   📍 Contract Address:${colors.reset} ${event.address}`
+      );
 
     const notification = `
 ${colors.bgMagenta}${colors.white}${
@@ -3669,6 +4089,85 @@ ${
           )
         : 0;
 
+    // Enhanced parameter display - ADL COMPLETION SUMMARY
+    console.log(
+      `\n${colors.brightGreen}📋 COMPLETE EVENT PARAMETERS - ADL SYSTEM COMPLETED:${colors.reset}`
+    );
+    console.log(`${colors.cyan}   📊 Market ID:${colors.reset} ${marketId}`);
+    console.log(
+      `${colors.cyan}   📊 Market Name:${colors.reset} ${marketName}`
+    );
+    console.log(
+      `${colors.red}   👤 Liquidated User:${colors.reset} ${liquidatedUser}`
+    );
+    console.log(
+      `${colors.red}   👤 User Type:${colors.reset} ${liquidatedUserType}`
+    );
+    console.log(
+      `${colors.brightGreen}   💰 Total Loss Covered:${
+        colors.reset
+      } ${totalLossCovered.toString()} (raw) = $${coveredFormatted} USDC`
+    );
+    console.log(
+      `${colors.yellow}   💸 Remaining Loss:${
+        colors.reset
+      } ${remainingLoss.toString()} (raw) = $${remainingFormatted} USDC`
+    );
+    console.log(
+      `${colors.brightMagenta}   👥 Positions Affected:${
+        colors.reset
+      } ${positionsAffected.toString()} users had their positions reduced`
+    );
+    console.log(
+      `${colors.brightCyan}   📈 Coverage Percentage:${colors.reset} ${coveragePercent}% of total loss covered`
+    );
+    console.log(
+      `${colors.magenta}   💰 Total Original Loss:${colors.reset} $${(
+        parseFloat(coveredFormatted) + parseFloat(remainingFormatted)
+      ).toFixed(2)} USDC`
+    );
+    console.log(
+      `${colors.yellow}   📊 Average Loss per Position:${colors.reset} $${(
+        parseFloat(coveredFormatted) / parseInt(positionsAffected.toString())
+      ).toFixed(2)} USDC`
+    );
+    console.log(
+      `${colors.dim}   ⏰ Local Timestamp:${colors.reset} ${timestamp}`
+    );
+    console.log(
+      `${colors.dim}   🧱 Block Number:${colors.reset} ${event.blockNumber}`
+    );
+    console.log(
+      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${event.transactionHash}`
+    );
+    console.log(
+      `${colors.dim}   📄 Log Index:${colors.reset} ${event.logIndex}`
+    );
+    console.log(
+      `${colors.dim}   📄 Transaction Index:${colors.reset} ${event.transactionIndex}`
+    );
+    console.log(
+      `${colors.dim}   📋 Event Name:${colors.reset} ${
+        event.eventName || "SocializationCompleted"
+      }`
+    );
+    if (event.gasUsed)
+      console.log(
+        `${colors.dim}   ⛽ Gas Used:${
+          colors.reset
+        } ${event.gasUsed.toString()}`
+      );
+    if (event.effectiveGasPrice)
+      console.log(
+        `${colors.dim}   ⛽ Gas Price:${
+          colors.reset
+        } ${event.effectiveGasPrice.toString()}`
+      );
+    if (event.address)
+      console.log(
+        `${colors.dim}   📍 Contract Address:${colors.reset} ${event.address}`
+      );
+
     const notification = `
 ${colors.bgGreen}${colors.white}${
       colors.bright
@@ -3754,6 +4253,71 @@ ${
     const marketName = this.getMarketDisplayName(marketId);
     const lossFormatted = formatWithAutoDecimalDetection(lossAmount, 6, 2);
     const liquidatedUserType = this.formatUserDisplay(liquidatedUser);
+
+    // Enhanced parameter display - ADL SYSTEM FAILURE
+    console.log(
+      `\n${colors.brightRed}📋 COMPLETE EVENT PARAMETERS - ADL SYSTEM FAILED:${colors.reset}`
+    );
+    console.log(`${colors.cyan}   📊 Market ID:${colors.reset} ${marketId}`);
+    console.log(
+      `${colors.cyan}   📊 Market Name:${colors.reset} ${marketName}`
+    );
+    console.log(
+      `${colors.red}   💸 Failed Loss Amount:${
+        colors.reset
+      } ${lossAmount.toString()} (raw) = $${lossFormatted} USDC`
+    );
+    console.log(
+      `${colors.brightRed}   ❌ Failure Reason:${colors.reset} ${reason}`
+    );
+    console.log(
+      `${colors.red}   👤 Liquidated User:${colors.reset} ${liquidatedUser}`
+    );
+    console.log(
+      `${colors.red}   👤 User Type:${colors.reset} ${liquidatedUserType}`
+    );
+    console.log(
+      `${colors.yellow}   ⚠️  Impact:${colors.reset} $${lossFormatted} USDC becomes bad debt`
+    );
+    console.log(
+      `${colors.brightYellow}   🚨 System Status:${colors.reset} ADL unable to cover gap loss - potential system deficit`
+    );
+    console.log(
+      `${colors.dim}   ⏰ Local Timestamp:${colors.reset} ${timestamp}`
+    );
+    console.log(
+      `${colors.dim}   🧱 Block Number:${colors.reset} ${event.blockNumber}`
+    );
+    console.log(
+      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${event.transactionHash}`
+    );
+    console.log(
+      `${colors.dim}   📄 Log Index:${colors.reset} ${event.logIndex}`
+    );
+    console.log(
+      `${colors.dim}   📄 Transaction Index:${colors.reset} ${event.transactionIndex}`
+    );
+    console.log(
+      `${colors.dim}   📋 Event Name:${colors.reset} ${
+        event.eventName || "SocializationFailed"
+      }`
+    );
+    if (event.gasUsed)
+      console.log(
+        `${colors.dim}   ⛽ Gas Used:${
+          colors.reset
+        } ${event.gasUsed.toString()}`
+      );
+    if (event.effectiveGasPrice)
+      console.log(
+        `${colors.dim}   ⛽ Gas Price:${
+          colors.reset
+        } ${event.effectiveGasPrice.toString()}`
+      );
+    if (event.address)
+      console.log(
+        `${colors.dim}   📍 Contract Address:${colors.reset} ${event.address}`
+      );
 
     const notification = `
 ${colors.bgRed}${colors.white}${
