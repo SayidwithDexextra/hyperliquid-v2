@@ -1,5 +1,6 @@
 require("@nomicfoundation/hardhat-toolbox");
-require("dotenv").config({ path: ".env.polygon" });
+require("dotenv").config(); // Load main .env file
+// require("dotenv").config({ path: ".env.polygon" }); // Load specific network configs if needed
 
 const config = {
   solidity: {
@@ -7,13 +8,20 @@ const config = {
     settings: {
       optimizer: {
         enabled: true,
-        runs: 1, // Maximum optimization for deployment size
+        runs: 1, // Optimize purely for deployment size
         details: {
           yul: true,
           yulDetails: {
             stackAllocation: true,
             optimizerSteps: "dhfoDgvulfnTUtnIf",
           },
+          peephole: true,
+          inliner: true,
+          jumpdestRemover: true,
+          orderLiterals: true,
+          deduplicate: true,
+          cse: true,
+          constantOptimizer: true,
         },
       },
       viaIR: true, // Enable Intermediate Representation for better optimization
@@ -44,7 +52,22 @@ const config = {
       url:
         process.env.POLYGON_RPC_URL ||
         `https://polygon-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`,
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      accounts:
+        [
+          process.env.PRIVATE_KEY_DEPLOYER,
+          process.env.PRIVATE_KEY_USER1,
+          process.env.PRIVATE_KEY_USER2,
+          process.env.PRIVATE_KEY_USER3,
+        ].filter(Boolean).length > 0
+          ? [
+              process.env.PRIVATE_KEY_DEPLOYER,
+              process.env.PRIVATE_KEY_USER1,
+              process.env.PRIVATE_KEY_USER2,
+              process.env.PRIVATE_KEY_USER3,
+            ].filter(Boolean)
+          : process.env.PRIVATE_KEY
+          ? [process.env.PRIVATE_KEY]
+          : [],
       gasPrice: "auto",
       gas: "auto",
       chainId: 137,
@@ -53,19 +76,120 @@ const config = {
       url:
         process.env.MUMBAI_RPC_URL ||
         `https://polygon-mumbai.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}`,
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      accounts:
+        [
+          process.env.PRIVATE_KEY_DEPLOYER,
+          process.env.PRIVATE_KEY_USER1,
+          process.env.PRIVATE_KEY_USER2,
+          process.env.PRIVATE_KEY_USER3,
+        ].filter(Boolean).length > 0
+          ? [
+              process.env.PRIVATE_KEY_DEPLOYER,
+              process.env.PRIVATE_KEY_USER1,
+              process.env.PRIVATE_KEY_USER2,
+              process.env.PRIVATE_KEY_USER3,
+            ].filter(Boolean)
+          : process.env.PRIVATE_KEY
+          ? [process.env.PRIVATE_KEY]
+          : [],
       gasPrice: "auto",
       gas: "auto",
       chainId: 80001,
     },
-    // Add Hyper Liquid testnet/mainnet configurations as needed
-    testnet: {
-      url: process.env.TESTNET_RPC_URL || "",
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    // HyperLiquid Network Configuration
+    hyperliquid: {
+      url: process.env.HYPERLIQUID_RPC_URL || "https://rpc.hyperliquid.xyz",
+      accounts:
+        [
+          process.env.PRIVATE_KEY_DEPLOYER,
+          process.env.PRIVATE_KEY_USER1,
+          process.env.PRIVATE_KEY_USER2,
+          process.env.PRIVATE_KEY_USER3,
+        ].filter(Boolean).length > 0
+          ? [
+              process.env.PRIVATE_KEY_DEPLOYER,
+              process.env.PRIVATE_KEY_USER1,
+              process.env.PRIVATE_KEY_USER2,
+              process.env.PRIVATE_KEY_USER3,
+            ].filter(Boolean)
+          : process.env.PRIVATE_KEY
+          ? [process.env.PRIVATE_KEY]
+          : [],
+      chainId: 999, // HyperLiquid chain ID (corrected from RPC response)
+      gasPrice: "auto",
+      gas: "auto",
+      timeout: 60000,
+      allowUnlimitedContractSize: true,
     },
-    mainnet: {
-      url: process.env.MAINNET_RPC_URL || "",
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    // HyperLiquid Testnet (if available)
+    hyperliquid_testnet: {
+      url:
+        process.env.HYPERLIQUID_TESTNET_RPC_URL ||
+        "https://testnet-rpc.hyperliquid.xyz",
+      accounts:
+        [
+          process.env.PRIVATE_KEY_DEPLOYER,
+          process.env.PRIVATE_KEY_USER1,
+          process.env.PRIVATE_KEY_USER2,
+          process.env.PRIVATE_KEY_USER3,
+        ].filter(Boolean).length > 0
+          ? [
+              process.env.PRIVATE_KEY_DEPLOYER,
+              process.env.PRIVATE_KEY_USER1,
+              process.env.PRIVATE_KEY_USER2,
+              process.env.PRIVATE_KEY_USER3,
+            ].filter(Boolean)
+          : process.env.PRIVATE_KEY
+          ? [process.env.PRIVATE_KEY]
+          : [],
+      chainId: 998, // HyperLiquid Testnet chain ID (placeholder - verify with docs)
+      gasPrice: "auto",
+      gas: "auto",
+      timeout: 60000,
+      allowUnlimitedContractSize: true,
+    },
+    // Example: Add more blockchains
+    arbitrum: {
+      url: process.env.ARBITRUM_RPC_URL || "https://arb1.arbitrum.io/rpc",
+      accounts:
+        [
+          process.env.PRIVATE_KEY_DEPLOYER,
+          process.env.PRIVATE_KEY_USER1,
+          process.env.PRIVATE_KEY_USER2,
+          process.env.PRIVATE_KEY_USER3,
+        ].filter(Boolean).length > 0
+          ? [
+              process.env.PRIVATE_KEY_DEPLOYER,
+              process.env.PRIVATE_KEY_USER1,
+              process.env.PRIVATE_KEY_USER2,
+              process.env.PRIVATE_KEY_USER3,
+            ].filter(Boolean)
+          : process.env.PRIVATE_KEY
+          ? [process.env.PRIVATE_KEY]
+          : [],
+      chainId: 42161,
+      gasPrice: "auto",
+    },
+    optimism: {
+      url: process.env.OPTIMISM_RPC_URL || "https://mainnet.optimism.io",
+      accounts:
+        [
+          process.env.PRIVATE_KEY_DEPLOYER,
+          process.env.PRIVATE_KEY_USER1,
+          process.env.PRIVATE_KEY_USER2,
+          process.env.PRIVATE_KEY_USER3,
+        ].filter(Boolean).length > 0
+          ? [
+              process.env.PRIVATE_KEY_DEPLOYER,
+              process.env.PRIVATE_KEY_USER1,
+              process.env.PRIVATE_KEY_USER2,
+              process.env.PRIVATE_KEY_USER3,
+            ].filter(Boolean)
+          : process.env.PRIVATE_KEY
+          ? [process.env.PRIVATE_KEY]
+          : [],
+      chainId: 10,
+      gasPrice: "auto",
     },
   },
   gasReporter: {
