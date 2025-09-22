@@ -1037,8 +1037,9 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         for (uint256 i = 0; i < profitablePositions.length && remainingLoss > 0; i++) {
             ProfitablePosition memory profitablePos = profitablePositions[i];
             
-            // Calculate how much loss this position can cover
-            uint256 maxCoverage = profitablePos.unrealizedPnL;
+            // Calculate how much loss this position can cover (all values in 6 decimals)
+            // profitablePos.unrealizedPnL is derived from standard P&L (18 decimals). Convert to 6 decimals.
+            uint256 maxCoverage = profitablePos.unrealizedPnL / DECIMAL_SCALE; // 18 → 6
             uint256 targetCoverage = remainingLoss > maxCoverage ? maxCoverage : remainingLoss;
             
             if (targetCoverage == 0) continue;
@@ -1315,17 +1316,14 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 }
                 
                 // Calculate reduction ratio to achieve target profit
-                uint256 totalProfitAvailable = uint256(totalUnrealizedPnL); // 6 decimals (USDC P&L)
+                uint256 totalProfitAvailable18 = uint256(totalUnrealizedPnL); // 18 decimals (standard P&L precision)
                 
-                // CRITICAL PRECISION FIX: Scale targetProfit from 6 decimals (USDC) to 18 decimals (ALU)
-                // Both targetProfit and totalProfitAvailable are in USDC (6 decimals)
-                // But we need 18-decimal precision for position size calculations
-                uint256 targetProfitScaled = targetProfit * 1e12; // Scale 6 decimals -> 18 decimals  
-                uint256 totalProfitScaled = totalProfitAvailable * 1e12; // Scale 6 decimals -> 18 decimals
-                uint256 actualTargetProfit = targetProfitScaled > totalProfitScaled ? totalProfitScaled : targetProfitScaled;
+                // Scale target profit from 6 decimals (USDC) to 18 decimals for ratio math
+                uint256 targetProfit18 = targetProfit * DECIMAL_SCALE; // 6 → 18 decimals
+                uint256 actualTargetProfit18 = targetProfit18 > totalProfitAvailable18 ? totalProfitAvailable18 : targetProfit18;
                 
-                // Calculate position reduction amount (now in proper 18-decimal precision)
-                uint256 reductionRatio = (actualTargetProfit * 1e18) / totalProfitScaled; // 18 decimal precision
+                // Calculate position reduction amount using 18-decimal ratio precision
+                uint256 reductionRatio = (actualTargetProfit18 * 1e18) / totalProfitAvailable18; // 18 decimal precision
                 uint256 sizeReduction = (absCurrentSize * reductionRatio) / 1e18;
                 
                 if (sizeReduction == 0) {
@@ -1342,10 +1340,11 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 uint256 newAbsSize = absCurrentSize - sizeReduction;
                 int256 newSize = currentPositionSize >= 0 ? int256(newAbsSize) : -int256(newAbsSize);
                 
-                // Calculate actual realized profit
+                // Calculate actual realized profit (18 decimals) then convert to 6 decimals for accounting
                 int256 priceDiff = int256(markPrice) - int256(entryPrice);
                 int256 sizeReductionSigned = currentPositionSize >= 0 ? int256(sizeReduction) : -int256(sizeReduction);
-                uint256 actualRealizedProfit = uint256((priceDiff * sizeReductionSigned) / int256(TICK_PRECISION));
+                uint256 actualRealizedProfit18 = uint256((priceDiff * sizeReductionSigned) / int256(TICK_PRECISION));
+                uint256 actualRealizedProfit = actualRealizedProfit18 / DECIMAL_SCALE;
                 
                 // DEBUG: Emit position reduction details
                 emit DebugPositionReduction(
