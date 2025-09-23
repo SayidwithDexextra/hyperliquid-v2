@@ -81,6 +81,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     event CollateralWithdrawn(address indexed user, uint256 amount);
     event MarginLocked(address indexed user, bytes32 indexed marketId, uint256 amount, uint256 totalLockedAfter);
     event MarginReleased(address indexed user, bytes32 indexed marketId, uint256 amount, uint256 totalLockedAfter);
+    event MarginToppedUp(address indexed user, bytes32 indexed marketId, uint256 amount);
     // Margin reservation events (compat with CentralizedVault)
     event MarginReserved(address indexed user, bytes32 indexed orderId, bytes32 indexed marketId, uint256 amount);
     event MarginUnreserved(address indexed user, bytes32 indexed orderId, uint256 amount);
@@ -616,20 +617,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         require(marketToOrderBook[marketId] != address(0), "market!");
         uint256 avail = getAvailableCollateral(user);
         require(avail >= amount, "insufficient collateral");
-        
-        // Find and update position margin, or revert if no position exists
-        bool positionFound = false;
-        for (uint256 i = 0; i < userPositions[user].length; i++) {
-            if (userPositions[user][i].marketId == marketId) {
-                userPositions[user][i].marginLocked += amount;
-                positionFound = true;
-                emit MarginLocked(user, marketId, amount, userPositions[user][i].marginLocked);
-                break;
-            }
-        }
-        require(positionFound, "No position found for market");
-        
-        totalMarginLocked += amount;
+        _increasePositionMargin(user, marketId, amount);
     }
 
     function releaseMargin(address user, bytes32 marketId, uint256 amount) external onlyRole(ORDERBOOK_ROLE) {
@@ -652,6 +640,41 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         if (totalMarginLocked >= amount) {
             totalMarginLocked -= amount;
         }
+    }
+
+    // ============ User Top-Up Interface ============
+    
+    /**
+     * @dev Allow users to top up margin for their existing position using available collateral
+     * @param marketId Market to top up margin for
+     * @param amount Additional margin amount to lock (in 6 decimals)
+     */
+    function topUpPositionMargin(bytes32 marketId, uint256 amount) external nonReentrant whenNotPaused {
+        require(amount > 0, "!amount");
+        require(marketToOrderBook[marketId] != address(0), "market!");
+        
+        uint256 available = getAvailableCollateral(msg.sender);
+        require(available >= amount, "insufficient collateral");
+        _increasePositionMargin(msg.sender, marketId, amount);
+        emit MarginToppedUp(msg.sender, marketId, amount);
+    }
+
+    /**
+     * @dev Internal helper to increase margin on an existing position.
+     *      Reverts if no position found or position size is zero.
+     */
+    function _increasePositionMargin(address user, bytes32 marketId, uint256 amount) internal {
+        bool positionFound = false;
+        for (uint256 i = 0; i < userPositions[user].length; i++) {
+            if (userPositions[user][i].marketId == marketId && userPositions[user][i].size != 0) {
+                userPositions[user][i].marginLocked += amount;
+                positionFound = true;
+                emit MarginLocked(user, marketId, amount, userPositions[user][i].marginLocked);
+                break;
+            }
+        }
+        require(positionFound, "No position found for market");
+        totalMarginLocked += amount;
     }
 
     // ===== Margin reservation API (compat with CentralizedVault) =====
@@ -792,19 +815,18 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         PositionManager.Position[] storage positions = userPositions[user];
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size != 0) {
-                int256 size = positions[i].size;
-                uint256 mm = MAINTENANCE_MARGIN_BPS; // Hard-coded 10% for all markets
-                if (size > 0) {
-                    // Long liquidation: with 1:1 system, only at price 0
-                    return markPrice == 0;
-                } else {
-                    // Short liquidation: P_liq = (2.5E)/(1+m)
-                    // Use integer math: numerator = 25/10 * E
-                    uint256 numerator = (25 * positions[i].entryPrice) / 10;
-                    uint256 denominator = 10000 + mm; // (1 + m)
-                    uint256 priceLiq = (numerator * 10000) / denominator;
-                    return markPrice >= priceLiq;
-                }
+                // Calculate maintenance requirement (6 decimals)
+                uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
+                uint256 notional6 = (absSize * markPrice) / (10**18);
+                uint256 maintenance6 = (notional6 * MAINTENANCE_MARGIN_BPS) / 10000;
+
+                // Calculate equity for this position in 6 decimals
+                int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
+                int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
+                int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
+                int256 equity6 = int256(positions[i].marginLocked) + pnl6;
+
+                return equity6 < int256(maintenance6);
             }
         }
         return false;
