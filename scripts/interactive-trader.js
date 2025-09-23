@@ -5478,31 +5478,17 @@ ${colors.brightRed}└───────────────────�
               false // Don't show warnings in quick summary
             );
 
-            // Calculate indicative liquidation price (CV.md logic)
+            // Fetch liquidation price from vault (equity-aware, updates on top-up)
             let liqStr = "N/A";
             try {
-              const entryPriceNum = parseFloat(entryPrice);
-              if (positionSize < 0n && entryPriceNum > 0) {
-                // Short: P_liq = (2.5E)/(1+m), m = maintenanceMarginBps/10000 (hard-coded 10%)
-                let mmBps = 1000; // Hard-coded 10% maintenance margin
-                try {
-                  if (
-                    typeof this.contracts.vault.maintenanceMarginBps ===
-                    "function"
-                  ) {
-                    mmBps = Number(
-                      await this.contracts.vault.maintenanceMarginBps(
-                        position.marketId
-                      )
-                    );
-                  }
-                } catch (_) {}
-                const m = mmBps / 10000;
-                const pLiq = (2.5 * entryPriceNum) / (1 + m);
-                liqStr = pLiq.toFixed(4);
-              } else if (positionSize > 0n) {
-                // Long: liquidates only at 0 in 1:1 system
-                liqStr = "0.0000";
+              const [liqPrice, hasPos] =
+                await this.contracts.vault.getLiquidationPrice(
+                  this.currentUser.address,
+                  position.marketId
+                );
+              if (hasPos) {
+                const liqBn = BigInt(liqPrice.toString());
+                liqStr = liqBn > 0n ? formatPrice(liqBn) : "0.0000";
               }
             } catch (_) {}
 
@@ -5590,6 +5576,18 @@ ${colors.brightRed}└───────────────────�
       colorText("│ 14. 🔥 View Liquidation History         │", colors.brightRed)
     );
     console.log(
+      colorText(
+        "│ 15. ➕ Top Up Position Margin            │",
+        colors.brightGreen
+      )
+    );
+    console.log(
+      colorText(
+        "│ 16. ➖ Reduce Margin (Partial Close)     │",
+        colors.brightYellow
+      )
+    );
+    console.log(
       colorText("│ r. 🔄 Refresh Display                  │", colors.white)
     );
     console.log(
@@ -5650,6 +5648,12 @@ ${colors.brightRed}└───────────────────�
       case "14":
         await this.viewLiquidationHistory();
         break;
+      case "15":
+        await this.topUpPositionMarginFlow();
+        break;
+      case "16":
+        await this.reducePositionMarginFlow();
+        break;
       case "r":
         // Refresh - just continue loop
         break;
@@ -5660,6 +5664,200 @@ ${colors.brightRed}└───────────────────�
         console.log(colorText("❌ Invalid choice", colors.red));
         await this.pause(1000);
     }
+  }
+
+  // === Margin Top-Up ===
+  async topUpPositionMarginFlow() {
+    console.clear();
+    console.log(boxText("➕ TOP UP POSITION MARGIN", colors.brightGreen));
+    try {
+      const positions = await this.contracts.vault.getUserPositions(
+        this.currentUser.address
+      );
+      if (positions.length === 0) {
+        console.log(colorText("❌ No positions to top up", colors.red));
+        await this.pause(2000);
+        return;
+      }
+
+      // List positions
+      for (let i = 0; i < positions.length; i++) {
+        const pos = positions[i];
+        const market = await safeDecodeMarketId(pos.marketId, this.contracts);
+        const side = BigInt(pos.size.toString()) >= 0n ? "LONG" : "SHORT";
+        const sizeFmt = formatAmount(
+          BigInt(pos.size.toString()) >= 0n
+            ? BigInt(pos.size.toString())
+            : -BigInt(pos.size.toString()),
+          18,
+          4
+        );
+        const marginFmt = formatUSDC(BigInt(pos.marginLocked.toString()));
+        console.log(
+          colorText(
+            `${i + 1}. ${market.substring(
+              0,
+              8
+            )}  ${side}  ${sizeFmt} ALU  |  Margin: $${marginFmt}`,
+            colors.white
+          )
+        );
+      }
+
+      const idxStr = await this.askQuestion(
+        colorText("Select position # to top up: ", colors.yellow)
+      );
+      const idx = Number(idxStr) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= positions.length) {
+        console.log(colorText("❌ Invalid selection", colors.red));
+        await this.pause(2000);
+        return;
+      }
+
+      const amountStr = await this.askQuestion(
+        colorText("Enter top-up amount (USDC): $", colors.brightGreen)
+      );
+      if (!amountStr || isNaN(amountStr) || Number(amountStr) <= 0) {
+        console.log(colorText("❌ Invalid amount", colors.red));
+        await this.pause(2000);
+        return;
+      }
+      const amount6 = ethers.parseUnits(amountStr, 6);
+
+      const pos = positions[idx];
+      const [liqBefore] = await this.contracts.vault.getLiquidationPrice(
+        this.currentUser.address,
+        pos.marketId
+      );
+
+      // Execute top-up
+      const tx = await this.contracts.vault
+        .connect(this.currentUser)
+        .topUpPositionMargin(pos.marketId, amount6);
+      console.log(colorText("⏳ Submitting top-up...", colors.yellow));
+      const rcpt = await tx.wait();
+      console.log(
+        colorText(`✅ Top-up confirmed. Gas: ${rcpt.gasUsed}`, colors.green)
+      );
+
+      // Show updated liq price
+      const [liqAfter] = await this.contracts.vault.getLiquidationPrice(
+        this.currentUser.address,
+        pos.marketId
+      );
+      console.log(
+        colorText(
+          `📊 Liq Price: $${formatPrice(
+            BigInt(liqBefore.toString())
+          )}  →  $${formatPrice(BigInt(liqAfter.toString()))}`,
+          colors.cyan
+        )
+      );
+    } catch (e) {
+      console.log(colorText(`❌ Top-up failed: ${e.message}`, colors.red));
+    }
+    await this.pause(3000);
+  }
+
+  // === Margin Reduction ===
+  async reducePositionMarginFlow() {
+    console.clear();
+    console.log(boxText("➖ REDUCE POSITION MARGIN", colors.brightYellow));
+    try {
+      const positions = await this.contracts.vault.getUserPositions(
+        this.currentUser.address
+      );
+      if (positions.length === 0) {
+        console.log(colorText("❌ No positions to reduce", colors.red));
+        await this.pause(2000);
+        return;
+      }
+
+      // List positions
+      for (let i = 0; i < positions.length; i++) {
+        const pos = positions[i];
+        const market = await safeDecodeMarketId(pos.marketId, this.contracts);
+        const sizeBn = BigInt(pos.size.toString());
+        const sizeFmt = formatAmount(sizeBn >= 0n ? sizeBn : -sizeBn, 18, 4);
+        const marginFmt = formatUSDC(BigInt(pos.marginLocked.toString()));
+        console.log(
+          colorText(
+            `${i + 1}. ${market.substring(0, 8)}  ${
+              sizeBn >= 0n ? "LONG" : "SHORT"
+            }  ${sizeFmt} ALU  |  Margin: $${marginFmt}`,
+            colors.white
+          )
+        );
+      }
+
+      const idxStr = await this.askQuestion(
+        colorText("Select position # to reduce margin: ", colors.yellow)
+      );
+      const idx = Number(idxStr) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= positions.length) {
+        console.log(colorText("❌ Invalid selection", colors.red));
+        await this.pause(2000);
+        return;
+      }
+
+      const amountStr = await this.askQuestion(
+        colorText("Enter reduce amount (USDC): $", colors.brightYellow)
+      );
+      if (!amountStr || isNaN(amountStr) || Number(amountStr) <= 0) {
+        console.log(colorText("❌ Invalid amount", colors.red));
+        await this.pause(2000);
+        return;
+      }
+      const amount6 = ethers.parseUnits(amountStr, 6);
+
+      const pos = positions[idx];
+      const [liqBefore] = await this.contracts.vault.getLiquidationPrice(
+        this.currentUser.address,
+        pos.marketId
+      );
+
+      // CAUTION: Reducing margin below maintenance may make the position liquidatable
+      // We directly call vault.releaseMargin as it is ORDERBOOK_ROLE only; if not allowed, inform user
+      try {
+        const tx = await this.contracts.vault
+          .connect(this.currentUser)
+          .releaseMargin(this.currentUser.address, pos.marketId, amount6);
+        console.log(
+          colorText("⏳ Submitting margin release...", colors.yellow)
+        );
+        const rcpt = await tx.wait();
+        console.log(
+          colorText(`✅ Margin reduced. Gas: ${rcpt.gasUsed}`, colors.green)
+        );
+      } catch (err) {
+        console.log(
+          colorText(
+            "⚠️  Direct margin release not permitted. Use a partial close to free margin instead.",
+            colors.yellow
+          )
+        );
+        await this.pause(2500);
+        return;
+      }
+
+      const [liqAfter] = await this.contracts.vault.getLiquidationPrice(
+        this.currentUser.address,
+        pos.marketId
+      );
+      console.log(
+        colorText(
+          `📊 Liq Price: $${formatPrice(
+            BigInt(liqBefore.toString())
+          )}  →  $${formatPrice(BigInt(liqAfter.toString()))}`,
+          colors.cyan
+        )
+      );
+    } catch (e) {
+      console.log(
+        colorText(`❌ Reduce margin failed: ${e.message}`, colors.red)
+      );
+    }
+    await this.pause(3000);
   }
 
   async placeLimitOrder(isBuy) {

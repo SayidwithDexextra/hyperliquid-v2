@@ -832,6 +832,117 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         return false;
     }
 
+    /**
+     * @dev Compute liquidation price for user's position in a market using current equity.
+     *      - Uses current mark price to compute equity (includes unrealized PnL)
+     *      - Long:   P_liq = (P_now - E/Q) * 10000 / (10000 - MMR_BPS)
+     *      - Short:  P_liq = (P_now + E/Q) * 10000 / (10000 + MMR_BPS)
+     *      Returns (0, false) if no position exists.
+     */
+    function getLiquidationPrice(
+        address user,
+        bytes32 marketId
+    ) external view returns (uint256 liquidationPrice, bool hasPosition) {
+        PositionManager.Position[] storage positions = userPositions[user];
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size != 0) {
+                hasPosition = true;
+                uint256 markPrice = getMarkPrice(marketId);
+                if (markPrice == 0) {
+                    return (0, true);
+                }
+
+                // Compute equity (6 decimals) and abs size
+                int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
+                int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
+                int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
+                int256 equity6 = int256(positions[i].marginLocked) + pnl6;
+                uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
+                if (absSize == 0) {
+                    return (0, true);
+                }
+
+                // E/Q in 6 decimals: (equity6 * 1e18) / absSize
+                int256 eOverQ6 = (equity6 * int256(1e18)) / int256(absSize);
+
+                if (positions[i].size > 0) {
+                    // Long liquidation price: ((P_now - E/Q) * 10000) / (10000 - MMR)
+                    int256 numerator = int256(markPrice) - eOverQ6;
+                    uint256 denomBps = 10000 - MAINTENANCE_MARGIN_BPS;
+                    if (denomBps == 0) return (0, true);
+                    int256 liqSigned = (numerator * int256(10000)) / int256(denomBps);
+                    liquidationPrice = liqSigned > 0 ? uint256(liqSigned) : 0;
+                } else {
+                    // Short liquidation price: ((P_now + E/Q) * 10000) / (10000 + MMR)
+                    int256 numerator = int256(markPrice) + eOverQ6;
+                    uint256 denomBps = 10000 + MAINTENANCE_MARGIN_BPS;
+                    int256 liqSigned = (numerator * int256(10000)) / int256(denomBps);
+                    liquidationPrice = liqSigned > 0 ? uint256(liqSigned) : 0;
+                }
+                return (liquidationPrice, true);
+            }
+        }
+        return (0, false);
+    }
+
+    /**
+     * @dev Get position equity and notional in 6 decimals.
+     *      equity6 = marginLocked + pnl6(mark), notional6 = |Q| * P_now / 1e18.
+     */
+    function getPositionEquity(
+        address user,
+        bytes32 marketId
+    ) external view returns (int256 equity6, uint256 notional6, bool hasPosition) {
+        PositionManager.Position[] storage positions = userPositions[user];
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size != 0) {
+                hasPosition = true;
+                uint256 markPrice = getMarkPrice(marketId);
+                uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
+                notional6 = (absSize * markPrice) / (10**18);
+
+                int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
+                int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
+                int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
+                equity6 = int256(positions[i].marginLocked) + pnl6;
+                return (equity6, notional6, true);
+            }
+        }
+        return (0, 0, false);
+    }
+
+    /**
+     * @dev Get position free margin relative to maintenance: max(equity - MMR*notional, 0)
+     */
+    function getPositionFreeMargin(
+        address user,
+        bytes32 marketId
+    ) external view returns (uint256 freeMargin6, uint256 maintenance6, bool hasPosition) {
+        PositionManager.Position[] storage positions = userPositions[user];
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size != 0) {
+                hasPosition = true;
+                uint256 markPrice = getMarkPrice(marketId);
+                uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
+                uint256 notional6 = (absSize * markPrice) / (10**18);
+                maintenance6 = (notional6 * MAINTENANCE_MARGIN_BPS) / 10000;
+
+                int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
+                int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
+                int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
+                int256 equity6 = int256(positions[i].marginLocked) + pnl6;
+
+                if (equity6 > int256(maintenance6)) {
+                    freeMargin6 = uint256(equity6 - int256(maintenance6));
+                } else {
+                    freeMargin6 = 0;
+                }
+                return (freeMargin6, maintenance6, true);
+            }
+        }
+        return (0, 0, false);
+    }
+
     function liquidateShort(
         address user,
         bytes32 marketId,
