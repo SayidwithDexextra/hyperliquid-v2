@@ -5480,6 +5480,7 @@ ${colors.brightRed}└───────────────────�
 
             // Fetch liquidation price from vault (equity-aware, updates on top-up)
             let liqStr = "N/A";
+            let mmrBreakdown = "N/A";
             try {
               const [liqPrice, hasPos] =
                 await this.contracts.vault.getLiquidationPrice(
@@ -5492,6 +5493,58 @@ ${colors.brightRed}└───────────────────�
               }
             } catch (_) {}
 
+            // Fetch effective MMR and show fixed + dynamic breakdown (with gap where available)
+            try {
+              let mmrBps;
+              let fillRatio;
+              let gapRatio = 0n;
+              let hasPos2 = false;
+              if (
+                typeof this.contracts.vault.getEffectiveMaintenanceDetails ===
+                "function"
+              ) {
+                const res =
+                  await this.contracts.vault.getEffectiveMaintenanceDetails(
+                    this.currentUser.address,
+                    position.marketId
+                  );
+                mmrBps = Number(res[0]);
+                fillRatio = res[1];
+                gapRatio = res[2];
+                hasPos2 = res[3];
+              } else {
+                const res2 =
+                  await this.contracts.vault.getEffectiveMaintenanceMarginBps(
+                    this.currentUser.address,
+                    position.marketId
+                  );
+                mmrBps = Number(res2[0]);
+                fillRatio = res2[1];
+                hasPos2 = res2[2];
+              }
+              if (hasPos2) {
+                const baseBps = Number(await this.contracts.vault.baseMmrBps());
+                const penaltyBps = Number(
+                  await this.contracts.vault.penaltyMmrBps()
+                );
+                const fixedBps = baseBps + penaltyBps;
+                const totalBps = Number(mmrBps);
+                const dynamicBps = Math.max(0, totalBps - fixedBps);
+
+                const fixedPct = (fixedBps / 100).toFixed(2) + "%";
+                const dynamicPct = (dynamicBps / 100).toFixed(2) + "%";
+                const totalPct = (totalBps / 100).toFixed(2) + "%";
+                // fillRatio is 1e18-scaled
+                const fillPct = (
+                  Number(BigInt(fillRatio.toString())) / 1e16
+                ).toFixed(2);
+                const gapPct = gapRatio
+                  ? (Number(BigInt(gapRatio.toString())) / 1e16).toFixed(2)
+                  : "0.00";
+                mmrBreakdown = `${fixedPct} + ${dynamicPct} = ${totalPct} (fill ${fillPct}%, gap ${gapPct}%)`;
+              }
+            } catch (_) {}
+
             console.log(
               colorText(
                 `│ ${marketIdStr}: ${colorText(
@@ -5501,6 +5554,12 @@ ${colors.brightRed}└───────────────────�
                 colors.white
               )
             );
+            // Show MMR breakdown on a second line for clarity
+            if (mmrBreakdown !== "N/A") {
+              console.log(
+                colorText(`│ MMR: ${mmrBreakdown.padEnd(68)} │`, colors.dim)
+              );
+            }
           } catch (error) {
             console.log(
               colorText(
@@ -7583,28 +7642,17 @@ ${colors.brightRed}└───────────────────�
             const pnlColor = positionPnL >= 0 ? colors.green : colors.red;
             const pnlSign = positionPnL >= 0 ? "+" : "";
 
-            // Compute indicative liquidation price
+            // Compute liquidation price from on-chain view
             let liqDisplay = "N/A";
             try {
-              if (positionSize < 0n) {
-                let mmBps = 1000; // Hard-coded 10% maintenance margin
-                try {
-                  if (
-                    typeof this.contracts.vault.maintenanceMarginBps ===
-                    "function"
-                  ) {
-                    mmBps = Number(
-                      await this.contracts.vault.maintenanceMarginBps(
-                        position.marketId
-                      )
-                    );
-                  }
-                } catch (_) {}
-                const m = mmBps / 10000;
-                const pLiq = (2.5 * entryPriceNum) / (1 + m);
-                liqDisplay = pLiq.toFixed(2);
-              } else if (positionSize > 0n) {
-                liqDisplay = "0.00";
+              const [liqPrice, hasPos] =
+                await this.contracts.vault.getLiquidationPrice(
+                  this.currentUser.address,
+                  position.marketId
+                );
+              if (hasPos) {
+                const liqBn = BigInt(liqPrice.toString());
+                liqDisplay = liqBn > 0n ? formatPrice(liqBn, 6, 2) : "0.00";
               }
             } catch (_) {}
 

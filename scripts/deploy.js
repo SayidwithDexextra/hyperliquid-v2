@@ -175,6 +175,16 @@ async function main() {
       contracts.FUTURES_MARKET_FACTORY
     );
 
+    // Set global MMR: 10% fixed + up to 10% dynamic (fill), 20% cap, and enable gap sensitivity (e.g., up to +5%)
+    console.log(
+      "     → Setting global MMR params (10% fixed + up to 10% dynamic, 20% cap, gap-sensitive)..."
+    );
+    // Use advanced setter to include priceGapSlopeBps (500 = up to +5% when gap=100%)
+    await coreVault.setMmrParamsAdvanced(0, 1000, 2000, 1000, 5, 500);
+    console.log(
+      "     ✅ MMR params set: fixed=10%, dynamic(fill) up to +10%, gap up to +5% (cap=20%)"
+    );
+
     console.log("     ✅ All modular roles granted successfully!");
 
     // ============================================

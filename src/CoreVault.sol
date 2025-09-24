@@ -13,6 +13,12 @@ import "./PositionManager.sol";
 interface IOrderBook {
     function calculateMarkPrice() external view returns (uint256);
     function clearUserPosition(address user) external;
+    function getOrderBookDepth(uint256 levels) external view returns (
+        uint256[] memory bidPrices,
+        uint256[] memory bidAmounts,
+        uint256[] memory askPrices,
+        uint256[] memory askAmounts
+    );
 }
 
 /**
@@ -69,8 +75,16 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     mapping(address => bytes32[]) public orderBookToMarkets;
     address[] public allOrderBooks;
     mapping(bytes32 => uint256) public marketMarkPrices;
-    // Hard-coded 10% maintenance margin for all markets (1000 basis points)
-    uint256 public constant MAINTENANCE_MARGIN_BPS = 1000;
+    // ===== Dynamic Maintenance Margin (MMR) Parameters =====
+    // BASE_MMR_BPS (default 10%) + PENALTY_MMR_BPS (default 10%) + f(fill_ratio) capped by MAX_MMR_BPS (default 50%)
+    uint256 public baseMmrBps = 1000;           // 10%
+    uint256 public penaltyMmrBps = 1000;        // +10% hard floor uplift
+    uint256 public maxMmrBps = 5000;            // 50% cap
+    // Linear scaling slopes
+    uint256 public scalingSlopeBps = 1000;      // +10% at full fill ratio (size/liquidity)
+    uint256 public priceGapSlopeBps = 0;        // +0% by default (enable to add price-gap sensitivity)
+    // Liquidity sampling depth for fill_ratio computation (best N levels)
+    uint256 public mmrLiquidityDepthLevels = 5; // 5 levels by default
     
     // Global stats
     uint256 public totalCollateralDeposited;
@@ -770,10 +784,11 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
      * @param marketId Market identifier (unused, kept for compatibility)
      * @return Maintenance margin in basis points
      */
-    function maintenanceMarginBps(bytes32 marketId) external pure returns (uint256) {
-        // Silence unused parameter warning
-        marketId;
-        return MAINTENANCE_MARGIN_BPS;
+    function maintenanceMarginBps(bytes32 marketId) external view returns (uint256) {
+        // Backwards-compatible helper: return base + penalty as indicative floor for this market
+        marketId; // unused
+        uint256 floorBps = baseMmrBps + penaltyMmrBps;
+        return floorBps > maxMmrBps ? maxMmrBps : floorBps;
     }
 
     function deregisterOrderBook(address orderBook) external onlyRole(FACTORY_ROLE) {
@@ -815,10 +830,11 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         PositionManager.Position[] storage positions = userPositions[user];
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size != 0) {
-                // Calculate maintenance requirement (6 decimals)
+                // Calculate maintenance requirement (6 decimals) with dynamic MMR
+                (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
                 uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
                 uint256 notional6 = (absSize * markPrice) / (10**18);
-                uint256 maintenance6 = (notional6 * MAINTENANCE_MARGIN_BPS) / 10000;
+                uint256 maintenance6 = (notional6 * mmrBps) / 10000;
 
                 // Calculate equity for this position in 6 decimals
                 int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
@@ -865,17 +881,18 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 // E/Q in 6 decimals: (equity6 * 1e18) / absSize
                 int256 eOverQ6 = (equity6 * int256(1e18)) / int256(absSize);
 
+                (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
                 if (positions[i].size > 0) {
                     // Long liquidation price: ((P_now - E/Q) * 10000) / (10000 - MMR)
                     int256 numerator = int256(markPrice) - eOverQ6;
-                    uint256 denomBps = 10000 - MAINTENANCE_MARGIN_BPS;
+                    uint256 denomBps = 10000 - mmrBps;
                     if (denomBps == 0) return (0, true);
                     int256 liqSigned = (numerator * int256(10000)) / int256(denomBps);
                     liquidationPrice = liqSigned > 0 ? uint256(liqSigned) : 0;
                 } else {
                     // Short liquidation price: ((P_now + E/Q) * 10000) / (10000 + MMR)
                     int256 numerator = int256(markPrice) + eOverQ6;
-                    uint256 denomBps = 10000 + MAINTENANCE_MARGIN_BPS;
+                    uint256 denomBps = 10000 + mmrBps;
                     int256 liqSigned = (numerator * int256(10000)) / int256(denomBps);
                     liquidationPrice = liqSigned > 0 ? uint256(liqSigned) : 0;
                 }
@@ -925,7 +942,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 uint256 markPrice = getMarkPrice(marketId);
                 uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
                 uint256 notional6 = (absSize * markPrice) / (10**18);
-                maintenance6 = (notional6 * MAINTENANCE_MARGIN_BPS) / 10000;
+                (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
+                maintenance6 = (notional6 * mmrBps) / 10000;
 
                 int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
                 int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
@@ -941,6 +959,219 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             }
         }
         return (0, 0, false);
+    }
+
+    /**
+     * @dev Public view: get effective MMR (bps) and fill ratio (1e18) for a user's position.
+     */
+    function getEffectiveMaintenanceMarginBps(
+        address user,
+        bytes32 marketId
+    ) external view returns (uint256 mmrBps, uint256 fillRatio1e18, bool hasPosition) {
+        PositionManager.Position[] storage positions = userPositions[user];
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size != 0) {
+                hasPosition = true;
+                (mmrBps, fillRatio1e18) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
+                return (mmrBps, fillRatio1e18, true);
+            }
+        }
+        return (0, 0, false);
+    }
+
+    function getEffectiveMaintenanceDetails(
+        address user,
+        bytes32 marketId
+    ) external view returns (uint256 mmrBps, uint256 fillRatio1e18, uint256 gapRatio1e18, bool hasPosition) {
+        PositionManager.Position[] storage positions = userPositions[user];
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size != 0) {
+                hasPosition = true;
+                (mmrBps, fillRatio1e18, gapRatio1e18) = _computeEffectiveMMRMetrics(user, marketId, positions[i].size);
+                return (mmrBps, fillRatio1e18, gapRatio1e18, true);
+            }
+        }
+        return (0, 0, 0, false);
+    }
+
+    // ===== Dynamic MMR internal helpers =====
+    function _computeEffectiveMMRMetrics(
+        address /*user*/, // reserved for future per-user risk adjustments
+        bytes32 marketId,
+        int256 positionSize
+    ) internal view returns (uint256 mmrBps, uint256 fillRatio1e18, uint256 gapRatio1e18) {
+        // Base + penalty
+        uint256 mmr = baseMmrBps + penaltyMmrBps;
+
+        // Determine direction and absolute size
+        bool isLong = positionSize > 0;
+        uint256 absSize = uint256(positionSize > 0 ? positionSize : -positionSize);
+
+        // Pull depth once
+        address obAddr = marketToOrderBook[marketId];
+        uint256 sumOpposite;
+        uint256 remaining = absSize;
+        uint256 vwapNumerator; // price(6) * amount(18)
+        uint256 markPrice = getMarkPrice(marketId);
+        uint256 vwapPrice = 0;
+
+        if (obAddr != address(0)) {
+            try IOrderBook(obAddr).getOrderBookDepth(mmrLiquidityDepthLevels) returns (
+                uint256[] memory bidPrices,
+                uint256[] memory bidAmounts,
+                uint256[] memory askPrices,
+                uint256[] memory askAmounts
+            ) {
+                if (isLong) {
+                    // Closing long → sell into bids
+                    for (uint256 i = 0; i < bidAmounts.length; i++) {
+                        uint256 amt = bidAmounts[i];
+                        sumOpposite += amt;
+                        uint256 take = remaining < amt ? remaining : amt;
+                        if (take > 0) {
+                            vwapNumerator += bidPrices[i] * take;
+                            remaining -= take;
+                            if (remaining == 0) {
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    // Closing short → buy from asks
+                    for (uint256 j = 0; j < askAmounts.length; j++) {
+                        uint256 amt = askAmounts[j];
+                        sumOpposite += amt;
+                        uint256 take = remaining < amt ? remaining : amt;
+                        if (take > 0) {
+                            vwapNumerator += askPrices[j] * take;
+                            remaining -= take;
+                            if (remaining == 0) {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (absSize > 0) {
+                    if (vwapNumerator > 0) {
+                        vwapPrice = vwapNumerator / (absSize - remaining);
+                    }
+                }
+            } catch {}
+        }
+
+        // Compute fill ratio based on opposite-side liquidity depth
+        if (sumOpposite == 0) {
+            fillRatio1e18 = 1e18; // No liquidity → max risk
+        } else {
+            uint256 numerator = absSize * 1e18;
+            fillRatio1e18 = numerator / sumOpposite;
+            if (fillRatio1e18 > 1e18) fillRatio1e18 = 1e18;
+        }
+
+        // Price gap sensitivity (relative to current mark)
+        gapRatio1e18 = 0;
+        if (markPrice > 0 && vwapPrice > 0) {
+            if (isLong) {
+                // Adverse for long closes is lower price than mark
+                if (vwapPrice < markPrice) {
+                    gapRatio1e18 = ((markPrice - vwapPrice) * 1e18) / markPrice;
+                }
+            } else {
+                // Adverse for short closes is higher price than mark
+                if (vwapPrice > markPrice) {
+                    gapRatio1e18 = ((vwapPrice - markPrice) * 1e18) / markPrice;
+                }
+            }
+            if (gapRatio1e18 > 1e18) gapRatio1e18 = 1e18;
+        } else if (sumOpposite == 0) {
+            // No liquidity → treat as max price gap risk
+            gapRatio1e18 = 1e18;
+        }
+
+        // Linear scaling components
+        uint256 scalingFill = (scalingSlopeBps * fillRatio1e18) / 1e18;
+        uint256 scalingGap = (priceGapSlopeBps * gapRatio1e18) / 1e18;
+        mmr += scalingFill + scalingGap;
+        if (mmr > maxMmrBps) mmr = maxMmrBps;
+        return (mmr, fillRatio1e18, gapRatio1e18);
+    }
+
+    function _computeEffectiveMMRBps(
+        address user,
+        bytes32 marketId,
+        int256 positionSize
+    ) internal view returns (uint256 mmrBps, uint256 fillRatio1e18) {
+        (uint256 m, uint256 f, ) = _computeEffectiveMMRMetrics(user, marketId, positionSize);
+        return (m, f);
+    }
+
+    function _getCloseLiquidity(bytes32 marketId, uint256 /*absSize*/) internal view returns (uint256 liquidity18) {
+        address obAddr = marketToOrderBook[marketId];
+        if (obAddr == address(0)) return 0;
+        // Attempt to get depth; if it fails, return 0 to enforce max risk
+        try IOrderBook(obAddr).getOrderBookDepth(mmrLiquidityDepthLevels) returns (
+            uint256[] memory bidPrices,
+            uint256[] memory bidAmounts,
+            uint256[] memory askPrices,
+            uint256[] memory askAmounts
+        ) {
+            // For simplicity, approximate close direction using current best prices
+            // If bestBid is nonzero and bestAsk is max, treat as one-sided; we sum both sides anyway for robustness
+            // We cannot know position direction here; use total opposite side relative to worst-case. 
+            // Heuristic: use max of aggregated bids and aggregated asks as available liquidity proxy
+            uint256 sumBids;
+            for (uint256 i = 0; i < bidAmounts.length; i++) {
+                sumBids += bidAmounts[i];
+            }
+            uint256 sumAsks;
+            for (uint256 j = 0; j < askAmounts.length; j++) {
+                sumAsks += askAmounts[j];
+            }
+            // Use larger of sides as proxy market liquidity for stability
+            liquidity18 = sumBids > sumAsks ? sumBids : sumAsks;
+            return liquidity18;
+        } catch {
+            return 0;
+        }
+    }
+
+    // ===== Admin setters for dynamic MMR parameters =====
+    function setMmrParams(
+        uint256 _baseMmrBps,
+        uint256 _penaltyMmrBps,
+        uint256 _maxMmrBps,
+        uint256 _scalingSlopeBps,
+        uint256 _liquidityDepthLevels
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_baseMmrBps <= 10000 && _penaltyMmrBps <= 10000 && _maxMmrBps <= 10000, "bps!");
+        require(_liquidityDepthLevels > 0 && _liquidityDepthLevels <= 50, "depth!");
+        baseMmrBps = _baseMmrBps;
+        penaltyMmrBps = _penaltyMmrBps;
+        maxMmrBps = _maxMmrBps;
+        scalingSlopeBps = _scalingSlopeBps;
+        mmrLiquidityDepthLevels = _liquidityDepthLevels;
+    }
+
+    /**
+     * @dev Advanced MMR params including price gap sensitivity slope (bps at 100% gap).
+     */
+    function setMmrParamsAdvanced(
+        uint256 _baseMmrBps,
+        uint256 _penaltyMmrBps,
+        uint256 _maxMmrBps,
+        uint256 _scalingSlopeBps,
+        uint256 _liquidityDepthLevels,
+        uint256 _priceGapSlopeBps
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_baseMmrBps <= 10000 && _penaltyMmrBps <= 10000 && _maxMmrBps <= 10000, "bps!");
+        require(_liquidityDepthLevels > 0 && _liquidityDepthLevels <= 50, "depth!");
+        baseMmrBps = _baseMmrBps;
+        penaltyMmrBps = _penaltyMmrBps;
+        maxMmrBps = _maxMmrBps;
+        scalingSlopeBps = _scalingSlopeBps;
+        mmrLiquidityDepthLevels = _liquidityDepthLevels;
+        priceGapSlopeBps = _priceGapSlopeBps;
     }
 
     function liquidateShort(
