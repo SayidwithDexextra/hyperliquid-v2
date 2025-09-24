@@ -35,7 +35,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     bytes32 public constant FACTORY_ROLE = keccak256("FACTORY_ROLE");
 
     // ============ Constants ============
-    uint256 public constant LIQUIDATION_PENALTY_BPS = 500; // 5%
+    uint256 public constant LIQUIDATION_PENALTY_BPS = 1000; // 10%
     uint256 public constant SHORT_MARGIN_REQUIREMENT_BPS = 1500; // 150%
     uint256 public constant LONG_MARGIN_REQUIREMENT_BPS = 1000; // 100%
     uint256 public constant DECIMAL_SCALE = 1e12; // 10^(ALU_DECIMALS - USDC_DECIMALS)
@@ -102,6 +102,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     event MarketAuthorized(bytes32 indexed marketId, address indexed orderBook);
     event LiquidationExecuted(address indexed user, bytes32 indexed marketId, address indexed liquidator, uint256 totalLoss, uint256 remainingCollateral);
     event MarginConfiscated(address indexed user, uint256 marginAmount, uint256 totalLoss, uint256 penalty, address indexed liquidator);
+    event LiquidatorRewardPaid(address indexed liquidator, address indexed liquidatedUser, bytes32 indexed marketId, uint256 rewardAmount);
     event PositionUpdated(address indexed user, bytes32 indexed marketId, int256 oldSize, int256 newSize, uint256 entryPrice, uint256 marginLocked);
     event SocializedLossApplied(bytes32 indexed marketId, uint256 lossAmount, address indexed liquidatedUser);
     
@@ -290,28 +291,25 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 
                 // Apply liquidation penalty
                 uint256 penalty = (marginToConfiscate * LIQUIDATION_PENALTY_BPS) / 10000;
-                uint256 totalLoss = tradingLoss + penalty;
+                uint256 actualLoss = tradingLoss + penalty;
                 
-                // Calculate uncovered loss for ADL
-                uint256 coveredByUser = totalLoss > userCollateral[user] ? userCollateral[user] : totalLoss;
-                uint256 uncoveredLoss = totalLoss - coveredByUser;
-                totalLoss = coveredByUser; // Only take what user can cover
+                // POLICY: Only locked margin may be seized. Do not dip into available collateral.
+                uint256 seizableFromLocked = actualLoss > marginToConfiscate ? marginToConfiscate : actualLoss;
+                uint256 uncoveredLoss = actualLoss - seizableFromLocked;
                 
                 // Confiscate the margin and apply losses
-                if (totalLoss > 0) {
-                    userCollateral[user] -= totalLoss;
+                if (seizableFromLocked > 0) {
+                    userCollateral[user] -= seizableFromLocked;
                     
-                    // Give liquidator the penalty portion only
-                    uint256 liquidatorReward = penalty;
-                    if (liquidatorReward > totalLoss) {
-                        liquidatorReward = totalLoss;
-                    }
+                    // Give liquidator the penalty portion only (bounded by seized amount)
+                    uint256 liquidatorReward = penalty > seizableFromLocked ? seizableFromLocked : penalty;
                     if (liquidatorReward > 0) {
                         userCollateral[liquidator] += liquidatorReward;
+                        emit LiquidatorRewardPaid(liquidator, user, marketId, liquidatorReward);
                     }
                     
                     // Emit event to track actual margin confiscation
-                    emit MarginConfiscated(user, marginToConfiscate, totalLoss, penalty, liquidator);
+                    emit MarginConfiscated(user, marginToConfiscate, seizableFromLocked, penalty, liquidator);
                 }
                 
                 // CRITICAL FIX: Manually update position without releasing margin
@@ -383,7 +381,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                     _socializeLoss(marketId, uncoveredLoss, user);
                 }
                 
-                emit LiquidationExecuted(user, marketId, liquidator, totalLoss, userCollateral[user]);
+                emit LiquidationExecuted(user, marketId, liquidator, seizableFromLocked, userCollateral[user]);
                 emit PositionUpdated(user, marketId, oldSize, newSize, entryPrice, newSize == 0 ? 0 : positions[i].marginLocked);
                 return;
             }
@@ -1201,19 +1199,17 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             uint256 penalty = (locked * LIQUIDATION_PENALTY_BPS) / 10000;
             uint256 actualLoss = tradingLoss + penalty;
             
-            // Calculate how much the user can actually cover from their collateral
-            uint256 coveredByUser = actualLoss > userCollateral[user] ? userCollateral[user] : actualLoss;
-            uint256 uncoveredLoss = actualLoss - coveredByUser;
+            // POLICY: Only seized from locked margin (not total collateral)
+            uint256 seizableFromLocked = actualLoss > locked ? locked : actualLoss;
+            uint256 uncoveredLoss = actualLoss - seizableFromLocked;
             
-            if (coveredByUser > 0) {
-                userCollateral[user] -= coveredByUser;
-                // Give liquidator the penalty portion only, trading loss is socialized
-                uint256 liquidatorReward = penalty;
-                if (liquidatorReward > coveredByUser) {
-                    liquidatorReward = coveredByUser;
-                }
+            if (seizableFromLocked > 0) {
+                userCollateral[user] -= seizableFromLocked;
+                // Give liquidator the penalty portion only, bounded by seized amount
+                uint256 liquidatorReward = penalty > seizableFromLocked ? seizableFromLocked : penalty;
                 if (liquidatorReward > 0) {
                     userCollateral[liquidator] += liquidatorReward;
+                    emit LiquidatorRewardPaid(liquidator, user, marketId, liquidatorReward);
                 }
             }
 
@@ -1242,7 +1238,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                     _socializeLoss(marketId, uncoveredLoss, user);
                 }
 
-                emit LiquidationExecuted(user, marketId, liquidator, coveredByUser, userCollateral[user]);
+                emit LiquidationExecuted(user, marketId, liquidator, seizableFromLocked, userCollateral[user]);
                 emit PositionUpdated(user, marketId, oldSize, 0, entryPrice, 0);
                 return;
             }
@@ -1277,19 +1273,17 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             uint256 penalty = (locked * LIQUIDATION_PENALTY_BPS) / 10000;
             uint256 actualLoss = tradingLoss + penalty;
             
-            // Calculate how much the user can actually cover from their collateral
-            uint256 coveredByUser = actualLoss > userCollateral[user] ? userCollateral[user] : actualLoss;
-            uint256 uncoveredLoss = actualLoss - coveredByUser;
+            // POLICY: Only seized from locked margin (not total collateral)
+            uint256 seizableFromLocked = actualLoss > locked ? locked : actualLoss;
+            uint256 uncoveredLoss = actualLoss - seizableFromLocked;
             
-            if (coveredByUser > 0) {
-                userCollateral[user] -= coveredByUser;
-                // Give liquidator the penalty portion only, trading loss is socialized
-                uint256 liquidatorReward = penalty;
-                if (liquidatorReward > coveredByUser) {
-                    liquidatorReward = coveredByUser;
-                }
+            if (seizableFromLocked > 0) {
+                userCollateral[user] -= seizableFromLocked;
+                // Give liquidator the penalty portion only, bounded by seized amount
+                uint256 liquidatorReward = penalty > seizableFromLocked ? seizableFromLocked : penalty;
                 if (liquidatorReward > 0) {
                     userCollateral[liquidator] += liquidatorReward;
+                    emit LiquidatorRewardPaid(liquidator, user, marketId, liquidatorReward);
                 }
             }
 
@@ -1316,7 +1310,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                     _socializeLoss(marketId, uncoveredLoss, user);
                 }
 
-                emit LiquidationExecuted(user, marketId, liquidator, coveredByUser, userCollateral[user]);
+                emit LiquidationExecuted(user, marketId, liquidator, seizableFromLocked, userCollateral[user]);
                 emit PositionUpdated(user, marketId, oldSize, 0, entryPrice, 0);
                 return;
             }

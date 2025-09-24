@@ -596,12 +596,12 @@ contract OrderBook {
         try vault.getUnifiedMarginSummary(trader) returns (
             uint256 totalCollateral,
             uint256 marginUsed,
-            uint256 marginReserved,
+            uint256 /*marginReserved*/,
             uint256 availableMargin,
-            int256 realizedPnL,
-            int256 unrealizedPnL,
-            uint256 totalMarginCommitted,
-            bool isMarginHealthy
+            int256 /*realizedPnL*/,
+            int256 /*unrealizedPnL*/,
+            uint256 /*totalMarginCommitted*/,
+            bool /*isMarginHealthy*/
         ) {
             // ============ CRITICAL FIX: ENSURE VAULT LIQUIDATION PROCESSING ============
             // Layer 1: Process the actual liquidation through the vault first
@@ -620,8 +620,8 @@ contract OrderBook {
                 try vault.liquidateLong(trader, marketId, address(this)) {
                     vaultLiquidationSuccess = true;
                     emit LiquidationPositionProcessed(trader, positionSize, executionResult.averageExecutionPrice);
-                } catch (bytes memory reason) {
-                    emit LiquidationProcessingFailed(trader, reason);
+                } catch (bytes memory /*reason*/) {
+                    emit LiquidationProcessingFailed(trader, "LIQ_LONG_FAIL");
                 }
             } else {
                 // Short position liquidation  
@@ -635,15 +635,15 @@ contract OrderBook {
                     vaultLiquidationSuccess = true;
                     emit LiquidationPositionProcessed(trader, positionSize, executionResult.averageExecutionPrice);
                     emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort_SUCCESS");
-                } catch (bytes memory reason) {
-                    emit LiquidationProcessingFailed(trader, reason);
+                } catch (bytes memory /*reason*/) {
+                    emit LiquidationProcessingFailed(trader, "LIQ_SHORT_FAIL");
                     emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort_FAILED");
                 }
             }
             
             // Get updated margin info after vault processing
             if (vaultLiquidationSuccess) {
-                try vault.getPositionSummary(trader, marketId) returns (int256 newSize, uint256 newEntryPrice, uint256 newMarginLocked) {
+                try vault.getPositionSummary(trader, marketId) returns (int256 /*newSize*/, uint256 /*newEntryPrice*/, uint256 newMarginLocked) {
                     layer1LockedMargin = newMarginLocked; // This reflects what was actually confiscated
                 } catch {
                     layer1LockedMargin = marginUsed; // Fallback to original estimate
@@ -653,30 +653,8 @@ contract OrderBook {
                 layer1LockedMargin = marginUsed;
             }
             
-            // Layer 2: Use available collateral to cover any additional gap loss
-            // Note: The vault's liquidation processing above may have already triggered ADL
-            // if the user's total collateral was insufficient for the base liquidation loss
-            if (gapLoss > 0 && availableMargin > 0) {
-                uint256 availableForGapCoverage = availableMargin;
-                uint256 gapCoveredByAvailable = gapLoss < availableForGapCoverage ? gapLoss : availableForGapCoverage;
-                
-                if (gapCoveredByAvailable > 0) {
-                    // Deduct from user's available collateral via vault
-                    try vault.confiscateAvailableCollateralForGapLoss(trader, gapCoveredByAvailable) {
-                        layer2AvailableCollateral = gapCoveredByAvailable;
-                        gapLoss -= gapCoveredByAvailable;
-                        
-                        emit LiquidationAvailableCollateralUsed(
-                            trader,
-                            gapCoveredByAvailable,
-                            availableMargin - gapCoveredByAvailable,
-                            gapCoveredByAvailable
-                        );
-                    } catch {
-                        // Available collateral confiscation failed - proceed to socialization
-                    }
-                }
-            }
+            // Layer 2: Disabled by policy — do not confiscate user's available collateral for gap loss
+            // Any remaining gapLoss must be socialized via ADL and not taken from free collateral
             
             // Layer 3: Socialize any remaining gap loss
             if (gapLoss > 0) {
@@ -1043,7 +1021,7 @@ contract OrderBook {
      */
     event LiquidationProcessingFailed(
         address indexed trader,
-        bytes reason
+        string reason
     );
     
     // Debug event for liquidation flow tracing

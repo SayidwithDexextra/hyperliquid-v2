@@ -1187,6 +1187,85 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             );
           }
         );
+
+        // Listen for dedicated liquidator reward event
+        this.contracts.vault.on(
+          "LiquidatorRewardPaid",
+          (liquidator, liquidatedUser, marketId, rewardAmount, event) => {
+            // Raw parameter log for traceability
+            try {
+              console.log("[Event] LiquidatorRewardPaid", {
+                liquidator,
+                liquidatedUser,
+                marketId,
+                rewardAmount:
+                  typeof rewardAmount === "bigint"
+                    ? rewardAmount.toString()
+                    : rewardAmount,
+                txHash:
+                  event && event.transactionHash
+                    ? event.transactionHash
+                    : undefined,
+              });
+            } catch (e) {
+              console.log("[Event] LiquidatorRewardPaid (log error)", e);
+            }
+
+            const timestamp = new Date().toLocaleTimeString();
+            const liquidatorType = this.formatUserDisplay(liquidator);
+            const userType = this.formatUserDisplay(liquidatedUser);
+            const rewardFormatted = formatWithAutoDecimalDetection(
+              rewardAmount,
+              6,
+              4
+            );
+
+            const notification = `
+${colors.bgGreen}${colors.black}${
+              colors.bright
+            }           🏆 LIQUIDATOR REWARD PAID            ${colors.reset}
+${
+  colors.brightGreen
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.brightYellow}🏦 Market:${
+              colors.reset
+            } ${this.getMarketDisplayName(marketId)} ${
+              colors.dim
+            }at ${timestamp}${colors.reset}      ${colors.brightGreen}│${
+              colors.reset
+            }
+${colors.brightGreen}│${colors.reset} ${colors.brightGreen}🎯 Liquidator:${
+              colors.reset
+            } ${liquidatorType.padEnd(16)}                 ${
+              colors.brightGreen
+            }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.brightMagenta}👤 Liquidated:${
+              colors.reset
+            } ${userType.padEnd(16)}                 ${colors.brightGreen}│${
+              colors.reset
+            }
+${colors.brightGreen}│${colors.reset} ${colors.brightCyan}💸 Reward:${
+              colors.reset
+            } $${rewardFormatted} USDC                        ${
+              colors.brightGreen
+            }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${
+              colors.dim
+            }Tx: ${event.transactionHash.slice(
+              0,
+              10
+            )}...                              ${colors.brightGreen}│${
+              colors.reset
+            }
+${
+  colors.brightGreen
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+            `;
+
+            console.log(notification);
+            process.stdout.write("\x07");
+          }
+        );
       }
 
       // ============ ADL + LIQUIDATION DEBUG EVENT LISTENERS ACTIVE ============
@@ -1196,7 +1275,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           colors.brightYellow
         )
       );
-
       if (this.contracts.vault) {
         this.contracts.vault.on(
           "SocializationStarted",
@@ -2879,6 +2957,79 @@ ${colors.brightRed}└───────────────────�
 
     // Play a strong confiscation sound notification (if terminal supports it)
     process.stdout.write("\x07\x07\x07"); // Triple beep for CoreVault confiscation
+  }
+
+  handleLiquidatorRewardPaidEvent(
+    liquidator,
+    liquidatedUser,
+    marketId,
+    rewardAmount,
+    event
+  ) {
+    // Raw parameter log for traceability
+    try {
+      console.log("[Event] LiquidatorRewardPaid", {
+        liquidator,
+        liquidatedUser,
+        marketId,
+        rewardAmount:
+          typeof rewardAmount === "bigint"
+            ? rewardAmount.toString()
+            : rewardAmount,
+        txHash:
+          event && event.transactionHash ? event.transactionHash : undefined,
+      });
+    } catch (e) {
+      console.log("[Event] LiquidatorRewardPaid (log error)", e);
+    }
+
+    const timestamp = new Date().toLocaleTimeString();
+    const liquidatorType = this.formatUserDisplay(liquidator);
+    const userType = this.formatUserDisplay(liquidatedUser);
+    const rewardBigInt =
+      typeof rewardAmount === "bigint" ? rewardAmount : BigInt(rewardAmount);
+    const rewardFormatted = formatUSDC(rewardBigInt, 4);
+
+    const notification = `
+${colors.bgGreen}${colors.black}${
+      colors.bright
+    }           🏆 LIQUIDATOR REWARD PAID            ${colors.reset}
+${
+  colors.brightGreen
+}┌─────────────────────────────────────────────────────────┐${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.brightYellow}🏦 Market:${
+      colors.reset
+    } ${this.getMarketDisplayName(marketId)} ${colors.dim}at ${timestamp}${
+      colors.reset
+    }      ${colors.brightGreen}│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.brightGreen}🎯 Liquidator:${
+      colors.reset
+    } ${liquidatorType.padEnd(16)}                 ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${colors.reset} ${colors.brightMagenta}👤 Liquidated:${
+      colors.reset
+    } ${userType.padEnd(16)}                 ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${colors.reset} ${colors.brightCyan}💸 Reward:${
+      colors.reset
+    } $${rewardFormatted} USDC                        ${colors.brightGreen}│${
+      colors.reset
+    }
+${colors.brightGreen}│${colors.reset} ${
+      colors.dim
+    }Tx: ${event.transactionHash.slice(
+      0,
+      10
+    )}...                              ${colors.brightGreen}│${colors.reset}
+${
+  colors.brightGreen
+}└─────────────────────────────────────────────────────────┘${colors.reset}
+    `;
+
+    console.log(notification);
+    process.stdout.write("\x07");
   }
 
   // ============ NEW: Administrative Position Closure (ADL) Event Handlers ============
@@ -4592,7 +4743,6 @@ ${colors.brightRed}└───────────────────�
     );
     console.log(gradient("═".repeat(80)));
   }
-
   async displayPortfolio() {
     try {
       // Get comprehensive portfolio data
@@ -5346,7 +5496,6 @@ ${colors.brightRed}└───────────────────�
       );
     }
   }
-
   // Helper function to get enhanced order book data with trader information
   async getEnhancedOrderBookDepth(depth) {
     const [bidPrices, bidAmounts, askPrices, askAmounts] =
@@ -6100,7 +6249,6 @@ ${colors.brightRed}└───────────────────�
 
     await this.pause(3000);
   }
-
   async placeMarketOrder(isBuy) {
     console.clear();
     console.log(
@@ -6877,7 +7025,6 @@ ${colors.brightRed}└───────────────────�
       colorText("\n📱 Press Enter to continue...", colors.dim)
     );
   }
-
   async cancelOrder() {
     console.clear();
     console.log(boxText("❌ CANCEL ORDER", colors.magenta));
@@ -7514,7 +7661,6 @@ ${colors.brightRed}└───────────────────�
       colorText("\n📱 Press Enter to continue...", colors.dim)
     );
   }
-
   async viewOpenPositions() {
     console.clear();
     console.log(boxText("📊 OPEN POSITIONS OVERVIEW", colors.brightCyan));
@@ -8247,7 +8393,6 @@ ${colors.brightRed}└───────────────────�
 
     await this.pause(3000);
   }
-
   async manageCollateral() {
     console.clear();
     console.log(boxText("🏦 COLLATERAL MANAGEMENT", colors.blue));
@@ -8938,7 +9083,6 @@ ${colors.brightRed}└───────────────────�
       colorText("\n📱 Press Enter to continue...", colors.dim)
     );
   }
-
   async showMarketStatistics() {
     console.clear();
     console.log(boxText("📊 MARKET TRADE STATISTICS", colors.brightCyan));
