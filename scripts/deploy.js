@@ -26,7 +26,7 @@ const path = require("path");
 // Configuration
 const USDC_PER_USER = "10000"; // 10,000 USDC per user
 const COLLATERAL_PER_USER = "1000"; // 1,000 USDC collateral per user (default)
-const USER3_COLLATERAL = "1000"; // 15 USDC collateral for User 3
+const USER3_COLLATERAL = "15"; // 15 USDC collateral for User 3
 const NUM_USERS = 4; // Setup 4 trading accounts
 
 async function main() {
@@ -434,7 +434,7 @@ async function main() {
       console.log("     Side: SELL (limit order)");
 
       const user2 = signers[2]; // User2 is the 3rd signer
-      const user2Price = ethers.parseUnits("2.1", 6); // $2.50 in USDC (6 decimals)
+      const user2Price = ethers.parseUnits("2.2", 6); // $2.50 in USDC (6 decimals)
       const user2Amount = ethers.parseUnits("20", 18); // 20 ALU (18 decimals)
 
       const user2OrderTx = await orderBook.connect(user2).placeMarginLimitOrder(

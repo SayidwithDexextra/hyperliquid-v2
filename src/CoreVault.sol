@@ -223,6 +223,9 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         } else if (!result.positionExists) {
             PositionManager.addMarketIdToUser(userMarketIds[user], marketId);
         }
+
+        // Recompute and store fixed liquidation price for this position
+        _recomputeAndStoreLiquidationPrice(user, marketId);
     }
 
     /**
@@ -289,8 +292,10 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                     tradingLoss = (lossPerUnit * uint256(oldSize > 0 ? oldSize : -oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
                 }
                 
-                // Apply liquidation penalty
-                uint256 penalty = (marginToConfiscate * LIQUIDATION_PENALTY_BPS) / 10000;
+                // Apply liquidation penalty based on notional at execution price
+                uint256 absSizeExec = uint256(oldSize > 0 ? oldSize : -oldSize);
+                uint256 notional6Exec = (absSizeExec * executionPrice) / (10**18);
+                uint256 penalty = (notional6Exec * LIQUIDATION_PENALTY_BPS) / 10000;
                 uint256 actualLoss = tradingLoss + penalty;
                 
                 // POLICY: Only locked margin may be seized. Do not dip into available collateral.
@@ -379,6 +384,11 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 // 🔧 CRITICAL FIX: Trigger ADL for uncovered losses
                 if (uncoveredLoss > 0) {
                     _socializeLoss(marketId, uncoveredLoss, user);
+                }
+                
+                // Recompute fixed liquidation trigger for surviving position
+                if (newSize != 0) {
+                    _recomputeAndStoreLiquidationPrice(user, marketId);
                 }
                 
                 emit LiquidationExecuted(user, marketId, liquidator, seizableFromLocked, userCollateral[user]);
@@ -687,6 +697,9 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         }
         require(positionFound, "No position found for market");
         totalMarginLocked += amount;
+
+        // Recompute fixed liquidation trigger after top-up
+        _recomputeAndStoreLiquidationPrice(user, marketId);
     }
 
     // ===== Margin reservation API (compat with CentralizedVault) =====
@@ -828,19 +841,15 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         PositionManager.Position[] storage positions = userPositions[user];
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size != 0) {
-                // Calculate maintenance requirement (6 decimals) with dynamic MMR
-                (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
-                uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
-                uint256 notional6 = (absSize * markPrice) / (10**18);
-                uint256 maintenance6 = (notional6 * mmrBps) / 10000;
-
-                // Calculate equity for this position in 6 decimals
-                int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
-                int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
-                int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
-                int256 equity6 = int256(positions[i].marginLocked) + pnl6;
-
-                return equity6 < int256(maintenance6);
+                uint256 trigger = positions[i].liquidationPrice;
+                if (trigger == 0) return false; // not initialized yet
+                if (positions[i].size > 0) {
+                    // Long: liquidatable if mark <= trigger
+                    return markPrice <= trigger;
+                } else {
+                    // Short: liquidatable if mark >= trigger
+                    return markPrice >= trigger;
+                }
             }
         }
         return false;
@@ -861,43 +870,49 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size != 0) {
                 hasPosition = true;
-                uint256 markPrice = getMarkPrice(marketId);
-                if (markPrice == 0) {
-                    return (0, true);
-                }
+                return (positions[i].liquidationPrice, true);
+            }
+        }
+        return (0, false);
+    }
 
-                // Compute equity (6 decimals) and abs size
-                int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
+    // Recompute fixed liquidation trigger for a user's position in a market
+    function _recomputeAndStoreLiquidationPrice(address user, bytes32 marketId) internal {
+        PositionManager.Position[] storage positions = userPositions[user];
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size != 0) {
+                (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
+                // Solve for P where equity(P) == MMR * notional(P)
+                // equity6(P) = marginLocked + pnl6(P)
+                // pnl6(P) = ((P - entry) * size)/TICK / DECIMAL_SCALE
+                // notional6(P) = |size| * P / 1e18
+                // For longs and shorts derive algebraically; reuse current mark as placeholder to compute E/Q term then convert to fixed trigger.
+                // To avoid complex algebra here, approximate using current E/Q snapshot:
+                uint256 mark = getMarkPrice(marketId);
+                if (mark == 0) { mark = positions[i].entryPrice; }
+                int256 priceDiff = int256(mark) - int256(positions[i].entryPrice);
                 int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
                 int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
                 int256 equity6 = int256(positions[i].marginLocked) + pnl6;
                 uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
-                if (absSize == 0) {
-                    return (0, true);
-                }
-
-                // E/Q in 6 decimals: (equity6 * 1e18) / absSize
-                int256 eOverQ6 = (equity6 * int256(1e18)) / int256(absSize);
-
-                (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
+                if (absSize == 0) { positions[i].liquidationPrice = 0; return; }
+                int256 eOverQ6 = (equity6 * int256(1e18)) / int256(absSize); // 6 decimals scaled by 1e18/1e18 => 6
                 if (positions[i].size > 0) {
-                    // Long liquidation price: ((P_now - E/Q) * 10000) / (10000 - MMR)
-                    int256 numerator = int256(markPrice) - eOverQ6;
+                    // Long trigger: P_liq = ((P_now - E/Q) * 10000) / (10000 - MMR)
+                    int256 numerator = int256(mark) - eOverQ6;
                     uint256 denomBps = 10000 - mmrBps;
-                    if (denomBps == 0) return (0, true);
-                    int256 liqSigned = (numerator * int256(10000)) / int256(denomBps);
-                    liquidationPrice = liqSigned > 0 ? uint256(liqSigned) : 0;
+                    uint256 p = denomBps == 0 ? 0 : (uint256(numerator > 0 ? uint256(numerator) : 0) * 10000) / denomBps;
+                    positions[i].liquidationPrice = p;
                 } else {
-                    // Short liquidation price: ((P_now + E/Q) * 10000) / (10000 + MMR)
-                    int256 numerator = int256(markPrice) + eOverQ6;
+                    // Short trigger: P_liq = ((P_now + E/Q) * 10000) / (10000 + MMR)
+                    int256 numerator = int256(mark) + eOverQ6;
                     uint256 denomBps = 10000 + mmrBps;
-                    int256 liqSigned = (numerator * int256(10000)) / int256(denomBps);
-                    liquidationPrice = liqSigned > 0 ? uint256(liqSigned) : 0;
+                    uint256 p = (uint256(numerator > 0 ? uint256(numerator) : 0) * 10000) / denomBps;
+                    positions[i].liquidationPrice = p;
                 }
-                return (liquidationPrice, true);
+                return;
             }
         }
-        return (0, false);
     }
 
     /**
@@ -1195,8 +1210,10 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 tradingLoss = (lossPerUnit * uint256(-oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
             }
             
-            // Apply liquidation penalty on top of trading loss
-            uint256 penalty = (locked * LIQUIDATION_PENALTY_BPS) / 10000;
+            // Apply liquidation penalty (notional-based at current mark)
+            uint256 absSizeMark = uint256(-oldSize);
+            uint256 notional6 = (absSizeMark * markPrice) / (10**18);
+            uint256 penalty = (notional6 * LIQUIDATION_PENALTY_BPS) / 10000;
             uint256 actualLoss = tradingLoss + penalty;
             
             // POLICY: Only seized from locked margin (not total collateral)
@@ -1240,6 +1257,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
 
                 emit LiquidationExecuted(user, marketId, liquidator, seizableFromLocked, userCollateral[user]);
                 emit PositionUpdated(user, marketId, oldSize, 0, entryPrice, 0);
+                // No surviving position, nothing to recompute
                 return;
             }
         }
@@ -1269,8 +1287,10 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 tradingLoss = (lossPerUnit * uint256(oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
             }
             
-            // Apply liquidation penalty on top of trading loss
-            uint256 penalty = (locked * LIQUIDATION_PENALTY_BPS) / 10000;
+            // Apply liquidation penalty (notional-based at current mark)
+            uint256 absSizeMark = uint256(oldSize);
+            uint256 notional6 = (absSizeMark * markPrice) / (10**18);
+            uint256 penalty = (notional6 * LIQUIDATION_PENALTY_BPS) / 10000;
             uint256 actualLoss = tradingLoss + penalty;
             
             // POLICY: Only seized from locked margin (not total collateral)

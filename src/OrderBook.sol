@@ -2203,8 +2203,9 @@ contract OrderBook {
                 // Liquidation margin update succeeded - margin has been confiscated
                 // Get position info to emit debug event
                 try vault.getPositionSummary(user, marketId) returns (int256, uint256, uint256 marginLocked) {
-                    // Calculate penalty for debug event (using same logic as CoreVault)
-                    uint256 penalty = (marginLocked * 500) / 10000; // 5% liquidation penalty
+                    // Calculate penalty for debug event (align to notional-based; display only)
+                    uint256 absSize = uint256(marginLocked > 0 ? marginLocked : 0); // placeholder notional calc not available here
+                    uint256 penalty = (absSize * tradingFee) / 10000;
                     emit LiquidationMarginConfiscated(user, marginLocked, penalty, address(this));
                 } catch {
                     // Position summary failed, emit event with unknown values

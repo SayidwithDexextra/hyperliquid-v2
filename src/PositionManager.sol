@@ -23,6 +23,7 @@ library PositionManager {
         int256 size;
         uint256 entryPrice;
         uint256 marginLocked;
+        uint256 liquidationPrice; // Fixed trigger price (6 decimals)
     }
 
     struct NettingResult {
@@ -136,7 +137,8 @@ library PositionManager {
                 marketId: marketId,
                 size: sizeDelta,
                 entryPrice: executionPrice,
-                marginLocked: requiredMargin
+                marginLocked: requiredMargin,
+                liquidationPrice: 0
             }));
         }
         
@@ -218,7 +220,8 @@ library PositionManager {
                 marketId: marketId,
                 size: newSize,
                 entryPrice: newEntryPrice,
-                marginLocked: newMargin
+                marginLocked: newMargin,
+                liquidationPrice: 0
             }));
             // Margin now tracked exclusively in Position struct
         }
