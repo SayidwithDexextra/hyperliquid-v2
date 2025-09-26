@@ -1191,7 +1191,14 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         // Listen for dedicated liquidator reward event
         this.contracts.vault.on(
           "LiquidatorRewardPaid",
-          (liquidator, liquidatedUser, marketId, rewardAmount, event) => {
+          async (
+            liquidator,
+            liquidatedUser,
+            marketId,
+            rewardAmount,
+            liquidatorCollateral,
+            event
+          ) => {
             // Raw parameter log for traceability
             try {
               console.log("[Event] LiquidatorRewardPaid", {
@@ -1202,6 +1209,10 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
                   typeof rewardAmount === "bigint"
                     ? rewardAmount.toString()
                     : rewardAmount,
+                liquidatorCollateral:
+                  typeof liquidatorCollateral === "bigint"
+                    ? liquidatorCollateral.toString()
+                    : liquidatorCollateral,
                 txHash:
                   event && event.transactionHash
                     ? event.transactionHash
@@ -1214,11 +1225,54 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             const timestamp = new Date().toLocaleTimeString();
             const liquidatorType = this.formatUserDisplay(liquidator);
             const userType = this.formatUserDisplay(liquidatedUser);
-            const rewardFormatted = formatWithAutoDecimalDetection(
-              rewardAmount,
-              6,
+            const rewardFormatted = formatUSDC(
+              typeof rewardAmount === "bigint"
+                ? rewardAmount
+                : BigInt(rewardAmount.toString()),
               4
             );
+
+            // Grab liquidator collateral from event param
+            const liquidatorCollateral6 =
+              typeof liquidatorCollateral === "bigint"
+                ? liquidatorCollateral
+                : BigInt(liquidatorCollateral?.toString?.() || "0");
+            const liquidatorCollateralFormatted = formatUSDC(
+              liquidatorCollateral6
+            );
+
+            // Compare reward to liquidator's available and total collateral (6 decimals)
+            let availableFormatted = "N/A";
+            let totalCollateralFormatted = "N/A";
+            let pctOfAvailable = "-";
+            let pctOfCollateral = "-";
+            try {
+              const [
+                totalCollateral,
+                marginUsed,
+                marginReserved,
+                availableMargin,
+              ] = await this.contracts.vault.getUnifiedMarginSummary(
+                liquidator
+              );
+
+              const reward6 =
+                typeof rewardAmount === "bigint"
+                  ? rewardAmount
+                  : BigInt(rewardAmount.toString());
+              const avail6 = BigInt((availableMargin || 0).toString());
+              const total6 = BigInt((totalCollateral || 0).toString());
+
+              availableFormatted = formatUSDC(avail6);
+              totalCollateralFormatted = formatUSDC(total6);
+
+              const bpsOfAvail = avail6 > 0n ? (reward6 * 10000n) / avail6 : 0n;
+              const bpsOfTotal = total6 > 0n ? (reward6 * 10000n) / total6 : 0n;
+              pctOfAvailable = (Number(bpsOfAvail) / 100).toFixed(2) + "%";
+              pctOfCollateral = (Number(bpsOfTotal) / 100).toFixed(2) + "%";
+            } catch (e) {
+              // Non-fatal; keep base notification
+            }
 
             const notification = `
 ${colors.bgGreen}${colors.black}${
@@ -1250,13 +1304,29 @@ ${colors.brightGreen}│${colors.reset} ${colors.brightCyan}💸 Reward:${
               colors.brightGreen
             }│${colors.reset}
 ${colors.brightGreen}│${colors.reset} ${
-              colors.dim
-            }Tx: ${event.transactionHash.slice(
-              0,
-              10
-            )}...                              ${colors.brightGreen}│${
+              colors.brightCyan
+            }🏦 Liquidator Collateral:${
               colors.reset
-            }
+            } $${liquidatorCollateralFormatted} USDC            ${
+              colors.brightGreen
+            }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.dim}   ↳ vs Available:${
+              colors.reset
+            } $${availableFormatted} (${pctOfAvailable})           ${
+              colors.brightGreen
+            }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.dim}   ↳ vs Collateral:${
+              colors.reset
+            } $${totalCollateralFormatted} (${pctOfCollateral})      ${
+              colors.brightGreen
+            }│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.dim}Tx: ${(event &&
+            event.transactionHash
+              ? event.transactionHash
+              : ""
+            ).slice(0, 10)}...                              ${
+              colors.brightGreen
+            }│${colors.reset}
 ${
   colors.brightGreen
 }└─────────────────────────────────────────────────────────┘${colors.reset}
@@ -1931,9 +2001,10 @@ ${colors.brightBlue}│${
     }│${colors.reset}
 ${colors.brightBlue}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
-      colors.brightBlue
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightBlue}│${colors.reset}
 ${
   colors.brightBlue
 }└─────────────────────────────────────────────────────────┘${colors.reset}
@@ -2124,9 +2195,10 @@ ${colors.brightRed}│${
     }│${colors.reset}
 ${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
-      colors.brightRed
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightRed}│${colors.reset}
 ${colors.brightRed}└─────────────────────────────────────────────────────────┘${
       colors.reset
     }
@@ -2451,7 +2523,7 @@ ${colors.brightGreen}│${
     }│${colors.reset}
 ${colors.brightGreen}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+    } | Tx: ${((event && event.transactionHash) ? event.transactionHash : "").slice(0, 10)}...${colors.reset} ${
       colors.brightGreen
     }│${colors.reset}
 ${
@@ -2517,7 +2589,7 @@ ${colors.brightYellow}│${
     }│${colors.reset}
 ${colors.brightYellow}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+    } | Tx: ${((event && event.transactionHash) ? event.transactionHash : "").slice(0, 10)}...${colors.reset} ${
       colors.brightYellow
     }│${colors.reset}
 ${
@@ -2714,7 +2786,7 @@ ${colors.brightRed}│${
     }│${colors.reset}
 ${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+    } | Tx: ${((event && event.transactionHash) ? event.transactionHash : "").slice(0, 10)}...${colors.reset} ${
       colors.brightRed
     }│${colors.reset}
 ${colors.brightRed}└─────────────────────────────────────────────────────────┘${
@@ -2795,7 +2867,7 @@ ${colors.brightBlue}│${
     }│${colors.reset}
 ${colors.brightBlue}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+    } | Tx: ${((event && event.transactionHash) ? event.transactionHash : "").slice(0, 10)}...${colors.reset} ${
       colors.brightBlue
     }│${colors.reset}
 ${
@@ -2863,7 +2935,7 @@ ${colors.brightMagenta}│${
     }│${colors.reset}
 ${colors.brightMagenta}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
+    } | Tx: ${((event && event.transactionHash) ? event.transactionHash : "").slice(0, 10)}...${colors.reset} ${
       colors.brightMagenta
     }│${colors.reset}
 ${
@@ -2945,9 +3017,10 @@ ${colors.brightRed}│${
     }│${colors.reset}
 ${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
-      colors.brightRed
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightRed}│${colors.reset}
 ${colors.brightRed}└─────────────────────────────────────────────────────────┘${
       colors.reset
     }
@@ -3017,12 +3090,13 @@ ${colors.brightGreen}│${colors.reset} ${colors.brightCyan}💸 Reward:${
     } $${rewardFormatted} USDC                        ${colors.brightGreen}│${
       colors.reset
     }
-${colors.brightGreen}│${colors.reset} ${
-      colors.dim
-    }Tx: ${event.transactionHash.slice(
-      0,
-      10
-    )}...                              ${colors.brightGreen}│${colors.reset}
+${colors.brightGreen}│${colors.reset} ${colors.dim}Tx: ${(event &&
+    event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...                              ${colors.brightGreen}│${
+      colors.reset
+    }
 ${
   colors.brightGreen
 }└─────────────────────────────────────────────────────────┘${colors.reset}
@@ -3073,7 +3147,9 @@ ${
       `${colors.dim}   🧱 Block Number:${colors.reset} ${event.blockNumber}`
     );
     console.log(
-      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${event.transactionHash}`
+      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${
+        event && event.transactionHash ? event.transactionHash : "(n/a)"
+      }`
     );
     console.log(
       `${colors.dim}   📄 Log Index:${colors.reset} ${event.logIndex}`
@@ -3138,9 +3214,10 @@ ${colors.brightYellow}│${colors.reset} ${
     }│${colors.reset}
 ${colors.brightYellow}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
-      colors.brightYellow
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightYellow}│${colors.reset}
 ${
   colors.brightYellow
 }└─────────────────────────────────────────────────────────┘${colors.reset}
@@ -3239,9 +3316,10 @@ ${colors.brightRed}│${
     }│${colors.reset}
 ${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
-      colors.brightRed
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightRed}│${colors.reset}
 ${colors.brightRed}└─────────────────────────────────────────────────────────┘${
       colors.reset
     }
@@ -3363,7 +3441,9 @@ ${colors.brightRed}└───────────────────�
       `${colors.dim}   🧱 Block Number:${colors.reset} ${event.blockNumber}`
     );
     console.log(
-      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${event.transactionHash}`
+      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${
+        event && event.transactionHash ? event.transactionHash : "(n/a)"
+      }`
     );
     console.log(
       `${colors.dim}   📄 Log Index:${colors.reset} ${event.logIndex}`
@@ -3447,9 +3527,10 @@ ${colors.brightBlue}│${
     }│${colors.reset}
 ${colors.brightBlue}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
-      colors.brightBlue
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightBlue}│${colors.reset}
 ${
   colors.brightBlue
 }└─────────────────────────────────────────────────────────┘${colors.reset}
@@ -3562,9 +3643,10 @@ ${colors.brightMagenta}│${
     }│${colors.reset}
 ${colors.brightMagenta}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
-      colors.brightMagenta
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightMagenta}│${colors.reset}
 ${
   colors.brightMagenta
 }└─────────────────────────────────────────────────────────┘${colors.reset}
@@ -3685,9 +3767,10 @@ ${colors.brightYellow}│${
     }│${colors.reset}
 ${colors.brightYellow}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
-      colors.brightYellow
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightYellow}│${colors.reset}
 ${
   colors.brightYellow
 }└─────────────────────────────────────────────────────────┘${colors.reset}
@@ -3750,9 +3833,10 @@ ${colors.brightRed}│${
     }│${colors.reset}
 ${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
-      colors.brightRed
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightRed}│${colors.reset}
 ${colors.brightRed}└─────────────────────────────────────────────────────────┘${
       colors.reset
     }
@@ -3825,9 +3909,10 @@ ${colors.brightGreen}│${
     }│${colors.reset}
 ${colors.brightGreen}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
-      colors.brightGreen
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightGreen}│${colors.reset}
 ${
   colors.brightGreen
 }└─────────────────────────────────────────────────────────┘${colors.reset}
@@ -3878,9 +3963,10 @@ ${colors.brightRed}│${
     }│${colors.reset}
 ${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
-      colors.brightRed
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightRed}│${colors.reset}
 ${colors.brightRed}└─────────────────────────────────────────────────────────┘${
       colors.reset
     }
@@ -4784,14 +4870,8 @@ ${colors.brightRed}└───────────────────�
       // Calculate portfolio metrics
       // Using auto-detection for decimal precision as some values may be in 18 decimals instead of 6
       const walletBalance = formatUSDC(balance);
-      const totalCollateral = formatWithAutoDecimalDetection(
-        marginSummary.totalCollateral,
-        6
-      );
-      const availableBalance = formatWithAutoDecimalDetection(
-        marginSummary.availableCollateral,
-        6
-      );
+      const totalCollateral = formatUSDC(marginSummary.totalCollateral);
+      const availableBalance = formatUSDC(marginSummary.availableCollateral);
       const marginUsed = formatWithAutoDecimalDetection(
         marginSummary.marginUsed,
         6

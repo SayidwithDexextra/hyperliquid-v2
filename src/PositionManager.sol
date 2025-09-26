@@ -45,7 +45,7 @@ library PositionManager {
      */
     function executePositionNetting(
         Position[] storage positions,
-        address user,
+        address /*user*/,
         bytes32 marketId,
         int256 sizeDelta,
         uint256 executionPrice,
@@ -73,17 +73,33 @@ library PositionManager {
             
             // Calculate new position
             result.newSize = position.size + sizeDelta;
-            
-            // Calculate realized P&L for closing portion
+
+            // Calculate realized P&L ONLY for the portion that actually closes
             if ((position.size > 0 && sizeDelta < 0) || (position.size < 0 && sizeDelta > 0)) {
-                int256 closingSize = sizeDelta > 0 ? 
-                    (sizeDelta > -position.size ? -position.size : sizeDelta) :
-                    (sizeDelta < -position.size ? -position.size : sizeDelta);
-                
+                // Closing direction: compute closed quantity as min(|delta|, |position|)
+                uint256 absDelta = uint256(sizeDelta > 0 ? sizeDelta : -sizeDelta);
+                uint256 posAbs = uint256(position.size > 0 ? position.size : -position.size);
+                uint256 closedAbs = absDelta > posAbs ? posAbs : absDelta;
+
+                // Closing size SIGNED the same as the original position (not the trade delta)
+                int256 closingSizeSigned = position.size > 0 ? int256(closedAbs) : -int256(closedAbs);
+
+                // CRITICAL OVERFLOW FIX: Use fixed precision arithmetic with extreme scaling
                 int256 priceDiff = int256(executionPrice) - int256(position.entryPrice);
-                result.realizedPnL = (priceDiff * closingSize) / int256(TICK_PRECISION);
+                
+                unchecked {
+                    // Scale down to whole units (from 18 decimals to 0)
+                    int256 wholeUnitSize = closingSizeSigned / int256(1e18);
+                    if (wholeUnitSize == 0) {
+                        // For tiny amounts, use 1 with adjusted precision
+                        wholeUnitSize = closingSizeSigned > 0 ? int256(1) : int256(-1);
+                    }
+                    
+                    // Calculate PnL with adjusted precision
+                    result.realizedPnL = (priceDiff * wholeUnitSize);
+                }
             }
-            
+
             // Calculate new entry price
             if (result.newSize == 0) {
                 result.newEntryPrice = 0;
@@ -97,18 +113,44 @@ library PositionManager {
                 positions.pop();
                 
             } else {
-                // Position continues - calculate weighted entry price
+                // Position continues - determine correct entry price behavior
                 bool sameDirection = (position.size > 0 && sizeDelta > 0) || (position.size < 0 && sizeDelta < 0);
-                
+
                 if (sameDirection) {
-                    // Weighted average
-                    uint256 existingNotional = uint256(position.size >= 0 ? position.size : -position.size) * position.entryPrice;
-                    uint256 newNotional = uint256(sizeDelta >= 0 ? sizeDelta : -sizeDelta) * executionPrice;
-                    uint256 totalNotional = existingNotional + newNotional;
-                    uint256 totalSize = uint256(result.newSize >= 0 ? result.newSize : -result.newSize);
-                    result.newEntryPrice = totalNotional / totalSize;
+                    // CRITICAL OVERFLOW FIX: Use fixed precision arithmetic with extreme scaling
+                    unchecked {
+                        // Get absolute sizes
+                        uint256 existingSize = uint256(position.size >= 0 ? position.size : -position.size);
+                        uint256 newSize = uint256(sizeDelta >= 0 ? sizeDelta : -sizeDelta);
+                        
+                        // Scale down to whole units (from 18 decimals to 0)
+                        uint256 wholeExistingSize = existingSize / 1e18;
+                        uint256 wholeNewSize = newSize / 1e18;
+                        
+                        // Ensure minimum values for tiny amounts
+                        if (wholeExistingSize == 0) wholeExistingSize = 1;
+                        if (wholeNewSize == 0) wholeNewSize = 1;
+                        
+                        // Calculate weighted average price (cannot overflow)
+                        uint256 existingNotional = wholeExistingSize * position.entryPrice;
+                        uint256 newNotional = wholeNewSize * executionPrice;
+                        uint256 totalNotional = existingNotional + newNotional;
+                        uint256 totalSize = wholeExistingSize + wholeNewSize;
+                        
+                        // Calculate new entry price
+                        result.newEntryPrice = totalSize > 0 ? (totalNotional / totalSize) : position.entryPrice;
+                    }
                 } else {
-                    result.newEntryPrice = executionPrice;
+                    // Opposite direction: either partial close or flip
+                    uint256 absDelta = uint256(sizeDelta > 0 ? sizeDelta : -sizeDelta);
+                    uint256 posAbs = uint256(position.size > 0 ? position.size : -position.size);
+                    if (absDelta < posAbs) {
+                        // Partial close only: keep original entry price for the remaining position
+                        result.newEntryPrice = position.entryPrice;
+                    } else {
+                        // Flip: entire old position closed and new opened at execution price
+                        result.newEntryPrice = executionPrice;
+                    }
                 }
                 
                 // Update position
@@ -151,7 +193,7 @@ library PositionManager {
      */
     function recalculatePositionMargin(
         Position[] storage positions,
-        address user,
+        address /*user*/,
         bytes32 marketId,
         uint256 newRequiredMargin
     ) external returns (uint256 oldMargin, uint256 marginDelta, bool isIncrease) {
@@ -183,7 +225,7 @@ library PositionManager {
      */
     function updatePosition(
         Position[] storage positions,
-        address user,
+        address /*user*/,
         bytes32 marketId,
         int256 newSize,
         uint256 newEntryPrice,
@@ -284,7 +326,7 @@ library PositionManager {
             newEntryPrice = 0;
             newMarginRequired = 0;
             
-            // Calculate realized P&L for full close
+            // Calculate realized P&L for full close using original signed size
             int256 priceDiff = int256(executionPrice) - int256(existingPosition.entryPrice);
             realizedPnL = (priceDiff * existingPosition.size) / int256(TICK_PRECISION);
         } else {
@@ -299,10 +341,14 @@ library PositionManager {
                 uint256 totalSize = uint256(newSize >= 0 ? newSize : -newSize);
                 newEntryPrice = totalNotional / totalSize;
                 
-                // Proportional realized P&L for partial close
+                // Proportional realized P&L for partial close: use closed quantity signed like original position
                 if ((existingPosition.size > 0 && sizeDelta < 0) || (existingPosition.size < 0 && sizeDelta > 0)) {
+                    uint256 absDelta = uint256(sizeDelta > 0 ? sizeDelta : -sizeDelta);
+                    uint256 posAbs = uint256(existingPosition.size > 0 ? existingPosition.size : -existingPosition.size);
+                    uint256 closedAbs = absDelta > posAbs ? posAbs : absDelta;
+                    int256 closingSizeSigned = existingPosition.size > 0 ? int256(closedAbs) : -int256(closedAbs);
                     int256 priceDiff = int256(executionPrice) - int256(existingPosition.entryPrice);
-                    realizedPnL = (priceDiff * sizeDelta) / int256(TICK_PRECISION);
+                    realizedPnL = (priceDiff * closingSizeSigned) / int256(TICK_PRECISION);
                 }
             } else {
                 newEntryPrice = executionPrice;
