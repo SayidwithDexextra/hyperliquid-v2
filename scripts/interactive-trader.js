@@ -1575,6 +1575,30 @@ ${
 
       // Listen for GapLoss and Liquidation Processing events from OrderBook
       if (this.contracts.orderBook) {
+        // New: counterparty receives units when liquidation matches against their resting order
+        this.contracts.orderBook.on(
+          "CounterpartyUnitsReceived",
+          (user, marketId, amount, isBuySide, price, event) => {
+            const timestamp = new Date().toLocaleTimeString();
+            const userShort = user.slice(0, 8) + "..." + user.slice(-6);
+            const amountFormatted = formatWithAutoDecimalDetection(
+              amount,
+              18,
+              4
+            );
+            const priceFormatted = formatWithAutoDecimalDetection(price, 6, 2);
+            const side = isBuySide ? "BUY" : "SELL";
+
+            console.log(
+              `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightGreen}📦 UNITS RECEIVED${colors.reset} | ` +
+                `${colors.cyan}${amountFormatted} ALU${colors.reset} @ ${colors.yellow}$${priceFormatted}${colors.reset} ` +
+                `via ${colors.magenta}LIQUIDATION MATCH${colors.reset} | ` +
+                `${colors.green}${side} COUNTERPARTY${colors.reset} | ` +
+                `${colors.dim}${userShort}${colors.reset}`
+            );
+          }
+        );
+
         this.contracts.orderBook.on(
           "GapLossDetected",
           (

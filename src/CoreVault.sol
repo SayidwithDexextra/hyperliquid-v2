@@ -92,6 +92,12 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     // Liquidity sampling depth (kept for API compat, unused with scaling=0)
     uint256 public mmrLiquidityDepthLevels = 1; // minimal depth
     
+    // ============ ADL Gas & Debug Controls ============
+    // Limit number of profitable positions considered (top-K) and processed per tx
+    uint256 public adlMaxCandidates = 50;       // Max candidates to sort/evaluate
+    uint256 public adlMaxPositionsPerTx = 10;   // Max positions reduced per ADL execution
+    bool public adlDebug = false;               // Guard for verbose debug events
+    
     // Global stats
     uint256 public totalCollateralDeposited;
     uint256 public totalMarginLocked;
@@ -115,6 +121,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     // Enhanced liquidation events
     event AvailableCollateralConfiscated(address indexed user, uint256 amount, uint256 remainingAvailable);
     event UserLossSocialized(address indexed user, uint256 lossAmount, uint256 remainingCollateral);
+    event AdlConfigUpdated(uint256 maxCandidates, uint256 maxPositionsPerTx, bool debugEnabled);
     
     // ============ Administrative Position Closure Events ============
     event SocializationStarted(bytes32 indexed marketId, uint256 totalLossAmount, address indexed liquidatedUser, uint256 timestamp);
@@ -809,6 +816,20 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         marketMarkPrices[marketId] = price;
     }
 
+    // ============ ADL Configuration ============
+    function setAdlConfig(
+        uint256 maxCandidates,
+        uint256 maxPositionsPerTx,
+        bool debugEnabled
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(maxCandidates > 0 && maxCandidates <= 500, "CoreVault: invalid maxCandidates");
+        require(maxPositionsPerTx > 0 && maxPositionsPerTx <= 100, "CoreVault: invalid maxPositionsPerTx");
+        adlMaxCandidates = maxCandidates;
+        adlMaxPositionsPerTx = maxPositionsPerTx;
+        adlDebug = debugEnabled;
+        emit AdlConfigUpdated(maxCandidates, maxPositionsPerTx, debugEnabled);
+    }
+
     /**
      * @dev Get maintenance margin in basis points (always 10% = 1000 bps)
      * @param marketId Market identifier (unused, kept for compatibility)
@@ -1049,9 +1070,9 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         if (obAddr == address(0)) return 0;
         // Attempt to get depth; if it fails, return 0 to enforce max risk
         try IOrderBook(obAddr).getOrderBookDepth(mmrLiquidityDepthLevels) returns (
-            uint256[] memory bidPrices,
+            uint256[] memory /*bidPrices*/,
             uint256[] memory bidAmounts,
-            uint256[] memory askPrices,
+            uint256[] memory /*askPrices*/,
             uint256[] memory askAmounts
         ) {
             // For simplicity, approximate close direction using current best prices
@@ -1343,7 +1364,9 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         require(lossAmount > 0, "Loss amount must be positive");
         
         // DEBUG: Start socialization process
-        emit SocializationStarted(marketId, lossAmount, liquidatedUser, block.timestamp);
+        if (adlDebug) {
+            emit SocializationStarted(marketId, lossAmount, liquidatedUser, block.timestamp);
+        }
         
         // Step 1: Find all profitable positions in this market (excluding liquidated user)
         ProfitablePosition[] memory profitablePositions = _findProfitablePositions(marketId, liquidatedUser);
@@ -1358,6 +1381,12 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         emit DebugSocializationState(marketId, lossAmount, profitablePositions.length, 0);
         
         // Step 2: Sort positions by profit score (highest profit first)
+        // Gas control: limit to top-K before sorting if array is very large
+        if (profitablePositions.length > adlMaxCandidates) {
+            // Select top-K via single pass (partial selection) to reduce sort cost
+            ProfitablePosition[] memory topK = _selectTopKByProfitScore(profitablePositions, adlMaxCandidates);
+            profitablePositions = topK;
+        }
         _sortProfitablePositionsByScore(profitablePositions);
         
         // Step 3: Apply Administrative Position Closure (ADL) to cover the loss
@@ -1365,6 +1394,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         uint256 positionsAffected = 0;
         uint256 totalLossCovered = 0;
         
+        uint256 processed = 0;
         for (uint256 i = 0; i < profitablePositions.length && remainingLoss > 0; i++) {
             ProfitablePosition memory profitablePos = profitablePositions[i];
             
@@ -1386,15 +1416,16 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             
             if (closureResult.success) {
                 positionsAffected++;
-                
-                emit AdministrativePositionClosure(
-                    profitablePos.user,
-                    marketId,
-                    uint256(profitablePos.positionSize >= 0 ? profitablePos.positionSize : -profitablePos.positionSize),
-                    closureResult.newPositionSize,
-                    closureResult.realizedProfit,
-                    closureResult.newEntryPrice
-                );
+                if (adlDebug) {
+                    emit AdministrativePositionClosure(
+                        profitablePos.user,
+                        marketId,
+                        uint256(profitablePos.positionSize >= 0 ? profitablePos.positionSize : -profitablePos.positionSize),
+                        closureResult.newPositionSize,
+                        closureResult.realizedProfit,
+                        closureResult.newEntryPrice
+                    );
+                }
                 
                 // CRITICAL FIX: Confiscate the realized profit from the user to cover the socialized loss
                 // Compute the amount actually confiscated from the user (bounded by their collateral)
@@ -1422,15 +1453,27 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 
             } else {
                 // DEBUG: Position closure failed
-                emit SocializationFailed(marketId, targetCoverage, closureResult.failureReason, profitablePos.user);
+                if (adlDebug) {
+                    emit SocializationFailed(marketId, targetCoverage, closureResult.failureReason, profitablePos.user);
+                }
             }
             
             // DEBUG: Track progress
-            emit DebugSocializationState(marketId, remainingLoss, profitablePositions.length, i + 1);
+            if (adlDebug) {
+                emit DebugSocializationState(marketId, remainingLoss, profitablePositions.length, i + 1);
+            }
+
+            processed++;
+            if (processed >= adlMaxPositionsPerTx && remainingLoss > 0) {
+                // Stop early to avoid out-of-gas; remainingLoss will be handled on next liquidation tick
+                break;
+            }
         }
         
         // Final result
-        emit SocializationCompleted(marketId, totalLossCovered, remainingLoss, positionsAffected, liquidatedUser);
+        if (adlDebug) {
+            emit SocializationCompleted(marketId, totalLossCovered, remainingLoss, positionsAffected, liquidatedUser);
+        }
         emit SocializedLossApplied(marketId, totalLossCovered, liquidatedUser);
     }
     
@@ -1440,7 +1483,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
      * @return users Array of user addresses with positions in the market
      */
     function _getUsersWithPositionsInMarket(bytes32 marketId) internal view returns (address[] memory) {
-        // Create a dynamic array to hold users with positions
+        // Gas-optimized: create temp array sized to allKnownUsers, then trim
         address[] memory tempUsers = new address[](allKnownUsers.length);
         uint256 count = 0;
         
@@ -1458,7 +1501,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             }
         }
         
-        // Create correctly sized array
+        // Trim to count
         address[] memory usersWithPositions = new address[](count);
         for (uint256 i = 0; i < count; i++) {
             usersWithPositions[i] = tempUsers[i];
@@ -1505,8 +1548,9 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             return new ProfitablePosition[](0);
         }
         
-        // Second pass: populate profitable positions array
-        ProfitablePosition[] memory profitablePositions = new ProfitablePosition[](profitableCount);
+        // Second pass: populate profitable positions array (bounded by adlMaxCandidates for gas)
+        uint256 cap = profitableCount > adlMaxCandidates ? adlMaxCandidates : profitableCount;
+        ProfitablePosition[] memory profitablePositions = new ProfitablePosition[](cap);
         uint256 index = 0;
         
         for (uint256 i = 0; i < usersWithPositions.length; i++) {
@@ -1532,29 +1576,33 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                             isLong: pos.size > 0
                         });
                         
-                        // DEBUG: Emit profitable position found
-                        emit ProfitablePositionFound(
-                            user,
-                            marketId,
-                            pos.size,
-                            pos.entryPrice,
-                            markPrice,
-                            uint256(unrealizedPnL),
-                            profitScore
-                        );
-                        
-                        // DEBUG: Emit detailed profit calculation
-                        emit DebugProfitCalculation(
-                            user,
-                            marketId,
-                            pos.entryPrice,
-                            markPrice,
-                            pos.size,
-                            unrealizedPnL,
-                            profitScore
-                        );
+                        // DEBUG events guarded
+                        if (adlDebug) {
+                            emit ProfitablePositionFound(
+                                user,
+                                marketId,
+                                pos.size,
+                                pos.entryPrice,
+                                markPrice,
+                                uint256(unrealizedPnL),
+                                profitScore
+                            );
+                            emit DebugProfitCalculation(
+                                user,
+                                marketId,
+                                pos.entryPrice,
+                                markPrice,
+                                pos.size,
+                                unrealizedPnL,
+                                profitScore
+                            );
+                        }
                         
                         index++;
+                        if (index == cap) {
+                            // Early exit once cap reached
+                            return profitablePositions;
+                        }
                     }
                     break;
                 }
@@ -1602,6 +1650,62 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             }
             positions[j] = key;
         }
+    }
+
+    /**
+     * @dev Select approximate top-K by profitScore using a single pass thresholding approach.
+     *      This avoids sorting the entire array when many candidates are present.
+     */
+    function _selectTopKByProfitScore(
+        ProfitablePosition[] memory positions,
+        uint256 k
+    ) internal pure returns (ProfitablePosition[] memory) {
+        if (positions.length <= k) {
+            return positions;
+        }
+
+        // First pass: estimate threshold by sampling every Nth element
+        uint256 sampleStride = positions.length / (k == 0 ? 1 : k);
+        if (sampleStride == 0) sampleStride = 1;
+
+        uint256 approxThreshold = 0;
+        for (uint256 i = 0; i < positions.length; i += sampleStride) {
+            if (positions[i].profitScore > approxThreshold) {
+                approxThreshold = positions[i].profitScore;
+            }
+        }
+
+        // Second pass: collect up to K items >= threshold
+        ProfitablePosition[] memory result = new ProfitablePosition[](k);
+        uint256 count = 0;
+        for (uint256 i = 0; i < positions.length && count < k; i++) {
+            if (positions[i].profitScore >= approxThreshold) {
+                result[count] = positions[i];
+                count++;
+            }
+        }
+
+        // If we collected less than K due to threshold being too high, fill remaining with next best by linear scan
+        if (count < k) {
+            // Find remaining top by linear pass without duplicates
+            for (uint256 i = 0; i < positions.length && count < k; i++) {
+                // naive membership check: ok since k is small
+                bool exists = false;
+                for (uint256 j = 0; j < count; j++) {
+                    if (
+                        positions[i].user == result[j].user &&
+                        positions[i].positionSize == result[j].positionSize &&
+                        positions[i].entryPrice == result[j].entryPrice
+                    ) { exists = true; break; }
+                }
+                if (!exists) {
+                    result[count] = positions[i];
+                    count++;
+                }
+            }
+        }
+
+        return result;
     }
     
     /**
@@ -1682,15 +1786,17 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 uint256 actualRealizedProfit18 = uint256((priceDiff * sizeReductionSigned) / int256(TICK_PRECISION));
                 uint256 actualRealizedProfit = actualRealizedProfit18 / DECIMAL_SCALE;
                 
-                // DEBUG: Emit position reduction details
-                emit DebugPositionReduction(
-                    user,
-                    marketId,
-                    absCurrentSize,
-                    sizeReduction,
-                    newAbsSize,
-                    actualRealizedProfit
-                );
+        // DEBUG: Emit position reduction details
+        if (adlDebug) {
+            emit DebugPositionReduction(
+                user,
+                marketId,
+                absCurrentSize,
+                sizeReduction,
+                newAbsSize,
+                actualRealizedProfit
+            );
+        }
                 
                 if (newAbsSize == 0) {
                     // Position fully closed

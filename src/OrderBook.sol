@@ -364,7 +364,7 @@ contract OrderBook {
                         // Try long liquidation
                         // DEBUG: PAST - Attempting long position socialized loss liquidation
                         emit LiquidationSocializedLossAttempt(trader, true, "liquidateLong");
-                        try vault.liquidateLong(trader, marketId, tx.origin) {
+                        try vault.liquidateLong(trader, marketId, msg.sender) {
                             liquidationCompleted = true;
                             // DEBUG: PAST - Long socialized loss liquidation successful
                             emit LiquidationSocializedLossResult(trader, true, "liquidateLong");
@@ -377,7 +377,7 @@ contract OrderBook {
                         // Try short liquidation
                         // DEBUG: PAST - Attempting short position socialized loss liquidation
                         emit LiquidationSocializedLossAttempt(trader, false, "liquidateShort");
-                        try vault.liquidateShort(trader, marketId, tx.origin) {
+                        try vault.liquidateShort(trader, marketId, msg.sender) {
                             liquidationCompleted = true;
                             // DEBUG: PAST - Short socialized loss liquidation successful
                             emit LiquidationSocializedLossResult(trader, true, "liquidateShort");
@@ -619,7 +619,7 @@ contract OrderBook {
                 uint256 currentMarkPrice = _calculateMarkPrice();
                 vault.updateMarkPrice(marketId, currentMarkPrice);
                 
-                try vault.liquidateLong(trader, marketId, tx.origin) {
+                try vault.liquidateLong(trader, marketId, msg.sender) {
                     vaultLiquidationSuccess = true;
                     emit LiquidationPositionProcessed(trader, positionSize, executionResult.averageExecutionPrice);
                 } catch (bytes memory /*reason*/) {
@@ -633,7 +633,7 @@ contract OrderBook {
                 
                 // 🔍 DEBUG: About to call vault.liquidateShort
                 emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort");
-                try vault.liquidateShort(trader, marketId, tx.origin) {
+                try vault.liquidateShort(trader, marketId, msg.sender) {
                     vaultLiquidationSuccess = true;
                     emit LiquidationPositionProcessed(trader, positionSize, executionResult.averageExecutionPrice);
                     emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort_SUCCESS");
@@ -898,6 +898,8 @@ contract OrderBook {
     event PriceUpdated(uint256 lastTradePrice, uint256 currentMarkPrice);
     event LiquidationCheckTriggered(uint256 currentMark, uint256 lastMarkPrice);
     event TradeExecutionCompleted(address indexed buyer, address indexed seller, uint256 price, uint256 amount);
+    // Counterparty credit event: emitted when a resting order receives units due to liquidation matching
+    event CounterpartyUnitsReceived(address indexed user, bytes32 indexed marketId, uint256 amount, bool isBuySide, uint256 price);
 
     // DEBUG EVENTS for _matchBuyOrderWithSlippage function
     event MatchingStarted(address indexed buyer, uint256 remainingAmount, uint256 maxPrice, uint256 startingPrice);
@@ -931,6 +933,14 @@ contract OrderBook {
     event ArithmeticDebugInt(string operation, string location, int256 value1, int256 value2, int256 result);
     event ArithmeticScaling(string location, uint256 originalValue, uint256 scaledValue, uint256 scalingFactor);
     event MarginCalculationDebug(uint256 amount, uint256 price, bool isBuy, uint256 marginRequired);
+    
+    // ============ Market Order Debugging Events ============
+    event MarketOrderAttempt(address indexed user, bool isBuy, uint256 amount, uint256 referencePrice, uint256 slippageBps);
+    event MarketOrderLiquidityCheck(bool isBuy, uint256 bestOppositePrice, bool hasLiquidity);
+    event MarketOrderPriceBounds(uint256 maxPrice, uint256 minPrice);
+    event MarketOrderMarginEstimation(uint256 worstCasePrice, uint256 estimatedMargin, uint256 availableCollateral);
+    event MarketOrderCreated(uint256 orderId, address indexed user, uint256 limitPrice, uint256 amount, bool isBuy);
+    event MarketOrderCompleted(uint256 filledAmount, uint256 remainingAmount);
     
     // ============ Enhanced Three-Layer Liquidation Events ============
     
@@ -1309,10 +1319,15 @@ contract OrderBook {
 
         // Get reference price for slippage calculation
         uint256 referencePrice = isBuy ? bestAsk : bestBid;
+        emit MarketOrderAttempt(msg.sender, isBuy, amount, referencePrice, slippageBps);
         if (isBuy) {
-            require(referencePrice != 0, "OrderBook: no liquidity available");
+            bool hasLiq = referencePrice != 0;
+            emit MarketOrderLiquidityCheck(true, referencePrice, hasLiq);
+            require(hasLiq, "OrderBook: no liquidity available");
         } else {
-            require(referencePrice > 0, "OrderBook: no liquidity available");
+            bool hasLiq = referencePrice > 0;
+            emit MarketOrderLiquidityCheck(false, referencePrice, hasLiq);
+            require(hasLiq, "OrderBook: no liquidity available");
         }
         
         // For margin market orders, check available collateral upfront
@@ -1329,6 +1344,7 @@ contract OrderBook {
             
             // Check if user has sufficient available collateral
             uint256 availableCollateral = vault.getAvailableCollateral(msg.sender);
+            emit MarketOrderMarginEstimation(worstCasePrice, estimatedMargin, availableCollateral);
             require(availableCollateral >= estimatedMargin, 
                 "OrderBook: insufficient collateral for market order");
         }
@@ -1344,6 +1360,7 @@ contract OrderBook {
                 0 : 
                 (referencePrice * (10000 - slippageBps)) / 10000;
         }
+        emit MarketOrderPriceBounds(maxPrice, minPrice);
 
         uint256 orderId = nextOrderId++;
         Order memory marketOrder = Order({
@@ -1358,6 +1375,7 @@ contract OrderBook {
             marginRequired: 0, // Will be calculated during matching
             isMarginOrder: isMarginOrder
         });
+        emit MarketOrderCreated(orderId, msg.sender, marketOrder.price, amount, isBuy);
 
         uint256 remainingAmount = amount;
         
@@ -1369,6 +1387,7 @@ contract OrderBook {
 
         // Prevent underflow if a bug elsewhere produced an invalid remaining amount
         filledAmount = remainingAmount >= amount ? 0 : (amount - remainingAmount);
+        emit MarketOrderCompleted(filledAmount, remainingAmount);
         
         // Market orders don't rest in the book - any unfilled amount is cancelled
         if (filledAmount > 0) {
@@ -2233,7 +2252,7 @@ contract OrderBook {
         // For liquidation trades, use liquidation-specific margin handling that confiscates margin
         if (isLiquidationTrade) {
             // During liquidation, we MUST use the liquidation-specific path; do not fall back
-            vault.updatePositionWithLiquidation(user, marketId, amount, price, tx.origin);
+            vault.updatePositionWithLiquidation(user, marketId, amount, price, msg.sender);
             
             // Emit debug info best-effort; do not affect flow
             try vault.getPositionSummary(user, marketId) returns (int256, uint256, uint256 marginLocked) {
@@ -2389,6 +2408,16 @@ contract OrderBook {
                     // Fetch real user's current position directly from vault
                     (int256 oldRealPosition,,) = vault.getPositionSummary(realUser, marketId);
                     _handleLiquidationMarginUpdate(realUser, oldRealPosition, delta, price, true, true);
+                    // Also update the real counterparty's position via normal margin path so they receive units
+                    if (buyer == address(this) && seller != address(0) && seller != address(this)) {
+                        // Counterparty is the seller (their net decreases by amount)
+                        _handleMarginUpdate(seller, oldSellerPosition, -int256(amount), price, sellerMargin);
+                        emit CounterpartyUnitsReceived(seller, marketId, amount, false, price);
+                    } else if (seller == address(this) && buyer != address(0) && buyer != address(this)) {
+                        // Counterparty is the buyer (their net increases by amount)
+                        _handleMarginUpdate(buyer, oldBuyerPosition, int256(amount), price, buyerMargin);
+                        emit CounterpartyUnitsReceived(buyer, marketId, amount, true, price);
+                    }
                 }
             } else {
                 _handleLiquidationMarginUpdate(buyer, oldBuyerPosition, int256(amount), price, buyerMargin, isLiquidationTrade);

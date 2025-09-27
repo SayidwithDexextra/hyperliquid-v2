@@ -25,9 +25,9 @@ const path = require("path");
 
 // Configuration
 const USDC_PER_USER = "10000"; // 10,000 USDC per user
-const COLLATERAL_PER_USER = "100"; // 1,000 USDC collateral per user (default)
-const USER1_COLLATERAL = "100"; // 5,000 USDC collateral for User 1 (for $2.50 buy orders)
-const USER2_COLLATERAL = "100"; // 5,000 USDC collateral for User 2 (for $2.50 sell orders)
+const COLLATERAL_PER_USER = "500"; // 1,000 USDC collateral per user (default)
+const USER1_COLLATERAL = "500"; // 5,000 USDC collateral for User 1 (for $2.50 buy orders)
+const USER2_COLLATERAL = "500"; // 5,000 USDC collateral for User 2 (for $2.50 sell orders)
 const USER3_COLLATERAL = "15"; // 15 USDC collateral for User 3
 const NUM_USERS = 4; // Setup 4 trading accounts
 
@@ -507,6 +507,74 @@ async function main() {
           );
         });
 
+        // ===== NEW: Market order deep debug =====
+        orderBook.on(
+          "MarketOrderAttempt",
+          (user, isBuy, amount, referencePrice, slippageBps) => {
+            console.log(
+              `🛠️ MarketOrderAttempt → user=${user} side=${
+                isBuy ? "BUY" : "SELL"
+              } amt=${fmt18(amount)} ref=${fmt6(
+                referencePrice
+              )} slippage=${toStr(slippageBps)}bps`
+            );
+          }
+        );
+        orderBook.on(
+          "MarketOrderLiquidityCheck",
+          (isBuy, bestOppositePrice, hasLiquidity) => {
+            console.log(
+              `🧪 MarketOrderLiquidityCheck → side=${
+                isBuy ? "BUY" : "SELL"
+              } bestOpp=${fmt6(bestOppositePrice)} hasLiq=${toStr(
+                hasLiquidity
+              )}`
+            );
+          }
+        );
+        orderBook.on("MarketOrderPriceBounds", (maxPrice, minPrice) => {
+          console.log(
+            `📐 MarketOrderPriceBounds → max=${fmt6(maxPrice)} min=${fmt6(
+              minPrice
+            )}`
+          );
+        });
+        orderBook.on(
+          "MarketOrderMarginEstimation",
+          (worstCasePrice, estimatedMargin, availableCollateral) => {
+            console.log(
+              `💵 MarketOrderMarginEstimation → worst=${fmt6(
+                worstCasePrice
+              )} est=${fmt6(estimatedMargin)} avail=${fmt6(
+                availableCollateral
+              )}`
+            );
+          }
+        );
+        orderBook.on(
+          "MarketOrderCreated",
+          (orderId, user, limitPrice, amount, isBuy) => {
+            console.log(
+              `🧾 MarketOrderCreated → id=${toStr(
+                orderId
+              )} user=${user} limit=${fmt6(limitPrice)} amt=${fmt18(
+                amount
+              )} side=${isBuy ? "BUY" : "SELL"}`
+            );
+          }
+        );
+        orderBook.on(
+          "MarketOrderCompleted",
+          (filledAmount, remainingAmount) => {
+            console.log(
+              `✅ MarketOrderCompleted → filled=${fmt18(
+                filledAmount
+              )} remaining=${fmt18(remainingAmount)}`
+            );
+          }
+        );
+        // ===== END Market order deep debug =====
+
         // ----- CoreVault events -----
         coreVault.on(
           "MarginConfiscated",
@@ -688,7 +756,7 @@ async function main() {
       console.log("     Side: SELL (limit order)");
 
       const user2 = signers[2]; // User2 is the 3rd signer
-      const user2Price = ethers.parseUnits("2.5", 6); // $2.50 in USDC (6 decimals)
+      const user2Price = ethers.parseUnits("5", 6); // $2.50 in USDC (6 decimals)
       const user2Amount = ethers.parseUnits("20", 18); // 20 ALU (18 decimals)
 
       const user2OrderTx = await orderBook.connect(user2).placeMarginLimitOrder(
@@ -720,19 +788,62 @@ async function main() {
       const user1Amount = ethers.parseUnits("5", 18); // 5 ALU (18 decimals)
 
       try {
-        // Use the original amount (no scaling down)
+        // Preflight diagnostics
+        const bestAskNow = await orderBook.bestAsk();
+        const slippageBps = await orderBook.maxSlippageBps();
+        const worstCasePrice = (bestAskNow * (10000n + slippageBps)) / 10000n;
+        const user1Avail = await coreVault.getAvailableCollateral(
+          user1.address
+        );
+        console.log(
+          `     🔍 Preflight: bestAsk=${ethers.formatUnits(
+            bestAskNow,
+            6
+          )} slippage=${slippageBps}bps worst=${ethers.formatUnits(
+            worstCasePrice,
+            6
+          )} avail=${ethers.formatUnits(user1Avail, 6)}`
+        );
 
-        // Place order directly through OrderBook
-        const user1OrderTx = await orderBook
-          .connect(user1)
-          .placeMarginMarketOrder(
-            user1Amount, // Use original amount
-            true // isBuy = true
+        // Try gas estimation
+        try {
+          const est = await orderBook
+            .connect(user1)
+            .placeMarginMarketOrder.estimateGas(user1Amount, true);
+          console.log(
+            `     ⛽ estimateGas(placeMarginMarketOrder)=${est.toString()}`
           );
+        } catch (e) {
+          console.log(
+            `     ⛽ estimateGas failed: ${e?.reason || e?.message || e}`
+          );
+          try {
+            await orderBook
+              .connect(user1)
+              .callStatic.placeMarginMarketOrder(user1Amount, true);
+            console.log("     ⛽ callStatic would succeed");
+          } catch (e2) {
+            console.log(
+              `     ⛽ callStatic revert: ${
+                e2?.reason || e2?.shortMessage || e2?.message || e2
+              }`
+            );
+          }
+        }
 
-        await user1OrderTx.wait();
-        console.log("     ✅ Limit buy order executed successfully!");
-        console.log(`     💰 User1 opened long position: +5 ALU @ $2.50`);
+        // Execute a limit buy at current best ask to guarantee match
+        // const user1OrderTx = await orderBook
+        //   .connect(user1)
+        //   .placeMarginLimitOrder(bestAskNow, user1Amount, true);
+
+        // await user1OrderTx.wait();
+        // console.log("     ✅ Market buy order executed successfully!");
+        // console.log(
+        //   `     💰 User1 opened long position: +${ethers.formatUnits(
+        //     user1Amount,
+        //     18
+        //   )} ALU @ $${ethers.formatUnits(bestAskNow, 6)}`
+        // );
       } catch (error) {
         console.log(`     DEBUG ERROR: ${error.message}`);
         console.log(
