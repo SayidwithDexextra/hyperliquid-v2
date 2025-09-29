@@ -69,6 +69,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     mapping(address => PositionManager.Position[]) public userPositions;
     mapping(address => VaultAnalytics.PendingOrder[]) public userPendingOrders;
     mapping(address => bytes32[]) public userMarketIds;
+    // Cumulative ledger of socialized loss haircuts applied to each user (USDC, 6 decimals)
+    mapping(address => uint256) public userSocializedLoss;
     
     // User tracking for socialized loss distribution
     address[] public allKnownUsers;
@@ -81,6 +83,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     mapping(address => bytes32[]) public orderBookToMarkets;
     address[] public allOrderBooks;
     mapping(bytes32 => uint256) public marketMarkPrices;
+    // Bad debt per market when winners cannot fully cover a shortfall (USDC, 6 decimals)
+    mapping(bytes32 => uint256) public marketBadDebt;
     // ===== Dynamic Maintenance Margin (MMR) Parameters =====
     // BASE_MMR_BPS (default 10%) + PENALTY_MMR_BPS (default 10%) + f(fill_ratio) capped by MAX_MMR_BPS (default 50%)
     uint256 public baseMmrBps = 1000;           // 10% buffer
@@ -122,6 +126,10 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     event AvailableCollateralConfiscated(address indexed user, uint256 amount, uint256 remainingAvailable);
     event UserLossSocialized(address indexed user, uint256 lossAmount, uint256 remainingCollateral);
     event AdlConfigUpdated(uint256 maxCandidates, uint256 maxPositionsPerTx, bool debugEnabled);
+    // Haircut-specific transparency events
+    event HaircutApplied(address indexed user, bytes32 indexed marketId, uint256 debitAmount, uint256 collateralAfter);
+    event BadDebtRecorded(bytes32 indexed marketId, uint256 amount, address indexed liquidatedUser);
+    event BadDebtOffset(bytes32 indexed marketId, uint256 amount, uint256 remainingBadDebt);
     
     // ============ Administrative Position Closure Events ============
     event SocializationStarted(bytes32 indexed marketId, uint256 totalLossAmount, address indexed liquidatedUser, uint256 timestamp);
@@ -235,6 +243,34 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             totalMarginLocked -= result.marginToRelease;
         }
         
+        // Realize any per-position haircut tied to this trade: first from margin release, remainder persists or becomes bad debt if closed
+        if (result.haircutToConfiscate6 > 0) {
+            // Realize haircut from the payout components of this trade only.
+            // We do not debit userCollateral directly; we net from the margin release portion.
+            uint256 realizedFromRelease = result.haircutToConfiscate6 <= result.marginToRelease ? result.haircutToConfiscate6 : result.marginToRelease;
+            if (realizedFromRelease > 0) {
+                // Reduce margin release by the realized haircut (implicitly retained by the system)
+                // No userCollateral change here; the release simply does not credit out.
+                emit HaircutApplied(user, marketId, realizedFromRelease, userCollateral[user]);
+            }
+            uint256 remainderHaircut = result.haircutToConfiscate6 - realizedFromRelease;
+            if (remainderHaircut > 0) {
+                if (result.positionClosed) {
+                    // Any unpaid haircut at full close becomes bad debt
+                    marketBadDebt[marketId] += remainderHaircut;
+                    emit BadDebtRecorded(marketId, remainderHaircut, user);
+                } else {
+                    // Carry forward on the still-open position
+                    for (uint256 i = 0; i < userPositions[user].length; i++) {
+                        if (userPositions[user][i].marketId == marketId && userPositions[user][i].size != 0) {
+                            userPositions[user][i].socializedLossAccrued6 += remainderHaircut;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         // Handle realized P&L
         if (result.realizedPnL != 0) {
             userRealizedPnL[user] += result.realizedPnL;
@@ -326,14 +362,17 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 uint256 seizableFromLocked = actualLoss > marginToConfiscate ? marginToConfiscate : actualLoss;
                 uint256 collateralAvailable_ = userCollateral[user];
                 uint256 seized = seizableFromLocked > collateralAvailable_ ? collateralAvailable_ : seizableFromLocked;
-                uint256 uncoveredLoss = actualLoss - seized;
+                // Only socialize uncovered TRADING LOSS; penalties are not socialized
+                uint256 uncoveredLoss = tradingLoss > seized ? (tradingLoss - seized) : 0;
                 
                 // Confiscate the margin and apply losses
                 if (seized > 0) {
                     userCollateral[user] -= seized;
                     
-                    // Give liquidator the penalty portion only (bounded by seized amount)
-                    uint256 liquidatorReward = penalty > seized ? seized : penalty;
+                    // Pay liquidator reward strictly from seized remainder after covering trading loss
+                    uint256 seizedForTradingLoss = tradingLoss > seized ? seized : tradingLoss;
+                    uint256 seizedRemainder = seized - seizedForTradingLoss;
+                    uint256 liquidatorReward = penalty > seizedRemainder ? seizedRemainder : penalty;
                     if (liquidatorReward > 0) {
                         userCollateral[liquidator] += liquidatorReward;
                         emit LiquidatorRewardPaid(liquidator, user, marketId, liquidatorReward, userCollateral[liquidator]);
@@ -594,6 +633,56 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         return userPositions[user].length;
     }
 
+    /**
+     * @dev Payout equity for a specific market position: posted_margin + PnL - socialized_loss (all 6 decimals)
+     *      This is strictly for payout/accounting views; liquidation/MMR math remains unchanged.
+     */
+    function getPositionPayoutEquity(
+        address user,
+        bytes32 marketId
+    ) external view returns (int256 equity6, uint256 notional6, bool hasPosition) {
+        PositionManager.Position[] storage positions = userPositions[user];
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size != 0) {
+                hasPosition = true;
+                uint256 markPrice = getMarkPrice(marketId);
+                uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
+                notional6 = (absSize * markPrice) / (10**18);
+
+                int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
+                int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
+                int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
+                // Equity for payout: posted margin + PnL - accrued haircut
+                equity6 = int256(positions[i].marginLocked) + pnl6 - int256(positions[i].socializedLossAccrued6);
+                return (equity6, notional6, true);
+            }
+        }
+        return (0, 0, false);
+    }
+
+    /**
+     * @dev Sum payout equity across all open positions for a user.
+     *      Returns (equity6Total, notional6Total).
+     */
+    function getUserPayoutEquityTotal(address user) external view returns (int256 equity6Total, uint256 notional6Total) {
+        PositionManager.Position[] storage positions = userPositions[user];
+        int256 total = 0;
+        uint256 totalNotional = 0;
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].size != 0) {
+                uint256 markPrice = getMarkPrice(positions[i].marketId);
+                uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
+                totalNotional += (absSize * markPrice) / (10**18);
+
+                int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
+                int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
+                int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
+                total += int256(positions[i].marginLocked) + pnl6 - int256(positions[i].socializedLossAccrued6);
+            }
+        }
+        return (total, totalNotional);
+    }
+
     function getMarkPrice(bytes32 marketId) public view returns (uint256) {
         // Return stored mark price (updated by SETTLEMENT_ROLE)
         return marketMarkPrices[marketId];
@@ -677,6 +766,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             if (userPositions[user][i].marketId == marketId) {
                 uint256 locked = userPositions[user][i].marginLocked;
                 require(locked >= amount, "insufficient locked");
+                // Relax guard: allow release below accrued haircut. Haircut is realized from payout streams, not enforced by margin floor.
                 userPositions[user][i].marginLocked = locked - amount;
                 positionFound = true;
                 emit MarginReleased(user, marketId, amount, userPositions[user][i].marginLocked);
@@ -716,6 +806,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         for (uint256 i = 0; i < userPositions[user].length; i++) {
             if (userPositions[user][i].marketId == marketId && userPositions[user][i].size != 0) {
                 userPositions[user][i].marginLocked += amount;
+                // Do not allow marginLocked below accrued haircut at any time (top-up only increases)
                 positionFound = true;
                 emit MarginLocked(user, marketId, amount, userPositions[user][i].marginLocked);
                 break;
@@ -1166,12 +1257,15 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             uint256 seizableFromLocked = actualLoss > locked ? locked : actualLoss;
             uint256 collateralAvailable_ = userCollateral[user];
             uint256 seized = seizableFromLocked > collateralAvailable_ ? collateralAvailable_ : seizableFromLocked;
-            uint256 uncoveredLoss = actualLoss - seized;
+            // Only socialize uncovered TRADING LOSS; penalties are not socialized
+            uint256 uncoveredLoss = tradingLoss > seized ? (tradingLoss - seized) : 0;
             
-                if (seized > 0) {
+            if (seized > 0) {
                 userCollateral[user] -= seized;
-                // Give liquidator the penalty portion only, bounded by seized amount
-                uint256 liquidatorReward = penalty > seized ? seized : penalty;
+                // Pay liquidator reward strictly from seized remainder after covering trading loss
+                uint256 seizedForTradingLoss = tradingLoss > seized ? seized : tradingLoss;
+                uint256 seizedRemainder = seized - seizedForTradingLoss;
+                uint256 liquidatorReward = penalty > seizedRemainder ? seizedRemainder : penalty;
                 if (liquidatorReward > 0) {
                     userCollateral[liquidator] += liquidatorReward;
                     emit LiquidatorRewardPaid(liquidator, user, marketId, liquidatorReward, userCollateral[liquidator]);
@@ -1261,8 +1355,10 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             
             if (seized > 0) {
                 userCollateral[user] -= seized;
-                // Give liquidator the penalty portion only, bounded by seized amount
-                uint256 liquidatorReward = penalty > seized ? seized : penalty;
+                // Pay liquidator reward strictly from seized remainder after covering trading loss
+                uint256 seizedForTradingLoss = tradingLoss > seized ? seized : tradingLoss;
+                uint256 seizedRemainder = seized - seizedForTradingLoss;
+                uint256 liquidatorReward = penalty > seizedRemainder ? seizedRemainder : penalty;
                 if (liquidatorReward > 0) {
                     userCollateral[liquidator] += liquidatorReward;
                     emit LiquidatorRewardPaid(liquidator, user, marketId, liquidatorReward, userCollateral[liquidator]);
@@ -1363,118 +1459,129 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     ) internal {
         require(lossAmount > 0, "Loss amount must be positive");
         
-        // DEBUG: Start socialization process
         if (adlDebug) {
             emit SocializationStarted(marketId, lossAmount, liquidatedUser, block.timestamp);
         }
         
-        // Step 1: Find all profitable positions in this market (excluding liquidated user)
+        // Identify profitable side candidates (bounded by adlMaxCandidates for gas safety)
         ProfitablePosition[] memory profitablePositions = _findProfitablePositions(marketId, liquidatedUser);
-        
         if (profitablePositions.length == 0) {
-            // No profitable positions to socialize to - loss becomes bad debt
+            // No candidates; record bad debt entirely
+            marketBadDebt[marketId] += lossAmount;
             emit SocializationFailed(marketId, lossAmount, "No profitable positions found", liquidatedUser);
-            emit SocializedLossApplied(marketId, lossAmount, liquidatedUser);
+            emit BadDebtRecorded(marketId, lossAmount, liquidatedUser);
+            emit SocializedLossApplied(marketId, 0, liquidatedUser);
             return;
         }
-        
-        emit DebugSocializationState(marketId, lossAmount, profitablePositions.length, 0);
-        
-        // Step 2: Sort positions by profit score (highest profit first)
-        // Gas control: limit to top-K before sorting if array is very large
+
+        // Optional top-K cap to avoid large loops
         if (profitablePositions.length > adlMaxCandidates) {
-            // Select top-K via single pass (partial selection) to reduce sort cost
             ProfitablePosition[] memory topK = _selectTopKByProfitScore(profitablePositions, adlMaxCandidates);
             profitablePositions = topK;
         }
-        _sortProfitablePositionsByScore(profitablePositions);
-        
-        // Step 3: Apply Administrative Position Closure (ADL) to cover the loss
-        uint256 remainingLoss = lossAmount;
-        uint256 positionsAffected = 0;
-        uint256 totalLossCovered = 0;
-        
-        uint256 processed = 0;
-        for (uint256 i = 0; i < profitablePositions.length && remainingLoss > 0; i++) {
-            ProfitablePosition memory profitablePos = profitablePositions[i];
-            
-            // Calculate how much loss this position can cover (all values in 6 decimals)
-            // profitablePos.unrealizedPnL is derived from standard P&L (18 decimals). Convert to 6 decimals.
-            uint256 maxCoverage = profitablePos.unrealizedPnL / DECIMAL_SCALE; // 18 → 6
-            uint256 targetCoverage = remainingLoss > maxCoverage ? maxCoverage : remainingLoss;
-            
-            if (targetCoverage == 0) continue;
-            
-            // Execute administrative position closure
-            PositionClosureResult memory closureResult = _executeAdministrativePositionClosure(
-                profitablePos.user,
-                marketId,
-                profitablePos.positionSize,
-                profitablePos.entryPrice,
-                targetCoverage
-            );
-            
-            if (closureResult.success) {
-                positionsAffected++;
-                if (adlDebug) {
-                    emit AdministrativePositionClosure(
-                        profitablePos.user,
-                        marketId,
-                        uint256(profitablePos.positionSize >= 0 ? profitablePos.positionSize : -profitablePos.positionSize),
-                        closureResult.newPositionSize,
-                        closureResult.realizedProfit,
-                        closureResult.newEntryPrice
-                    );
-                }
-                
-                // CRITICAL FIX: Confiscate the realized profit from the user to cover the socialized loss
-                // Compute the amount actually confiscated from the user (bounded by their collateral)
-                uint256 confiscatedAmount;
-                if (closureResult.realizedProfit <= userCollateral[profitablePos.user]) {
-                    // Deduct profit from user's collateral to cover the loss
-                    userCollateral[profitablePos.user] -= closureResult.realizedProfit;
-                    confiscatedAmount = closureResult.realizedProfit;
-                    emit UserLossSocialized(profitablePos.user, confiscatedAmount, userCollateral[profitablePos.user]);
-                } else {
-                    // If user doesn't have enough collateral, take what they have
-                    uint256 availableCollateral = userCollateral[profitablePos.user];
-                    userCollateral[profitablePos.user] = 0;
-                    confiscatedAmount = availableCollateral;
-                    emit UserLossSocialized(profitablePos.user, availableCollateral, 0);
-                }
 
-                // Apply coverage using only the actually confiscated amount and never exceed remainingLoss
-                uint256 coveredNow = confiscatedAmount;
-                if (coveredNow > remainingLoss) {
-                    coveredNow = remainingLoss;
-                }
-                totalLossCovered += coveredNow;
-                remainingLoss -= coveredNow;
-                
-            } else {
-                // DEBUG: Position closure failed
-                if (adlDebug) {
-                    emit SocializationFailed(marketId, targetCoverage, closureResult.failureReason, profitablePos.user);
-                }
-            }
-            
-            // DEBUG: Track progress
-            if (adlDebug) {
-                emit DebugSocializationState(marketId, remainingLoss, profitablePositions.length, i + 1);
-            }
+        uint256 markPrice = getMarkPrice(marketId);
+        if (markPrice == 0) {
+            // If mark price unavailable, consider entire loss as bad debt
+            marketBadDebt[marketId] += lossAmount;
+            emit SocializationFailed(marketId, lossAmount, "Zero mark price", liquidatedUser);
+            emit BadDebtRecorded(marketId, lossAmount, liquidatedUser);
+            emit SocializedLossApplied(marketId, 0, liquidatedUser);
+            return;
+        }
 
-            processed++;
-            if (processed >= adlMaxPositionsPerTx && remainingLoss > 0) {
-                // Stop early to avoid out-of-gas; remainingLoss will be handled on next liquidation tick
-                break;
+        uint256 n = profitablePositions.length;
+        uint256[] memory notionals6 = new uint256[](n);
+        uint256 totalNotional6 = 0;
+        for (uint256 i = 0; i < n; i++) {
+            uint256 absSize = uint256(profitablePositions[i].positionSize >= 0 ? profitablePositions[i].positionSize : -profitablePositions[i].positionSize);
+            uint256 notional6 = (absSize * markPrice) / 1e18;
+            notionals6[i] = notional6;
+            totalNotional6 += notional6;
+        }
+        if (totalNotional6 == 0) {
+            marketBadDebt[marketId] += lossAmount;
+            emit SocializationFailed(marketId, lossAmount, "Zero total notional", liquidatedUser);
+            emit BadDebtRecorded(marketId, lossAmount, liquidatedUser);
+            emit SocializedLossApplied(marketId, 0, liquidatedUser);
+            return;
+        }
+
+        // Compute target assignments based on notional
+        uint256[] memory targetAssign = new uint256[](n);
+        for (uint256 i = 0; i < n; i++) {
+            targetAssign[i] = (lossAmount * notionals6[i]) / totalNotional6;
+        }
+
+        // First pass: accrue per-position haircut up to capacity cap = min(marginLocked, equity - maintenance)
+        uint256 allocated = 0;
+        uint256[] memory remainingCap = new uint256[](n);
+        for (uint256 i = 0; i < n; i++) {
+            address u = profitablePositions[i].user;
+            // Find the user's position for this market
+            PositionManager.Position[] storage positions = userPositions[u];
+            for (uint256 j = 0; j < positions.length; j++) {
+                if (positions[j].marketId == marketId && positions[j].size != 0) {
+                    // Calculate capacity
+                    uint256 absSize = uint256(positions[j].size >= 0 ? positions[j].size : -positions[j].size);
+                    uint256 notional6 = (absSize * markPrice) / 1e18;
+                    int256 pnl18 = (int256(markPrice) - int256(positions[j].entryPrice)) * positions[j].size / int256(TICK_PRECISION);
+                    int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
+                    int256 equity6 = int256(positions[j].marginLocked) + pnl6;
+                    (uint256 mmrBps, ) = _computeEffectiveMMRBps(u, marketId, positions[j].size);
+                    uint256 maintenance6 = (notional6 * mmrBps) / 10000;
+                    uint256 cap6 = 0;
+                    if (equity6 > int256(maintenance6)) {
+                        // Capacity is excess equity above maintenance; may exceed posted margin
+                        uint256 excess = uint256(equity6 - int256(maintenance6));
+                        cap6 = excess;
+                    }
+                    uint256 assign = targetAssign[i] <= cap6 ? targetAssign[i] : cap6;
+                    if (assign > 0) {
+                        positions[j].socializedLossAccrued6 += assign;
+                        userSocializedLoss[u] += assign; // aggregate for analytics/UI
+                        allocated += assign;
+                        emit HaircutApplied(u, marketId, assign, userCollateral[u]);
+                    }
+                    remainingCap[i] = cap6 > assign ? (cap6 - assign) : 0;
+                    break;
+                }
             }
         }
-        
-        // Final result
+
+        uint256 remaining = lossAmount > allocated ? (lossAmount - allocated) : 0;
+        // Second pass: distribute remainder across positions with residual capacity
+        if (remaining > 0) {
+            for (uint256 i = 0; i < n && remaining > 0; i++) {
+                if (remainingCap[i] == 0) continue;
+                address u = profitablePositions[i].user;
+                PositionManager.Position[] storage positions = userPositions[u];
+                for (uint256 j = 0; j < positions.length && remaining > 0; j++) {
+                    if (positions[j].marketId == marketId && positions[j].size != 0) {
+                        uint256 addl = remaining <= remainingCap[i] ? remaining : remainingCap[i];
+                        if (addl > 0) {
+                            positions[j].socializedLossAccrued6 += addl;
+                            userSocializedLoss[u] += addl;
+                            remaining -= addl;
+                            allocated += addl;
+                            emit HaircutApplied(u, marketId, addl, userCollateral[u]);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (remaining > 0) {
+            marketBadDebt[marketId] += remaining;
+            emit BadDebtRecorded(marketId, remaining, liquidatedUser);
+            emit SocializationFailed(marketId, remaining, "Insufficient winner capacity for haircut", liquidatedUser);
+        }
+
         if (adlDebug) {
-            emit SocializationCompleted(marketId, totalLossCovered, remainingLoss, positionsAffected, liquidatedUser);
+            emit SocializationCompleted(marketId, allocated, remaining, n, liquidatedUser);
         }
-        emit SocializedLossApplied(marketId, totalLossCovered, liquidatedUser);
+        emit SocializedLossApplied(marketId, allocated, liquidatedUser);
     }
     
     /**

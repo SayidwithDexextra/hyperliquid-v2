@@ -747,6 +747,46 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             )
           );
         }
+
+        // Subscribe to haircut/bad debt events
+        try {
+          this.contracts.vault.on(
+            "HaircutApplied",
+            (user, marketId, debitAmount, collateralAfter, event) => {
+              this.handleHaircutAppliedEvent(
+                user,
+                marketId,
+                debitAmount,
+                collateralAfter,
+                event
+              );
+            }
+          );
+          this.contracts.vault.on(
+            "BadDebtRecorded",
+            (marketId, amount, liquidatedUser, event) => {
+              this.handleBadDebtRecordedEvent(
+                marketId,
+                amount,
+                liquidatedUser,
+                event
+              );
+            }
+          );
+          console.log(
+            colorText(
+              "📡 Subscribed to HaircutApplied and BadDebtRecorded",
+              colors.green
+            )
+          );
+        } catch (e) {
+          console.log(
+            colorText(
+              `⚠️ Failed subscribing to haircut events: ${e.message}`,
+              colors.yellow
+            )
+          );
+        }
       } else {
         console.log(
           colorText("❌ CoreVault contract is null/undefined!", colors.red)
@@ -2398,432 +2438,6 @@ ${colors.brightRed}└───────────────────�
     );
   }
 
-  // ============ COMMENTED OUT: Old Liquidation Handler Functions ============
-  /*
-  handleLiquidationTradeDetectedEvent(
-    isLiquidationTrade,
-    liquidationTarget,
-    liquidationClosesShort,
-    event
-  ) {
-    const timestamp = new Date().toLocaleTimeString();
-
-    if (isLiquidationTrade) {
-      const targetType = this.formatUserDisplay(liquidationTarget);
-      const direction = liquidationClosesShort ? "CLOSES SHORT" : "CLOSES LONG";
-
-      console.log(
-        `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightRed}⚠️ LIQUIDATION TRADE${colors.reset} | ` +
-          `${colors.yellow}Target: ${targetType}${colors.reset} | ` +
-          `${colors.magenta}${direction}${colors.reset}`
-      );
-    } else {
-      console.log(
-        `${colors.dim}[${timestamp}]${colors.reset} ${colors.green}✅ NORMAL TRADE${colors.reset}`
-      );
-    }
-  }
-
-  handleMarginUpdatesStartedEvent(isLiquidationTrade, event) {
-    const timestamp = new Date().toLocaleTimeString();
-    const tradeType = isLiquidationTrade ? "LIQUIDATION" : "NORMAL";
-    const typeColor = isLiquidationTrade ? colors.red : colors.green;
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${colors.yellow}🔄 MARGIN UPDATES STARTED${colors.reset} | ` +
-        `${typeColor}${tradeType} TRADE${colors.reset}`
-    );
-  }
-
-  handleMarginUpdatesCompletedEvent(event) {
-    const timestamp = new Date().toLocaleTimeString();
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightGreen}✅ MARGIN UPDATES COMPLETED${colors.reset}`
-    );
-  }
-
-  handleFeesDeductedEvent(buyer, buyerFee, seller, sellerFee, event) {
-    const timestamp = new Date().toLocaleTimeString();
-    const buyerFeeFormatted = formatWithAutoDecimalDetection(buyerFee, 6, 4);
-    const sellerFeeFormatted = formatWithAutoDecimalDetection(sellerFee, 6, 4);
-    const buyerType = this.formatUserDisplay(buyer);
-    const sellerType = this.formatUserDisplay(seller);
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${colors.yellow}💸 FEES DEDUCTED${colors.reset} | ` +
-        `${colors.green}${buyerType}: $${buyerFeeFormatted}${colors.reset} | ` +
-        `${colors.red}${sellerType}: $${sellerFeeFormatted}${colors.reset}`
-    );
-  }
-
-  handlePriceUpdatedEvent(lastTradePrice, currentMarkPrice, event) {
-    const timestamp = new Date().toLocaleTimeString();
-    const tradePriceFormatted = formatWithAutoDecimalDetection(
-      lastTradePrice,
-      6,
-      2
-    );
-    const markPriceFormatted = formatWithAutoDecimalDetection(
-      currentMarkPrice,
-      6,
-      2
-    );
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightYellow}📊 PRICE UPDATED${colors.reset} | ` +
-        `${colors.cyan}Trade: $${tradePriceFormatted}${colors.reset} | ` +
-        `${colors.magenta}Mark: $${markPriceFormatted}${colors.reset}`
-    );
-  }
-
-  handleLiquidationCheckTriggeredEvent(currentMark, lastMarkPrice, event) {
-    const timestamp = new Date().toLocaleTimeString();
-    const currentFormatted = formatWithAutoDecimalDetection(currentMark, 6, 2);
-    const lastFormatted = formatWithAutoDecimalDetection(lastMarkPrice, 6, 2);
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightRed}🔍 LIQUIDATION CHECK${colors.reset} | ` +
-        `${colors.yellow}Current: $${currentFormatted}${colors.reset} | ` +
-        `${colors.dim}Last: $${lastFormatted}${colors.reset}`
-    );
-  }
-
-  handleTradeExecutionCompletedEvent(buyer, seller, price, amount, event) {
-    const timestamp = new Date().toLocaleTimeString();
-    const priceFormatted = formatWithAutoDecimalDetection(price, 6, 2);
-    const amountFormatted = formatWithAutoDecimalDetection(amount, 18, 4);
-    const buyerType = this.formatUserDisplay(buyer);
-    const sellerType = this.formatUserDisplay(seller);
-
-    const notification = `
-${colors.bgGreen}${colors.white}${
-      colors.bright
-    }                    ✅ TRADE EXECUTION COMPLETED                    ${
-      colors.reset
-    }
-${
-  colors.brightGreen
-}┌─────────────────────────────────────────────────────────┐${colors.reset}
-${colors.brightGreen}│${colors.reset} ${
-      colors.brightYellow
-    }🎉 TRADE SUCCESSFUL${colors.reset} ${colors.dim}at ${timestamp}${
-      colors.reset
-    }                     ${colors.brightGreen}│${colors.reset}
-${colors.brightGreen}│${
-      colors.reset
-    }                                                         ${
-      colors.brightGreen
-    }│${colors.reset}
-${colors.brightGreen}│${colors.reset} ${colors.brightCyan}💰 Price:${
-      colors.reset
-    } $${priceFormatted} USDC                              ${
-      colors.brightGreen
-    }│${colors.reset}
-${colors.brightGreen}│${colors.reset} ${colors.brightYellow}📊 Amount:${
-      colors.reset
-    } ${amountFormatted} ALU                             ${
-      colors.brightGreen
-    }│${colors.reset}
-${colors.brightGreen}│${
-      colors.reset
-    }                                                         ${
-      colors.brightGreen
-    }│${colors.reset}
-${colors.brightGreen}│${colors.reset} ${colors.green}👤 Buyer:${
-      colors.reset
-    } ${buyerType.padEnd(15)}                        ${colors.brightGreen}│${
-      colors.reset
-    }
-${colors.brightGreen}│${colors.reset} ${colors.red}👤 Seller:${
-      colors.reset
-    } ${sellerType.padEnd(15)}                       ${colors.brightGreen}│${
-      colors.reset
-    }
-${colors.brightGreen}│${
-      colors.reset
-    }                                                         ${
-      colors.brightGreen
-    }│${colors.reset}
-${colors.brightGreen}│${colors.reset} ${colors.dim}Block: ${
-      event.blockNumber
-    } | Tx: ${((event && event.transactionHash) ? event.transactionHash : "").slice(0, 10)}...${colors.reset} ${
-      colors.brightGreen
-    }│${colors.reset}
-${
-  colors.brightGreen
-}└─────────────────────────────────────────────────────────┘${colors.reset}
-    `;
-
-    console.log(notification);
-
-    // Play a success sound notification (if terminal supports it)
-    process.stdout.write("\x07");
-  }
-
-  // _checkPositionsForLiquidation debug event handlers
-  handleLiquidationCheckStartedEvent(
-    markPrice,
-    tradersLength,
-    startIndex,
-    endIndex,
-    event
-  ) {
-    const timestamp = new Date().toLocaleTimeString();
-    const markPriceFormatted = formatWithAutoDecimalDetection(markPrice, 6, 2);
-
-    const notification = `
-${colors.bgYellow}${colors.black}${
-      colors.bright
-    }                🔍 LIQUIDATION CHECK STARTED                ${colors.reset}
-${
-  colors.brightYellow
-}┌─────────────────────────────────────────────────────────┐${colors.reset}
-${colors.brightYellow}│${colors.reset} ${colors.brightRed}⚠️ LIQUIDATION SCAN${
-      colors.reset
-    } ${colors.dim}at ${timestamp}${colors.reset}                    ${
-      colors.brightYellow
-    }│${colors.reset}
-${colors.brightYellow}│${
-      colors.reset
-    }                                                         ${
-      colors.brightYellow
-    }│${colors.reset}
-${colors.brightYellow}│${colors.reset} ${colors.brightCyan}💰 Mark Price:${
-      colors.reset
-    } $${markPriceFormatted} USDC                        ${
-      colors.brightYellow
-    }│${colors.reset}
-${colors.brightYellow}│${colors.reset} ${
-      colors.brightMagenta
-    }👥 Total Traders:${
-      colors.reset
-    } ${tradersLength}                              ${colors.brightYellow}│${
-      colors.reset
-    }
-${colors.brightYellow}│${colors.reset} ${colors.brightBlue}📊 Checking:${
-      colors.reset
-    } ${startIndex} → ${endIndex} (batch)                   ${
-      colors.brightYellow
-    }│${colors.reset}
-${colors.brightYellow}│${
-      colors.reset
-    }                                                         ${
-      colors.brightYellow
-    }│${colors.reset}
-${colors.brightYellow}│${colors.reset} ${colors.dim}Block: ${
-      event.blockNumber
-    } | Tx: ${((event && event.transactionHash) ? event.transactionHash : "").slice(0, 10)}...${colors.reset} ${
-      colors.brightYellow
-    }│${colors.reset}
-${
-  colors.brightYellow
-}└─────────────────────────────────────────────────────────┘${colors.reset}
-    `;
-
-    console.log(notification);
-  }
-
-  handleLiquidationRecursionGuardSetEvent(inProgress, event) {
-    const timestamp = new Date().toLocaleTimeString();
-    const status = inProgress ? "BLOCKED" : "ALLOWED";
-    const statusColor = inProgress ? colors.red : colors.green;
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${colors.yellow}🛡️ RECURSION GUARD${colors.reset} | ` +
-        `${statusColor}${status}${colors.reset}`
-    );
-  }
-
-  handleLiquidationTraderBeingCheckedEvent(trader, index, totalTraders, event) {
-    const timestamp = new Date().toLocaleTimeString();
-    const traderType = this.formatUserDisplay(trader);
-    const progress = Math.round(((index + 1) / totalTraders) * 100);
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${colors.cyan}🔍 CHECKING TRADER${colors.reset} | ` +
-        `${colors.magenta}${traderType}${colors.reset} | ` +
-        `${colors.dim}${index + 1}/${totalTraders} (${progress}%)${
-          colors.reset
-        }`
-    );
-  }
-
-  handleLiquidationLiquidatableCheckEvent(
-    trader,
-    isLiquidatable,
-    markPrice,
-    event
-  ) {
-    const timestamp = new Date().toLocaleTimeString();
-    const traderType = this.formatUserDisplay(trader);
-    const markPriceFormatted = formatWithAutoDecimalDetection(markPrice, 6, 2);
-    const status = isLiquidatable ? "LIQUIDATABLE" : "HEALTHY";
-    const statusColor = isLiquidatable ? colors.red : colors.green;
-    const icon = isLiquidatable ? "⚠️" : "✅";
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${statusColor}${icon} HEALTH CHECK${colors.reset} | ` +
-        `${colors.magenta}${traderType}${colors.reset} | ` +
-        `${statusColor}${status}${colors.reset} @ $${markPriceFormatted}`
-    );
-  }
-
-  handleLiquidationPositionRetrievedEvent(
-    trader,
-    size,
-    marginLocked,
-    unrealizedPnL,
-    event
-  ) {
-    const timestamp = new Date().toLocaleTimeString();
-    const traderType = this.formatUserDisplay(trader);
-    const sizeFormatted = formatWithAutoDecimalDetection(size, 18, 4);
-    const marginFormatted = formatWithAutoDecimalDetection(marginLocked, 6, 2);
-    const pnlFormatted = formatWithAutoDecimalDetection(unrealizedPnL, 6, 2);
-    const sizeColor = size > 0 ? colors.green : colors.red;
-    const pnlColor = unrealizedPnL >= 0 ? colors.green : colors.red;
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${colors.blue}📊 POSITION DATA${colors.reset} | ` +
-        `${colors.magenta}${traderType}${colors.reset} | ` +
-        `${sizeColor}${sizeFormatted} ALU${colors.reset} | ` +
-        `${colors.yellow}$${marginFormatted} margin${colors.reset} | ` +
-        `${pnlColor}$${pnlFormatted} PnL${colors.reset}`
-    );
-  }
-
-  handleLiquidationMarketOrderAttemptEvent(
-    trader,
-    amount,
-    isBuy,
-    markPrice,
-    event
-  ) {
-    const timestamp = new Date().toLocaleTimeString();
-    const traderType = this.formatUserDisplay(trader);
-    const amountFormatted = formatWithAutoDecimalDetection(amount, 18, 4);
-    const markPriceFormatted = formatWithAutoDecimalDetection(markPrice, 6, 2);
-    const direction = isBuy ? "BUY" : "SELL";
-    const directionColor = isBuy ? colors.green : colors.red;
-    const positionType = isBuy ? "SHORT" : "LONG";
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightMagenta}🎯 MARKET ORDER${colors.reset} | ` +
-        `${colors.magenta}${traderType}${colors.reset} | ` +
-        `${directionColor}${direction} ${amountFormatted} ALU${colors.reset} | ` +
-        `${colors.dim}Closing ${positionType} @ $${markPriceFormatted}${colors.reset}`
-    );
-  }
-
-  handleLiquidationMarketOrderResultEvent(trader, success, reason, event) {
-    const timestamp = new Date().toLocaleTimeString();
-    const traderType = this.formatUserDisplay(trader);
-    const status = success ? "SUCCESS" : "FAILED";
-    const statusColor = success ? colors.green : colors.red;
-    const icon = success ? "✅" : "❌";
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${statusColor}${icon} MARKET RESULT${colors.reset} | ` +
-        `${colors.magenta}${traderType}${colors.reset} | ` +
-        `${statusColor}${status}${colors.reset} | ` +
-        `${colors.dim}${reason}${colors.reset}`
-    );
-  }
-
-  handleLiquidationSocializedLossAttemptEvent(trader, isLong, method, event) {
-    const timestamp = new Date().toLocaleTimeString();
-    const traderType = this.formatUserDisplay(trader);
-    const positionType = isLong ? "LONG" : "SHORT";
-    const positionColor = isLong ? colors.green : colors.red;
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightRed}⚡ SOCIALIZED LOSS${colors.reset} | ` +
-        `${colors.magenta}${traderType}${colors.reset} | ` +
-        `${positionColor}${positionType}${colors.reset} | ` +
-        `${colors.dim}${method}${colors.reset}`
-    );
-  }
-
-  handleLiquidationSocializedLossResultEvent(trader, success, method, event) {
-    const timestamp = new Date().toLocaleTimeString();
-    const traderType = this.formatUserDisplay(trader);
-    const status = success ? "SUCCESS" : "FAILED";
-    const statusColor = success ? colors.green : colors.red;
-    const icon = success ? "✅" : "❌";
-
-    console.log(
-      `${colors.dim}[${timestamp}]${colors.reset} ${statusColor}${icon} SOCIALIZED RESULT${colors.reset} | ` +
-        `${colors.magenta}${traderType}${colors.reset} | ` +
-        `${statusColor}${status}${colors.reset} | ` +
-        `${colors.dim}${method}${colors.reset}`
-    );
-  }
-
-  handleLiquidationCompletedEvent(
-    trader,
-    liquidationsTriggered,
-    method,
-    event
-  ) {
-    const timestamp = new Date().toLocaleTimeString();
-    const traderType = this.formatUserDisplay(trader);
-
-    const notification = `
-${colors.bgRed}${colors.white}${
-      colors.bright
-    }                ⚡ LIQUIDATION COMPLETED                ${colors.reset}
-${colors.brightRed}┌─────────────────────────────────────────────────────────┐${
-      colors.reset
-    }
-${colors.brightRed}│${colors.reset} ${
-      colors.brightYellow
-    }💥 POSITION LIQUIDATED${colors.reset} ${colors.dim}at ${timestamp}${
-      colors.reset
-    }               ${colors.brightRed}│${colors.reset}
-${colors.brightRed}│${
-      colors.reset
-    }                                                         ${
-      colors.brightRed
-    }│${colors.reset}
-${colors.brightRed}│${colors.reset} ${colors.brightMagenta}👤 Trader:${
-      colors.reset
-    } ${traderType.padEnd(15)}                        ${colors.brightRed}│${
-      colors.reset
-    }
-${colors.brightRed}│${colors.reset} ${colors.brightCyan}⚡ Method:${
-      colors.reset
-    } ${method.padEnd(15)}                        ${colors.brightRed}│${
-      colors.reset
-    }
-${colors.brightRed}│${colors.reset} ${
-      colors.brightYellow
-    }📊 Total Liquidations:${
-      colors.reset
-    } ${liquidationsTriggered}                        ${colors.brightRed}│${
-      colors.reset
-    }
-${colors.brightRed}│${
-      colors.reset
-    }                                                         ${
-      colors.brightRed
-    }│${colors.reset}
-${colors.brightRed}│${colors.reset} ${colors.dim}Block: ${
-      event.blockNumber
-    } | Tx: ${((event && event.transactionHash) ? event.transactionHash : "").slice(0, 10)}...${colors.reset} ${
-      colors.brightRed
-    }│${colors.reset}
-${colors.brightRed}└─────────────────────────────────────────────────────────┘${
-      colors.reset
-    }
-    `;
-
-    console.log(notification);
-
-    // Play a warning sound notification (if terminal supports it)
-    process.stdout.write("\x07");
-  }
-
   handleLiquidationIndexUpdatedEvent(oldIndex, newIndex, tradersLength, event) {
     const timestamp = new Date().toLocaleTimeString();
     const progress = Math.round((newIndex / tradersLength) * 100);
@@ -2891,9 +2505,10 @@ ${colors.brightBlue}│${
     }│${colors.reset}
 ${colors.brightBlue}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${((event && event.transactionHash) ? event.transactionHash : "").slice(0, 10)}...${colors.reset} ${
-      colors.brightBlue
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightBlue}│${colors.reset}
 ${
   colors.brightBlue
 }└─────────────────────────────────────────────────────────┘${colors.reset}
@@ -2959,9 +2574,10 @@ ${colors.brightMagenta}│${
     }│${colors.reset}
 ${colors.brightMagenta}│${colors.reset} ${colors.dim}Block: ${
       event.blockNumber
-    } | Tx: ${((event && event.transactionHash) ? event.transactionHash : "").slice(0, 10)}...${colors.reset} ${
-      colors.brightMagenta
-    }│${colors.reset}
+    } | Tx: ${(event && event.transactionHash
+      ? event.transactionHash
+      : ""
+    ).slice(0, 10)}...${colors.reset} ${colors.brightMagenta}│${colors.reset}
 ${
   colors.brightMagenta
 }└─────────────────────────────────────────────────────────┘${colors.reset}
@@ -2972,8 +2588,6 @@ ${
     // Play a confiscation sound notification (if terminal supports it)
     process.stdout.write("\x07\x07"); // Double beep for emphasis
   }
-  */
-  // ============ END COMMENTED OUT: Old Liquidation Handler Functions ============
 
   handleCoreVaultMarginConfiscatedEvent(
     user,
@@ -4318,7 +3932,6 @@ ${
     `;
 
     console.log(notification);
-    process.stdout.write("\x07\x07"); // Double beep for position closure
   }
 
   handleSocializationCompletedEvent(
@@ -4761,7 +4374,7 @@ ${colors.brightRed}└───────────────────�
     console.log(colorText("\n👥 Loading user accounts...", colors.yellow));
 
     const signers = await ethers.getSigners();
-    this.users = signers.slice(0, 4); // Use first 4 accounts
+    this.users = signers.slice(0, 5); // Use first 5 accounts
 
     console.log(
       colorText(
@@ -4796,9 +4409,21 @@ ${colors.brightRed}└───────────────────�
       );
     }
 
-    const choice = await this.askQuestion(
-      colorText("\n🎯 Select account (1-4): ", colors.brightMagenta)
+    // Overview option
+    console.log(colorText(`\n0. Overview (All Users)`, colors.brightYellow));
+
+    const choiceRaw = await this.askQuestion(
+      colorText("\n🎯 Select account (0-5 or O): ", colors.brightMagenta)
     );
+    const choice = String(choiceRaw || "")
+      .trim()
+      .toLowerCase();
+
+    if (choice === "0" || choice === "o") {
+      await this.showOverview();
+      return;
+    }
+
     const index = parseInt(choice) - 1;
 
     if (index >= 0 && index < this.users.length) {
@@ -4815,6 +4440,860 @@ ${colors.brightRed}└───────────────────�
     } else {
       console.log(colorText("❌ Invalid selection", colors.red));
       await this.selectUser();
+    }
+  }
+
+  async showOverview() {
+    try {
+      console.clear();
+      console.log(gradient("═".repeat(80)));
+      console.log(colorText("📊 OVERVIEW - ALL USERS", colors.brightCyan));
+      console.log(gradient("═".repeat(80)));
+
+      // Aggregate positions by market and by user
+      const marketMap = new Map(); // marketIdHex -> { symbol, markPrice6, positions: [] }
+      const userTotals = []; // index -> { address, realized18, unrealized, positions, socialized6 }
+
+      for (let i = 0; i < this.users.length; i++) {
+        const user = this.users[i];
+        const address = user.address;
+        userTotals[i] = {
+          address,
+          realized18: 0n,
+          unrealized: 0,
+          positions: 0,
+          socialized6: 0n,
+        };
+
+        // Get realized/unified summary
+        try {
+          const [
+            _totalCollateral,
+            _marginUsed,
+            _marginReserved,
+            _available,
+            unifiedRealizedPnL,
+            _unifiedUnrealizedPnL,
+            _totalCommitted,
+            _isHealthy,
+          ] = await this.contracts.vault.getUnifiedMarginSummary(address);
+          userTotals[i].realized18 = BigInt(
+            (unifiedRealizedPnL || 0).toString()
+          );
+        } catch (_) {}
+
+        // Socialized loss per user (6 decimals)
+        try {
+          const haircut6 = await this.contracts.vault.userSocializedLoss(
+            address
+          );
+          userTotals[i].socialized6 = BigInt((haircut6 || 0).toString());
+        } catch (_) {}
+
+        // Positions
+        const positions = await this.contracts.vault.getUserPositions(address);
+        for (const position of positions) {
+          try {
+            const sizeBig = BigInt(position.size.toString());
+            if (sizeBig === 0n) continue;
+
+            const marketIdHex = position.marketId;
+            const symbol = await safeDecodeMarketId(
+              marketIdHex,
+              this.contracts
+            );
+
+            // Get mark price and pnl for this position
+            const { markPrice, pnl } = await getMarkPriceAndPnL(
+              this.contracts,
+              position
+            );
+
+            // Store by market
+            if (!marketMap.has(marketIdHex)) {
+              marketMap.set(marketIdHex, {
+                symbol,
+                markPrice6: markPrice,
+                positions: [],
+              });
+            }
+
+            const marketEntry = marketMap.get(marketIdHex);
+            marketEntry.markPrice6 = markPrice; // keep latest
+            marketEntry.positions.push({
+              userIndex: i,
+              address,
+              size: position.size,
+              entryPrice: position.entryPrice,
+              pnl,
+            });
+
+            userTotals[i].unrealized += pnl;
+            userTotals[i].positions += 1;
+          } catch (err) {
+            console.error("Error aggregating position for overview:", err);
+          }
+        }
+      }
+
+      // Build market list for indexing and aggregate per-market PnL
+      const marketEntries = Array.from(marketMap.entries()).map(
+        ([marketIdHex, data]) => {
+          const totalMarketUnrealized = data.positions.reduce(
+            (acc, p) => acc + (Number.isFinite(p.pnl) ? p.pnl : 0),
+            0
+          );
+          return {
+            marketIdHex,
+            symbol: data.symbol,
+            markPrice6: data.markPrice6,
+            totalUnrealized: totalMarketUnrealized,
+            openPositions: data.positions.length,
+          };
+        }
+      );
+
+      // Display: Markets table
+      console.log(colorText("MARKETS OVERVIEW", colors.brightYellow));
+      if (marketEntries.length === 0) {
+        console.log(
+          colorText("   No open positions across users.", colors.yellow)
+        );
+      } else {
+        const header = [
+          "#",
+          "Symbol",
+          "Mark",
+          "OpenPos",
+          "Unrealized PnL",
+          "MarketId",
+        ];
+        console.log(
+          colorText(
+            `   ${header[0].padEnd(3)} ${header[1].padEnd(
+              10
+            )} ${header[2].padStart(10)} ${header[3].padStart(
+              7
+            )} ${header[4].padStart(16)} ${header[5].padEnd(12)}`,
+            colors.dim
+          )
+        );
+        for (let i = 0; i < marketEntries.length; i++) {
+          const m = marketEntries[i];
+          const markStr =
+            typeof m.markPrice6 === "number"
+              ? m.markPrice6.toFixed(4)
+              : String(m.markPrice6);
+          const unrealStr =
+            (m.totalUnrealized >= 0 ? "+" : "") + m.totalUnrealized.toFixed(2);
+          const line = `   ${String(i).padEnd(3)} ${String(m.symbol).padEnd(
+            10
+          )} ${markStr.toString().padStart(10)} ${String(
+            m.openPositions
+          ).padStart(7)} ${unrealStr.padStart(16)} ${String(
+            m.marketIdHex
+          ).substring(0, 10)}…`;
+          console.log(
+            colorText(line, m.totalUnrealized >= 0 ? colors.green : colors.red)
+          );
+        }
+
+        // Compact per-market positions section with units and entry price
+        console.log(gradient("-".repeat(80)));
+        console.log(colorText("POSITIONS BY MARKET", colors.brightCyan));
+        for (let i = 0; i < marketEntries.length; i++) {
+          const m = marketEntries[i];
+          const mapEntry = marketMap.get(m.marketIdHex);
+          if (
+            !mapEntry ||
+            !mapEntry.positions ||
+            mapEntry.positions.length === 0
+          ) {
+            continue;
+          }
+          console.log(
+            colorText(
+              `   [${i}] ${m.symbol} — ${mapEntry.positions.length} positions`,
+              colors.brightYellow
+            )
+          );
+          const pHeader = ["User", "Side", "Units", "Entry"];
+          console.log(
+            colorText(
+              `      ${pHeader[0].padEnd(10)} ${pHeader[1].padEnd(
+                6
+              )} ${pHeader[2].padStart(14)} ${pHeader[3].padStart(12)}`,
+              colors.dim
+            )
+          );
+          for (const p of mapEntry.positions) {
+            const userLabel =
+              p.userIndex === 0 ? "Deployer" : `User ${p.userIndex}`;
+            const sizeAbs = ethers.formatUnits(
+              BigInt(p.size.toString()) >= 0n
+                ? BigInt(p.size.toString())
+                : -BigInt(p.size.toString()),
+              18
+            );
+            const side = BigInt(p.size.toString()) >= 0n ? "LONG" : "SHORT";
+            const entryStr = formatPriceWithValidation(
+              BigInt(p.entryPrice.toString()),
+              6,
+              4,
+              false
+            );
+            const line = `      ${userLabel.padEnd(10)} ${side.padEnd(
+              6
+            )} ${sizeAbs.padStart(14)} ${entryStr.padStart(12)}`;
+            console.log(
+              colorText(line, side === "LONG" ? colors.green : colors.red)
+            );
+          }
+        }
+      }
+
+      // Totals per user
+      console.log(gradient("-".repeat(80)));
+      console.log(
+        colorText(
+          "👥 USER OVERVIEW (Realized + Unrealized - Socialized)",
+          colors.brightCyan
+        )
+      );
+      const userHeader = [
+        "#",
+        "User",
+        "Positions",
+        "Realized",
+        "Unrealized",
+        "Socialized",
+        "Total",
+        "Address",
+      ];
+      console.log(
+        colorText(
+          `   ${userHeader[0].padEnd(3)} ${userHeader[1].padEnd(
+            10
+          )} ${userHeader[2].padStart(9)} ${userHeader[3].padStart(
+            11
+          )} ${userHeader[4].padStart(12)} ${userHeader[5].padStart(
+            12
+          )} ${userHeader[6].padStart(9)} ${userHeader[7].padEnd(14)}`,
+          colors.dim
+        )
+      );
+      for (let i = 0; i < userTotals.length; i++) {
+        const u = userTotals[i];
+        const userLabel = i === 0 ? "Deployer" : `User ${i}`;
+        const realized = parseFloat(ethers.formatUnits(u.realized18, 18));
+        const unrealized = u.unrealized;
+        const socialized = (() => {
+          try {
+            return parseFloat(formatUSDC(u.socialized6));
+          } catch {
+            return 0;
+          }
+        })();
+        const total = realized + unrealized - socialized;
+
+        const addrShort = `${u.address.substring(0, 6)}…${u.address.substring(
+          u.address.length - 4
+        )}`;
+
+        const outerColor = total >= 0 ? colors.green : colors.red;
+
+        const colIdx = String(i).padEnd(3);
+        const colUser = userLabel.padEnd(10);
+        const colPositions = String(u.positions).padStart(9);
+        const colRealized = realized.toFixed(2).padStart(11);
+        const colUnrealized = unrealized.toFixed(2).padStart(12);
+
+        // Socialized should display as a negative and be red when > 0
+        const socializedSigned =
+          (socialized > 0 ? "-" : " ") + socialized.toFixed(2);
+        const colSocializedPlain = socializedSigned.padStart(12);
+        const colSocialized =
+          socialized > 0
+            ? `${colors.red}${colSocializedPlain}${colors.reset}${outerColor}`
+            : colSocializedPlain;
+
+        const colTotal = total.toFixed(2).padStart(9);
+
+        const lineBody = `   ${colIdx} ${colUser} ${colPositions} ${colRealized} ${colUnrealized} ${colSocialized} ${colTotal} ${addrShort}`;
+
+        // Apply outer color to the entire line, while preserving the inner red for socialized
+        console.log(`${outerColor}${lineBody}${colors.reset}`);
+      }
+
+      console.log(gradient("═".repeat(80)));
+      // Clear instructions for navigation
+      console.log(colorText("Navigation:", colors.brightYellow));
+      console.log(
+        colorText("  • View a user: u <userIndex>   e.g., u 1", colors.dim)
+      );
+      console.log(
+        colorText("  • View a market: m <marketIndex>   e.g., m 0", colors.dim)
+      );
+      console.log(
+        colorText(
+          "  • Sandbox a market: s <marketIndex> <newMarkPrice>   e.g., s 0 102.35",
+          colors.dim
+        )
+      );
+      console.log(colorText("  • Go back: press Enter", colors.dim));
+      const action = await this.askQuestion(
+        colorText("\nAction: ", colors.brightMagenta)
+      );
+      const input = String(action || "").trim();
+      if (!input) {
+        await this.selectUser();
+        return;
+      }
+      const parts = input.split(/\s+/);
+      if (parts.length === 2) {
+        const cmd = parts[0].toLowerCase();
+        const idx = parseInt(parts[1]);
+        if (
+          cmd === "u" &&
+          Number.isInteger(idx) &&
+          idx >= 0 &&
+          idx < this.users.length
+        ) {
+          await this.showUserDetails(idx);
+          await this.showOverview();
+          return;
+        }
+        if (
+          cmd === "m" &&
+          Number.isInteger(idx) &&
+          idx >= 0 &&
+          idx < marketEntries.length
+        ) {
+          await this.showMarketDetails(marketEntries[idx].marketIdHex);
+          await this.showOverview();
+          return;
+        }
+      } else if (parts.length === 3) {
+        const cmd = parts[0].toLowerCase();
+        const idx = parseInt(parts[1]);
+        const newMark = parseFloat(parts[2]);
+        if (
+          cmd === "s" &&
+          Number.isInteger(idx) &&
+          idx >= 0 &&
+          idx < marketEntries.length &&
+          Number.isFinite(newMark) &&
+          newMark > 0
+        ) {
+          await this.runSandboxSimulation(
+            marketEntries[idx].marketIdHex,
+            newMark
+          );
+          await this.showOverview();
+          return;
+        }
+      }
+      await this.showOverview();
+    } catch (error) {
+      console.error("Error displaying overview:", error);
+      await this.askQuestion(
+        colorText("\nPress Enter to return... ", colors.dim)
+      );
+      await this.selectUser();
+    }
+  }
+
+  async runSandboxSimulation(marketIdHex, newMarkPriceFloat) {
+    try {
+      console.clear();
+      const symbol = await safeDecodeMarketId(marketIdHex, this.contracts);
+      console.log(gradient("═".repeat(80)));
+      console.log(
+        colorText(
+          `🧪 SANDBOX - ${symbol} @ hypothetical mark $${newMarkPriceFloat.toFixed(
+            4
+          )}`,
+          colors.brightCyan
+        )
+      );
+      console.log(gradient("═".repeat(80)));
+
+      // Resolve the market-specific order book
+      let orderBook;
+      try {
+        const orderBookAddr = await this.contracts.vault.marketToOrderBook(
+          marketIdHex
+        );
+        if (orderBookAddr && orderBookAddr !== ethers.ZeroAddress) {
+          const OrderBook = await ethers.getContractFactory("OrderBook");
+          orderBook = OrderBook.attach(orderBookAddr);
+        } else {
+          orderBook = this.contracts.orderBook;
+        }
+      } catch (_) {
+        orderBook = this.contracts.orderBook;
+      }
+
+      // Snapshot order book depth
+      let bidPrices, bidAmounts, askPrices, askAmounts;
+      try {
+        const depth = 10;
+        const data = await orderBook.getOrderBookDepth(depth);
+        bidPrices = data[0];
+        bidAmounts = data[1];
+        askPrices = data[2];
+        askAmounts = data[3];
+      } catch (e) {
+        console.log(
+          colorText(
+            "⚠️ Could not fetch order book depth; using best prices only.",
+            colors.yellow
+          )
+        );
+        const bestBid = await orderBook.bestBid();
+        const bestAsk = await orderBook.bestAsk();
+        bidPrices = [bestBid];
+        bidAmounts = [0n];
+        askPrices = [bestAsk];
+        askAmounts = [0n];
+      }
+
+      // Convert new mark price to 6-decimal BigInt
+      const hypotheticalMark6 = BigInt(Math.round(newMarkPriceFloat * 1e6));
+
+      // Simple indicative simulation logic:
+      // - If mark is above mid, assume pressure on asks; if below, on bids.
+      // - Compute indicative crossed volume and reference price impact.
+      const fmt6 = (x) => {
+        try {
+          return parseFloat(ethers.formatUnits(x, 6)).toFixed(4);
+        } catch {
+          return "-";
+        }
+      };
+      const toFloat6 = (x) => {
+        try {
+          return parseFloat(ethers.formatUnits(x, 6));
+        } catch {
+          return 0;
+        }
+      };
+
+      let bestBid = 0n,
+        bestAsk = 0n;
+      try {
+        bestBid = await orderBook.bestBid();
+        bestAsk = await orderBook.bestAsk();
+      } catch (_) {}
+      const midFloat =
+        (toFloat6(bestBid) + toFloat6(bestAsk)) / 2 || newMarkPriceFloat;
+
+      console.log(
+        colorText(
+          `Current Bid: $${fmt6(bestBid)}  Ask: $${fmt6(
+            bestAsk
+          )}  Mid: $${midFloat.toFixed(4)}`,
+          colors.blue
+        )
+      );
+
+      // Aggregate hypothetical fills (purely indicative; no state changes)
+      let indicativeVolume = 0n;
+      let indicativeWeightedPriceNum = 0n;
+      let indicativeWeightedPriceDen = 0n;
+
+      if (bidPrices && askPrices) {
+        if (newMarkPriceFloat > midFloat) {
+          // Pressure upwards: consume asks up to new mark
+          for (let i = 0; i < askPrices.length; i++) {
+            const price = askPrices[i];
+            if (!price || price === 0n || price >= ethers.MaxUint256) continue;
+            if (price > hypotheticalMark6) break;
+            const amount = askAmounts[i] || 0n;
+            indicativeVolume += amount;
+            indicativeWeightedPriceNum += price * amount;
+            indicativeWeightedPriceDen += amount;
+          }
+        } else if (newMarkPriceFloat < midFloat) {
+          // Pressure downwards: consume bids down to new mark
+          for (let i = 0; i < bidPrices.length; i++) {
+            const price = bidPrices[i];
+            if (!price || price === 0n) continue;
+            if (price < hypotheticalMark6) break;
+            const amount = bidAmounts[i] || 0n;
+            indicativeVolume += amount;
+            indicativeWeightedPriceNum += price * amount;
+            indicativeWeightedPriceDen += amount;
+          }
+        }
+      }
+
+      let indicativeVWAP = "-";
+      if (indicativeWeightedPriceDen > 0n) {
+        const vwap6 = indicativeWeightedPriceNum / indicativeWeightedPriceDen;
+        indicativeVWAP = fmt6(vwap6);
+      }
+
+      console.log(gradient("-".repeat(80)));
+      console.log(
+        colorText(`Indicative fills at hypothetical mark:`, colors.brightYellow)
+      );
+      console.log(
+        colorText(
+          `   Volume: ${ethers.formatUnits(
+            indicativeVolume,
+            18
+          )} units  |  VWAP: $${indicativeVWAP}`,
+          colors.white
+        )
+      );
+
+      // Estimate unrealized P&L impact for each user in this market
+      console.log(gradient("-".repeat(80)));
+      console.log(
+        colorText(
+          `Unrealized P&L impact by user at $${newMarkPriceFloat.toFixed(4)}`,
+          colors.brightYellow
+        )
+      );
+      const header = ["User", "Unrealized ΔPnL", "Address"];
+      console.log(
+        colorText(
+          `   ${header[0].padEnd(10)} ${header[1].padStart(
+            16
+          )} ${header[2].padEnd(14)}`,
+          colors.dim
+        )
+      );
+      for (let i = 0; i < this.users.length; i++) {
+        const user = this.users[i];
+        const positions = await this.contracts.vault.getUserPositions(
+          user.address
+        );
+        let delta = 0;
+        for (const pos of positions) {
+          if (pos.marketId !== marketIdHex) continue;
+          const size = BigInt(pos.size.toString());
+          if (size === 0n) continue;
+          const entry = BigInt(pos.entryPrice.toString());
+          const priceDiff = hypotheticalMark6 - entry; // 6 decimals
+          const pnl18 = (priceDiff * size) / 1000000n; // ÷ TICK_PRECISION (1e6) => 18 dec
+          const pnl = parseFloat(ethers.formatUnits(pnl18, 18));
+          delta += pnl;
+        }
+        const userLabel = i === 0 ? "Deployer" : `User ${i}`;
+        const addrShort = `${user.address.substring(
+          0,
+          6
+        )}…${user.address.substring(user.address.length - 4)}`;
+        const line = `   ${userLabel.padEnd(10)} ${delta
+          .toFixed(2)
+          .padStart(16)} ${addrShort}`;
+        console.log(colorText(line, delta >= 0 ? colors.green : colors.red));
+      }
+
+      console.log(gradient("═".repeat(80)));
+      await this.askQuestion(
+        colorText("\nPress Enter to go back... ", colors.dim)
+      );
+    } catch (error) {
+      console.error("Error running sandbox simulation:", error);
+      await this.askQuestion(
+        colorText("\nPress Enter to return... ", colors.dim)
+      );
+    }
+  }
+
+  async showUserDetails(userIndex) {
+    try {
+      const user = this.users[userIndex];
+      const address = user.address;
+      console.clear();
+      console.log(gradient("═".repeat(80)));
+      console.log(
+        colorText(
+          `👤 USER DETAILS - ${
+            userIndex === 0 ? "Deployer" : `User ${userIndex}`
+          }`,
+          colors.brightCyan
+        )
+      );
+      console.log(colorText(address, colors.dim));
+      console.log(gradient("═".repeat(80)));
+
+      const balance = await this.contracts.mockUSDC.balanceOf(address);
+      const collateral = await this.contracts.vault.userCollateral(address);
+      const [
+        totalCollateral,
+        marginUsed,
+        marginReserved,
+        available,
+        realizedPnL18,
+        _unrealizedPnL18,
+        totalCommitted,
+        isHealthy,
+      ] = await this.contracts.vault.getUnifiedMarginSummary(address);
+
+      const realized = parseFloat(
+        ethers.formatUnits(BigInt(realizedPnL18.toString()), 18)
+      );
+      const positions = await this.contracts.vault.getUserPositions(address);
+
+      console.log(
+        colorText(
+          `USDC Balance: ${formatUSDC(balance)}  |  Collateral: ${formatUSDC(
+            totalCollateral
+          )}  |  Reserved: ${formatUSDC(marginReserved)}`,
+          colors.blue
+        )
+      );
+      console.log(
+        colorText(
+          `Margin Used: ${formatWithAutoDecimalDetection(
+            marginUsed,
+            6,
+            2
+          )}  |  Available: ${formatUSDC(available)}  |  Healthy: ${
+            isHealthy ? "Yes" : "No"
+          }`,
+          colors.dim
+        )
+      );
+
+      console.log(gradient("-".repeat(80)));
+      if (positions.length === 0) {
+        console.log(colorText("No open positions.", colors.yellow));
+      } else {
+        const header = ["Symbol", "Side", "Size", "Entry", "Mark", "PnL"];
+        console.log(
+          colorText(
+            `   ${header[0].padEnd(10)} ${header[1].padEnd(
+              6
+            )} ${header[2].padStart(10)} ${header[3].padStart(
+              10
+            )} ${header[4].padStart(10)} ${header[5].padStart(10)}`,
+            colors.dim
+          )
+        );
+        let unrealizedSum = 0;
+        for (const pos of positions) {
+          const sizeBig = BigInt(pos.size.toString());
+          if (sizeBig === 0n) continue;
+          const symbol = await safeDecodeMarketId(pos.marketId, this.contracts);
+          const { markPrice, pnl } = await getMarkPriceAndPnL(
+            this.contracts,
+            pos
+          );
+          unrealizedSum += pnl;
+          const side = sizeBig >= 0n ? "LONG" : "SHORT";
+          const sizeAbs = ethers.formatUnits(
+            sizeBig >= 0n ? sizeBig : -sizeBig,
+            18
+          );
+          const entryStr = formatPriceWithValidation(
+            BigInt(pos.entryPrice.toString()),
+            6,
+            4,
+            false
+          );
+          const markStr =
+            typeof markPrice === "number"
+              ? markPrice.toFixed(4)
+              : String(markPrice);
+          const pnlStr = (pnl >= 0 ? "+" : "") + pnl.toFixed(2);
+          const line = `   ${String(symbol).padEnd(10)} ${side.padEnd(
+            6
+          )} ${sizeAbs.padStart(10)} ${entryStr.padStart(
+            10
+          )} ${markStr.padStart(10)} ${pnlStr.padStart(10)}`;
+          console.log(colorText(line, pnl >= 0 ? colors.green : colors.red));
+        }
+        const total = realized + unrealizedSum;
+        console.log(gradient("-".repeat(80)));
+        console.log(
+          colorText(
+            `Realized: ${realized.toFixed(
+              2
+            )}  |  Unrealized: ${unrealizedSum.toFixed(
+              2
+            )}  |  Total: ${total.toFixed(2)}`,
+            total >= 0 ? colors.green : colors.red
+          )
+        );
+      }
+
+      await this.askQuestion(
+        colorText("\nPress Enter to go back... ", colors.dim)
+      );
+    } catch (error) {
+      console.error("Error displaying user details:", error);
+      await this.askQuestion(
+        colorText("\nPress Enter to return... ", colors.dim)
+      );
+    }
+  }
+
+  async showMarketDetails(marketIdHex) {
+    try {
+      console.clear();
+      const symbol = await safeDecodeMarketId(marketIdHex, this.contracts);
+      console.log(gradient("═".repeat(80)));
+      console.log(
+        colorText(`🪙 MARKET DETAILS - ${symbol}`, colors.brightCyan)
+      );
+      console.log(colorText(String(marketIdHex), colors.dim));
+      console.log(gradient("═".repeat(80)));
+
+      // Get orderbook address and price data
+      let orderBookAddr = ethers.ZeroAddress;
+      try {
+        orderBookAddr = await this.contracts.vault.marketToOrderBook(
+          marketIdHex
+        );
+      } catch (_) {}
+      let mid = 0n,
+        bid = 0n,
+        ask = 0n,
+        last = 0n,
+        mark = 0n,
+        spread = 0n,
+        spreadBps = 0n,
+        valid = false;
+      try {
+        if (orderBookAddr && orderBookAddr !== ethers.ZeroAddress) {
+          const OrderBook = await ethers.getContractFactory("OrderBook");
+          const ob = OrderBook.attach(orderBookAddr);
+          const data = await ob.getMarketPriceData();
+          mid = data[0];
+          bid = data[1];
+          ask = data[2];
+          last = data[3];
+          mark = data[4];
+          spread = data[5];
+          spreadBps = data[6];
+          valid = data[7];
+        } else {
+          const data = await this.contracts.orderBook.getMarketPriceData();
+          mid = data[0];
+          bid = data[1];
+          ask = data[2];
+          last = data[3];
+          mark = data[4];
+          spread = data[5];
+          spreadBps = data[6];
+          valid = data[7];
+        }
+      } catch (_) {}
+
+      const fmt6 = (x) => {
+        try {
+          return parseFloat(ethers.formatUnits(x, 6)).toFixed(4);
+        } catch {
+          return "-";
+        }
+      };
+      const fmtNum = (x) => {
+        try {
+          return Number(x).toString();
+        } catch {
+          return "-";
+        }
+      };
+
+      console.log(
+        colorText(
+          `Best Bid: ${fmt6(bid)}  |  Best Ask: ${fmt6(ask)}  |  Mid: ${fmt6(
+            mid
+          )}  |  Mark: ${fmt6(mark)}  |  Spread: ${fmt6(spread)} (${fmtNum(
+            spreadBps
+          )} bps)  |  Valid: ${valid ? "Yes" : "No"}`,
+          colors.blue
+        )
+      );
+
+      // List positions in this market across users
+      console.log(gradient("-".repeat(80)));
+      const header = [
+        "User",
+        "Side",
+        "Size",
+        "Entry",
+        "Mark",
+        "PnL",
+        "Address",
+      ];
+      console.log(
+        colorText(
+          `   ${header[0].padEnd(10)} ${header[1].padEnd(
+            6
+          )} ${header[2].padStart(10)} ${header[3].padStart(
+            10
+          )} ${header[4].padStart(10)} ${header[5].padStart(
+            10
+          )} ${header[6].padEnd(14)}`,
+          colors.dim
+        )
+      );
+      let totalUnrealized = 0;
+      for (let i = 0; i < this.users.length; i++) {
+        const user = this.users[i];
+        const positions = await this.contracts.vault.getUserPositions(
+          user.address
+        );
+        for (const pos of positions) {
+          if (pos.marketId !== marketIdHex) continue;
+          const sizeBig = BigInt(pos.size.toString());
+          if (sizeBig === 0n) continue;
+          const { markPrice, pnl } = await getMarkPriceAndPnL(
+            this.contracts,
+            pos
+          );
+          totalUnrealized += pnl;
+          const userLabel = i === 0 ? "Deployer" : `User ${i}`;
+          const side = sizeBig >= 0n ? "LONG" : "SHORT";
+          const sizeAbs = ethers.formatUnits(
+            sizeBig >= 0n ? sizeBig : -sizeBig,
+            18
+          );
+          const entryStr = formatPriceWithValidation(
+            BigInt(pos.entryPrice.toString()),
+            6,
+            4,
+            false
+          );
+          const markStr =
+            typeof markPrice === "number"
+              ? markPrice.toFixed(4)
+              : String(markPrice);
+          const pnlStr = (pnl >= 0 ? "+" : "") + pnl.toFixed(2);
+          const addrShort = `${user.address.substring(
+            0,
+            6
+          )}…${user.address.substring(user.address.length - 4)}`;
+          const line = `   ${userLabel.padEnd(10)} ${side.padEnd(
+            6
+          )} ${sizeAbs.padStart(10)} ${entryStr.padStart(
+            10
+          )} ${markStr.padStart(10)} ${pnlStr.padStart(10)} ${addrShort}`;
+          console.log(colorText(line, pnl >= 0 ? colors.green : colors.red));
+        }
+      }
+      console.log(gradient("-".repeat(80)));
+      console.log(
+        colorText(
+          `Total Unrealized: ${totalUnrealized.toFixed(2)}`,
+          totalUnrealized >= 0 ? colors.green : colors.red
+        )
+      );
+
+      await this.askQuestion(
+        colorText("\nPress Enter to go back... ", colors.dim)
+      );
+    } catch (error) {
+      console.error("Error displaying market details:", error);
+      await this.askQuestion(
+        colorText("\nPress Enter to return... ", colors.dim)
+      );
     }
   }
 
@@ -4888,6 +5367,24 @@ ${colors.brightRed}└───────────────────�
         this.currentUser.address
       );
 
+      // Socialized loss: total and per-position (if available)
+      let totalHaircut6 = 0n;
+      try {
+        totalHaircut6 = await this.contracts.vault.userSocializedLoss(
+          this.currentUser.address
+        );
+      } catch (_) {}
+      const totalHaircutDisplay = formatUSDC(totalHaircut6);
+
+      const positionHaircuts = [];
+      try {
+        for (const p of positions) {
+          const marketId = p.marketId;
+          const haircut = p.socializedLossAccrued6 || 0n;
+          positionHaircuts.push({ marketId, haircut });
+        }
+      } catch (_) {}
+
       // Get comprehensive margin data from all sources
       const comprehensiveMarginData = await this.getComprehensiveMarginData();
 
@@ -4932,8 +5429,12 @@ ${colors.brightRed}└───────────────────�
       const isLiquidatedAccount = !hasActivePositions && realizedPnL < 0;
       const adjustedRealizedPnL = isLiquidatedAccount ? 0 : realizedPnL;
 
+      // Subtract socialized loss from equity to avoid overstatement
       const portfolioValue =
-        totalCollateralNum + adjustedRealizedPnL + unrealizedPnL;
+        totalCollateralNum +
+        adjustedRealizedPnL +
+        unrealizedPnL -
+        parseFloat(totalHaircutDisplay);
 
       // DEBUG: Portfolio value calculation breakdown
       console.log(colorText(`\n🔍 PORTFOLIO VALUE DEBUG:`, colors.yellow));
@@ -5018,6 +5519,36 @@ ${colors.brightRed}└───────────────────�
           colors.white
         )
       );
+
+      // Socialized Loss Section
+      console.log(
+        colorText(
+          "├─────────────────────────────────────────────────────────────┤",
+          colors.cyan
+        )
+      );
+      console.log(
+        colorText(
+          `│ Socialized Loss:    ${totalHaircutDisplay.padStart(
+            12
+          )} USDC                │`,
+          colors.magenta
+        )
+      );
+      if (positionHaircuts.length > 0) {
+        for (const ph of positionHaircuts) {
+          const mk = ph.marketId;
+          const amt = formatUSDC(ph.haircut);
+          console.log(
+            colorText(
+              `│   - ${mk}: ${amt.padStart(
+                12
+              )} USDC                            │`,
+              colors.dim
+            )
+          );
+        }
+      }
 
       // Margin Usage Section
       console.log(
@@ -5379,7 +5910,6 @@ ${colors.brightRed}└───────────────────�
       }
     }
   }
-
   async displayOrderBook() {
     console.log(
       colorText(
@@ -6171,7 +6701,6 @@ ${colors.brightRed}└───────────────────�
     }
     await this.pause(3000);
   }
-
   async placeLimitOrder(isBuy) {
     console.clear();
     console.log(
@@ -6967,7 +7496,6 @@ ${colors.brightRed}└───────────────────�
       );
     }
   }
-
   // Helper function to cancel a specific order
   async cancelSpecificOrder() {
     console.log(colorText("\n❌ CANCEL SPECIFIC ORDER", colors.red));
@@ -7276,8 +7804,16 @@ ${colors.brightRed}└───────────────────�
         ? 0
         : realizedPnL;
 
+      // Subtract socialized loss from equity to avoid overstatement
+      const totalHaircut6_2 = await this.contracts.vault.userSocializedLoss(
+        this.currentUser.address
+      );
+      const totalHaircutDisplay2 = parseFloat(formatUSDC(totalHaircut6_2));
       const portfolioValue =
-        totalCollateralNum + adjustedRealizedPnLForPortfolio + unrealizedPnL;
+        totalCollateralNum +
+        adjustedRealizedPnLForPortfolio +
+        unrealizedPnL -
+        totalHaircutDisplay2;
       const walletBalance = parseFloat(
         ethers.formatUnits(BigInt(balance.toString()), 6)
       );
@@ -7477,6 +8013,10 @@ ${colors.brightRed}└───────────────────�
             const marginLocked = parseFloat(
               ethers.formatUnits(BigInt(position.marginLocked.toString()), 6)
             );
+            const haircut6 = BigInt(
+              (position.socializedLossAccrued6 || 0).toString()
+            );
+            const haircutDisplay = parseFloat(ethers.formatUnits(haircut6, 6));
 
             // Calculate position value
             const positionValue = size * entryPrice;
@@ -7922,6 +8462,22 @@ ${colors.brightRed}└───────────────────�
                 colors.white
               )
             );
+
+            // Show per-position haircut line
+            const haircut6 = BigInt(
+              (position.socializedLossAccrued6 || 0).toString()
+            );
+            const haircutDisplay = parseFloat(ethers.formatUnits(haircut6, 6));
+            if (haircutDisplay > 0) {
+              console.log(
+                colorText(
+                  `│            │          │             │             │ haircut  ${haircutDisplay
+                    .toFixed(2)
+                    .padStart(10)} │          │        │       │`,
+                  colors.dim
+                )
+              );
+            }
           } catch (positionError) {
             console.log(
               colorText(
@@ -8066,6 +8622,10 @@ ${colors.brightRed}└───────────────────�
         const marginLocked = parseFloat(
           ethers.formatUnits(BigInt(position.marginLocked.toString()), 6)
         );
+        const haircut6 = BigInt(
+          (position.socializedLossAccrued6 || 0).toString()
+        );
+        const haircutDisplay = parseFloat(ethers.formatUnits(haircut6, 6));
         const positionValue = parseFloat(entryPrice) * size;
 
         console.log(
@@ -8089,6 +8649,14 @@ ${colors.brightRed}└───────────────────�
             colors.magenta
           )
         );
+        if (haircutDisplay > 0) {
+          console.log(
+            colorText(
+              `✂️  Accrued Haircut:  $${haircutDisplay.toFixed(2)} USDC`,
+              colors.dim
+            )
+          );
+        }
         console.log(
           colorText(
             `💎 Position Value:   $${positionValue.toFixed(2)} USDC`,

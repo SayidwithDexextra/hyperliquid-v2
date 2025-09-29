@@ -992,7 +992,7 @@ async function showTradeHistory() {
 
     // Get all signers to show trade history for each user
     const signers = await ethers.getSigners();
-    const maxUsers = Math.min(4, signers.length);
+    const maxUsers = Math.min(5, signers.length);
 
     console.log(
       colorText(
@@ -1322,7 +1322,7 @@ async function listUserOrders() {
 
     // Get all signers to show orders for each user independently
     const signers = await ethers.getSigners();
-    const maxUsers = Math.min(4, signers.length);
+    const maxUsers = Math.min(5, signers.length);
 
     console.log(
       colorText(`🔍 Checking orders for ${maxUsers} users...`, colors.cyan)

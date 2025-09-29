@@ -23,6 +23,7 @@ library PositionManager {
         int256 size;
         uint256 entryPrice;
         uint256 marginLocked;
+        uint256 socializedLossAccrued6; // USDC (6 decimals) haircut accrued against this position's payout
         uint256 liquidationPrice; // Fixed trigger price (6 decimals)
     }
 
@@ -38,6 +39,7 @@ library PositionManager {
         uint256 marginToRelease;
         uint256 marginToLock;
         bool positionClosed;
+        uint256 haircutToConfiscate6; // Portion of position-level haircut realized by this trade (USDC 6d)
     }
 
     /**
@@ -70,6 +72,7 @@ library PositionManager {
             result.oldSize = position.size;
             result.oldEntryPrice = position.entryPrice;
             result.oldMargin = position.marginLocked;
+            uint256 oldHaircut6 = position.socializedLossAccrued6;
             
             // Calculate new position
             result.newSize = position.size + sizeDelta;
@@ -105,6 +108,8 @@ library PositionManager {
                 result.newEntryPrice = 0;
                 result.positionClosed = true;
                 result.marginToRelease = position.marginLocked;
+                // Entire haircut for this position is realized now
+                result.haircutToConfiscate6 = oldHaircut6;
                 
                 // Remove position
                 if (positionIndex < positions.length - 1) {
@@ -147,9 +152,21 @@ library PositionManager {
                     if (absDelta < posAbs) {
                         // Partial close only: keep original entry price for the remaining position
                         result.newEntryPrice = position.entryPrice;
+                        // Realize proportional haircut for the closed fraction
+                        uint256 haircutClosed6 = oldHaircut6 == 0 ? 0 : (oldHaircut6 * absDelta) / posAbs;
+                        if (haircutClosed6 > 0) {
+                            if (haircutClosed6 > position.socializedLossAccrued6) {
+                                haircutClosed6 = position.socializedLossAccrued6;
+                            }
+                            position.socializedLossAccrued6 = position.socializedLossAccrued6 - haircutClosed6;
+                            result.haircutToConfiscate6 = haircutClosed6;
+                        }
                     } else {
                         // Flip: entire old position closed and new opened at execution price
                         result.newEntryPrice = executionPrice;
+                        // Entire haircut is realized due to full close of old leg
+                        result.haircutToConfiscate6 = oldHaircut6;
+                        // Reset haircut on the new leg (implicitly zero since entry below)
                     }
                 }
                 
@@ -157,15 +174,23 @@ library PositionManager {
                 position.size = result.newSize;
                 position.entryPrice = result.newEntryPrice;
                 
-                // Adjust margin
-                if (requiredMargin > position.marginLocked) {
-                    result.marginToLock = requiredMargin - position.marginLocked;
+                // Standard margin update: do not bind to haircut floor; haircut is realized from payouts
+                uint256 oldMarginLocal = position.marginLocked;
+                if (requiredMargin > oldMarginLocal) {
+                    result.marginToLock = requiredMargin - oldMarginLocal;
+                    result.marginToRelease = 0;
+                    position.marginLocked = requiredMargin;
+                    result.newMargin = requiredMargin;
+                } else if (requiredMargin < oldMarginLocal) {
+                    result.marginToLock = 0;
+                    result.marginToRelease = oldMarginLocal - requiredMargin;
+                    position.marginLocked = requiredMargin;
+                    result.newMargin = requiredMargin;
                 } else {
-                    result.marginToRelease = position.marginLocked - requiredMargin;
+                    result.marginToLock = 0;
+                    result.marginToRelease = 0;
+                    result.newMargin = oldMarginLocal;
                 }
-                
-                position.marginLocked = requiredMargin;
-                result.newMargin = requiredMargin;
             }
             
         } else {
@@ -180,6 +205,7 @@ library PositionManager {
                 size: sizeDelta,
                 entryPrice: executionPrice,
                 marginLocked: requiredMargin,
+                socializedLossAccrued6: 0,
                 liquidationPrice: 0
             }));
         }
@@ -263,6 +289,7 @@ library PositionManager {
                 size: newSize,
                 entryPrice: newEntryPrice,
                 marginLocked: newMargin,
+                socializedLossAccrued6: 0,
                 liquidationPrice: 0
             }));
             // Margin now tracked exclusively in Position struct

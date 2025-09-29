@@ -515,6 +515,19 @@ contract OrderBook {
         } else {
             remainingAmount = _matchSellOrderWithSlippage(liquidationOrder, amount, minPrice);
         }
+
+        // If no fill due to slippage window but book has liquidity, widen bounds for liquidation safety
+        if (remainingAmount == amount) {
+            if (isBuy && bestAsk != 0) {
+                // Allow crossing all available asks to force-close the short
+                uint256 maxPriceForce = type(uint256).max;
+                remainingAmount = _matchBuyOrderWithSlippage(liquidationOrder, remainingAmount, maxPriceForce);
+            } else if (!isBuy && bestBid != 0) {
+                // Allow crossing all available bids to force-close the long
+                uint256 minPriceForce = 0;
+                remainingAmount = _matchSellOrderWithSlippage(liquidationOrder, remainingAmount, minPriceForce);
+            }
+        }
         
         liquidationMode = false;
         liquidationTarget = address(0);
@@ -1901,6 +1914,7 @@ contract OrderBook {
         // Update best bid
         if (price > bestBid) {
             bestBid = price;
+            _onMarkPricePotentiallyChanged();
         }
     }
 
@@ -1931,6 +1945,7 @@ contract OrderBook {
         // Update best ask
         if (bestAsk == 0 || price < bestAsk) {
             bestAsk = price;
+            _onMarkPricePotentiallyChanged();
         }
     }
 
@@ -1943,6 +1958,7 @@ contract OrderBook {
         // Update best bid if necessary
         if (price == bestBid && !buyLevels[price].exists) {
             bestBid = _findNewBestBid();
+            _onMarkPricePotentiallyChanged();
         }
     }
 
@@ -1955,6 +1971,7 @@ contract OrderBook {
         // Update best ask if necessary
         if (price == bestAsk && !sellLevels[price].exists) {
             bestAsk = _findNewBestAsk();
+            _onMarkPricePotentiallyChanged();
         }
     }
 
@@ -3245,6 +3262,32 @@ contract OrderBook {
      */
     function getMarkPrice() external view returns (uint256) {
         return calculateMarkPrice();
+    }
+
+    // Internal hook: trigger liquidation scan when best prices move significantly
+    function _onMarkPricePotentiallyChanged() private {
+        if (liquidationInProgress) {
+            emit LiquidationRecursionGuardSet(true);
+            return;
+        }
+
+        uint256 currentMark = _calculateMarkPrice();
+        if (lastMarkPrice == 0) {
+            lastMarkPrice = currentMark;
+            return;
+        }
+
+        bool movedUp = currentMark > lastMarkPrice && (currentMark - lastMarkPrice) * 100 / lastMarkPrice >= 2;
+        bool movedDown = lastMarkPrice > currentMark && (lastMarkPrice - currentMark) * 100 / lastMarkPrice >= 2;
+        if (movedUp || movedDown) {
+            // Sync mark for ADL and equity math
+            vault.updateMarkPrice(marketId, currentMark);
+            emit PriceUpdated(lastTradePrice, currentMark);
+
+            emit LiquidationCheckTriggered(currentMark, lastMarkPrice);
+            _checkPositionsForLiquidation(currentMark);
+            lastMarkPrice = currentMark;
+        }
     }
 
     // ============ Leverage Control Functions ============

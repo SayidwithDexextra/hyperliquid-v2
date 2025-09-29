@@ -29,7 +29,7 @@ const COLLATERAL_PER_USER = "500"; // 1,000 USDC collateral per user (default)
 const USER1_COLLATERAL = "500"; // 5,000 USDC collateral for User 1 (for $2.50 buy orders)
 const USER2_COLLATERAL = "500"; // 5,000 USDC collateral for User 2 (for $2.50 sell orders)
 const USER3_COLLATERAL = "15"; // 15 USDC collateral for User 3
-const NUM_USERS = 4; // Setup 4 trading accounts
+const NUM_USERS = 5; // Setup 5 trading accounts
 
 async function main() {
   console.log("\n🚀 HYPERLIQUID V2 - MODULAR DEPLOYMENT");
@@ -48,7 +48,7 @@ async function main() {
   const signers = await ethers.getSigners();
   if (signers.length < NUM_USERS) {
     throw new Error(
-      `❌ Need at least ${NUM_USERS} signers, but only ${signers.length} available. Check your .env file has all 4 private keys.`
+      `❌ Need at least ${NUM_USERS} signers, but only ${signers.length} available. Check your .env file has all ${NUM_USERS} private keys.`
     );
   }
 
