@@ -1376,6 +1376,20 @@ ${
             process.stdout.write("\x07");
           }
         );
+
+        // Listen for maker reward events (LP rewards during liquidation)
+        this.contracts.vault.on(
+          "MakerLiquidationRewardPaid",
+          (maker, liquidatedUser, marketId, rewardAmount, event) => {
+            this.handleMakerLiquidationRewardPaidEvent(
+              maker,
+              liquidatedUser,
+              marketId,
+              rewardAmount,
+              event
+            );
+          }
+        );
       }
 
       // ============ ADL + LIQUIDATION DEBUG EVENT LISTENERS ACTIVE ============
@@ -1680,6 +1694,115 @@ ${
             this.handleLiquidationProcessingFailedEvent(trader, reason, event);
           }
         );
+
+        // ===== Liquidation Reward Pipeline Debug Events =====
+        this.contracts.orderBook.on(
+          "DebugMakerContributionAdded",
+          (maker, notionalScaled, totalScaledAfter, event) => {
+            const ts = new Date().toLocaleTimeString();
+            const makerShort = maker.slice(0, 8) + "..." + maker.slice(-6);
+            const ns =
+              notionalScaled && notionalScaled.toString
+                ? notionalScaled.toString()
+                : String(notionalScaled);
+            const total =
+              totalScaledAfter && totalScaledAfter.toString
+                ? totalScaledAfter.toString()
+                : String(totalScaledAfter);
+            console.log(
+              `${colors.dim}[${ts}]${colors.reset} ${colors.brightCyan}🔧 MakerContribution${colors.reset} | maker=${makerShort} notionalScaled=${ns} totalScaled=${total}`
+            );
+          }
+        );
+
+        this.contracts.orderBook.on(
+          "DebugRewardComputation",
+          (
+            liquidatedUser,
+            expectedPenalty,
+            obBalance,
+            rewardPool,
+            makerCount,
+            totalScaled,
+            event
+          ) => {
+            const ts = new Date().toLocaleTimeString();
+            const uShort =
+              liquidatedUser.slice(0, 8) + "..." + liquidatedUser.slice(-6);
+            const exp =
+              expectedPenalty && expectedPenalty.toString
+                ? expectedPenalty.toString()
+                : String(expectedPenalty);
+            const ob =
+              obBalance && obBalance.toString
+                ? obBalance.toString()
+                : String(obBalance);
+            const pool =
+              rewardPool && rewardPool.toString
+                ? rewardPool.toString()
+                : String(rewardPool);
+            const tScaled =
+              totalScaled && totalScaled.toString
+                ? totalScaled.toString()
+                : String(totalScaled);
+            console.log(
+              `${colors.dim}[${ts}]${colors.reset} ${colors.brightYellow}🧮 RewardComputation${colors.reset} | user=${uShort} expected=${exp} obBal=${ob} pool=${pool} makers=${makerCount} totalScaled=${tScaled}`
+            );
+          }
+        );
+
+        this.contracts.orderBook.on(
+          "DebugRewardDistributionStart",
+          (liquidatedUser, rewardAmount, event) => {
+            const ts = new Date().toLocaleTimeString();
+            const uShort =
+              liquidatedUser.slice(0, 8) + "..." + liquidatedUser.slice(-6);
+            const amt =
+              rewardAmount && rewardAmount.toString
+                ? rewardAmount.toString()
+                : String(rewardAmount);
+            console.log(
+              `${colors.dim}[${ts}]${colors.reset} ${colors.brightGreen}🚀 RewardDistributionStart${colors.reset} | user=${uShort} amount=${amt}`
+            );
+          }
+        );
+
+        this.contracts.orderBook.on(
+          "DebugMakerRewardPayOutcome",
+          (liquidatedUser, maker, amount, success, errorData, event) => {
+            const ts = new Date().toLocaleTimeString();
+            const uShort =
+              liquidatedUser.slice(0, 8) + "..." + liquidatedUser.slice(-6);
+            const mShort = maker.slice(0, 8) + "..." + maker.slice(-6);
+            const amt =
+              amount && amount.toString ? amount.toString() : String(amount);
+            const status = success
+              ? `${colors.green}OK${colors.reset}`
+              : `${colors.red}FAIL${colors.reset}`;
+            const errHex =
+              errorData && typeof errorData === "string"
+                ? errorData
+                : errorData && errorData.toString
+                ? errorData.toString()
+                : "";
+            console.log(
+              `${colors.dim}[${ts}]${colors.reset} ${colors.cyan}💸 MakerPayout${colors.reset} | user=${uShort} maker=${mShort} amount=${amt} status=${status}` +
+                (success ? "" : ` err=${errHex.slice(0, 18)}...`)
+            );
+          }
+        );
+
+        this.contracts.orderBook.on(
+          "DebugRewardDistributionEnd",
+          (liquidatedUser, event) => {
+            const ts = new Date().toLocaleTimeString();
+            const uShort =
+              liquidatedUser.slice(0, 8) + "..." + liquidatedUser.slice(-6);
+            console.log(
+              `${colors.dim}[${ts}]${colors.reset} ${colors.brightGreen}✅ RewardDistributionEnd${colors.reset} | user=${uShort}`
+            );
+          }
+        );
       }
 
       // 🔍 DEBUG: Confirm event listeners are attached
@@ -1789,7 +1912,6 @@ ${
       );
     }
   }
-
   async testEventConnectivity() {
     console.log(
       colorText(
@@ -4442,7 +4564,6 @@ ${colors.brightRed}└───────────────────�
       await this.selectUser();
     }
   }
-
   async showOverview() {
     try {
       console.clear();
@@ -5003,7 +5124,6 @@ ${colors.brightRed}└───────────────────�
       );
     }
   }
-
   async showUserDetails(userIndex) {
     try {
       const user = this.users[userIndex];
@@ -6507,7 +6627,6 @@ ${colors.brightRed}└───────────────────�
         await this.pause(1000);
     }
   }
-
   // === Margin Top-Up ===
   async topUpPositionMarginFlow() {
     console.clear();
@@ -7155,7 +7274,6 @@ ${colors.brightRed}└───────────────────�
 
     await this.pause(3000);
   }
-
   async viewMyOrders() {
     console.clear();
     console.log(boxText("📋 MY ACTIVE ORDERS - DETAILED VIEW", colors.yellow));
@@ -7713,7 +7831,6 @@ ${colors.brightRed}└───────────────────�
 
     await this.pause(3000);
   }
-
   async detailedPortfolioAnalysis() {
     console.clear();
     console.log(boxText("📊 DETAILED PORTFOLIO ANALYSIS", colors.brightCyan));
@@ -8793,7 +8910,6 @@ ${colors.brightRed}└───────────────────�
       colorText("\n📱 Press Enter to continue...", colors.dim)
     );
   }
-
   async quickClosePosition(positions) {
     console.clear();
     console.log(boxText("⚡ QUICK CLOSE POSITION", colors.red));
@@ -9373,7 +9489,6 @@ ${colors.brightRed}└───────────────────�
 
     await this.pause(5000);
   }
-
   async viewTradeHistory() {
     console.clear();
     console.log(boxText("📈 MY TRADE HISTORY", colors.brightGreen));
@@ -9944,7 +10059,6 @@ ${colors.brightRed}└───────────────────�
       );
     }
   }
-
   async exit() {
     console.clear();
     console.log(

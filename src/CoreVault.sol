@@ -119,6 +119,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     event LiquidationExecuted(address indexed user, bytes32 indexed marketId, address indexed liquidator, uint256 totalLoss, uint256 remainingCollateral);
     event MarginConfiscated(address indexed user, uint256 marginAmount, uint256 totalLoss, uint256 penalty, address indexed liquidator);
     event LiquidatorRewardPaid(address indexed liquidator, address indexed liquidatedUser, bytes32 indexed marketId, uint256 rewardAmount, uint256 liquidatorCollateral);
+    event MakerLiquidationRewardPaid(address indexed maker, address indexed liquidatedUser, bytes32 indexed marketId, uint256 rewardAmount);
     event PositionUpdated(address indexed user, bytes32 indexed marketId, int256 oldSize, int256 newSize, uint256 entryPrice, uint256 marginLocked);
     event SocializedLossApplied(bytes32 indexed marketId, uint256 lossAmount, address indexed liquidatedUser);
     
@@ -369,14 +370,16 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 if (seized > 0) {
                     userCollateral[user] -= seized;
                     
-                    // Pay liquidator reward strictly from seized remainder after covering trading loss
+                    // Compute liquidation penalty remainder available for LPs and credit it to the market's OrderBook
                     uint256 seizedForTradingLoss = tradingLoss > seized ? seized : tradingLoss;
                     uint256 seizedRemainder = seized - seizedForTradingLoss;
-                    uint256 liquidatorReward = penalty > seizedRemainder ? seizedRemainder : penalty;
-                    if (liquidatorReward > 0) {
-                        userCollateral[liquidator] += liquidatorReward;
-                        emit LiquidatorRewardPaid(liquidator, user, marketId, liquidatorReward, userCollateral[liquidator]);
+                    uint256 makerRewardPool = penalty > seizedRemainder ? seizedRemainder : penalty;
+                    address ob = marketToOrderBook[marketId];
+                if (makerRewardPool > 0) {
+                    if (ob != address(0)) {
+                        userCollateral[ob] += makerRewardPool;
                     }
+                }
                     
                     // Emit event to track actual margin confiscation
                     emit MarginConfiscated(user, marginToConfiscate, seized, penalty, liquidator);
@@ -746,6 +749,22 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         require(userCollateral[from] >= amount, "!balance");
         userCollateral[from] -= amount;
         userCollateral[to] += amount;
+    }
+
+    // Pay a liquidation maker reward from OrderBook's credited balance and emit event for offchain visibility.
+    function payMakerLiquidationReward(
+        address liquidatedUser,
+        bytes32 marketId,
+        address maker,
+        uint256 amount
+    ) external onlyRole(ORDERBOOK_ROLE) {
+        require(maker != address(0) && amount > 0, "invalid");
+        address ob = marketToOrderBook[marketId];
+        require(ob != address(0) && ob == msg.sender, "unauthorized ob");
+        require(userCollateral[ob] >= amount, "insufficient ob balance");
+        userCollateral[ob] -= amount;
+        userCollateral[maker] += amount;
+        emit MakerLiquidationRewardPaid(maker, liquidatedUser, marketId, amount);
     }
 
     // Lock margin directly to a market (position margin) - Updated for consolidated tracking
@@ -1228,7 +1247,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         address user,
         bytes32 marketId,
         address liquidator
-    ) external onlyRole(ORDERBOOK_ROLE) {
+    ) external onlyRole(ORDERBOOK_ROLE) nonReentrant {
         PositionManager.Position[] storage positions = userPositions[user];
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size < 0) {
@@ -1262,13 +1281,13 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             
             if (seized > 0) {
                 userCollateral[user] -= seized;
-                // Pay liquidator reward strictly from seized remainder after covering trading loss
+                // Credit penalty remainder: split between liquidator bounty and makers pool
                 uint256 seizedForTradingLoss = tradingLoss > seized ? seized : tradingLoss;
                 uint256 seizedRemainder = seized - seizedForTradingLoss;
-                uint256 liquidatorReward = penalty > seizedRemainder ? seizedRemainder : penalty;
-                if (liquidatorReward > 0) {
-                    userCollateral[liquidator] += liquidatorReward;
-                    emit LiquidatorRewardPaid(liquidator, user, marketId, liquidatorReward, userCollateral[liquidator]);
+                uint256 makerRewardPool = penalty > seizedRemainder ? seizedRemainder : penalty;
+                address ob2 = marketToOrderBook[marketId];
+                if (makerRewardPool > 0 && ob2 != address(0)) {
+                    userCollateral[ob2] += makerRewardPool;
                 }
             }
 
@@ -1293,11 +1312,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 // Remove market ID from user's market list
                 _removeMarketIdFromUser(user, marketId);
 
-                // Notify OrderBook to clear its local copy if possible
-                address ob = marketToOrderBook[marketId];
-                if (ob != address(0)) {
-                    try IOrderBook(ob).clearUserPosition(user) {} catch {}
-                }
+                // Notify OrderBook removed to avoid external calls here; OB syncs via events/trade flow
 
                 // Record realized P&L from liquidation
                 if (realizedPnL != 0) {
@@ -1322,7 +1337,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         address user,
         bytes32 marketId,
         address liquidator
-    ) external onlyRole(ORDERBOOK_ROLE) {
+    ) external onlyRole(ORDERBOOK_ROLE) nonReentrant {
         PositionManager.Position[] storage positions = userPositions[user];
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size > 0) {
@@ -1355,13 +1370,13 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             
             if (seized > 0) {
                 userCollateral[user] -= seized;
-                // Pay liquidator reward strictly from seized remainder after covering trading loss
+                // Credit penalty remainder: split between liquidator bounty and makers pool
                 uint256 seizedForTradingLoss = tradingLoss > seized ? seized : tradingLoss;
                 uint256 seizedRemainder = seized - seizedForTradingLoss;
-                uint256 liquidatorReward = penalty > seizedRemainder ? seizedRemainder : penalty;
-                if (liquidatorReward > 0) {
-                    userCollateral[liquidator] += liquidatorReward;
-                    emit LiquidatorRewardPaid(liquidator, user, marketId, liquidatorReward, userCollateral[liquidator]);
+                uint256 makerRewardPool = penalty > seizedRemainder ? seizedRemainder : penalty;
+                address ob3 = marketToOrderBook[marketId];
+                if (makerRewardPool > 0 && ob3 != address(0)) {
+                    userCollateral[ob3] += makerRewardPool;
                 }
             }
 
@@ -1385,10 +1400,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 // Remove market ID from user's market list
                 _removeMarketIdFromUser(user, marketId);
 
-                address ob = marketToOrderBook[marketId];
-                if (ob != address(0)) {
-                    try IOrderBook(ob).clearUserPosition(user) {} catch {}
-                }
+                // Notify OrderBook removed to avoid external calls here; OB syncs via events/trade flow
 
             // Record realized P&L from liquidation
             if (realizedPnL != 0) {

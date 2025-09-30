@@ -38,6 +38,7 @@ interface ICoreVault {
     
     // Mark price management
     function updateMarkPrice(bytes32 marketId, uint256 price) external;
+    function payMakerLiquidationReward(address liquidatedUser, bytes32 marketId, address maker, uint256 amount) external;
 }
 
 /**
@@ -138,6 +139,101 @@ contract OrderBook {
     address private liquidationTarget;
     // True when liquidation market order is a BUY to close a short; false when SELL to close a long
     bool private liquidationClosesShort;
+
+    // Cap the number of LPs credited per liquidation for gas safety
+    uint256 public constant MAX_LIQUIDATION_REWARD_RECIPIENTS = 64;
+    // Counters for per-liquidation reward attribution
+    uint256 private liquidationRewardedRecipients;
+    address private liquidationLastRewardRecipient;
+
+    // Per-liquidation maker contribution tracking (scaled notionals for relative weights)
+    address[] private liquidationMakers;
+    uint256[] private liquidationMakerNotionalScaled; // uses amount/1e12 * price to avoid overflow
+    uint256 private liquidationTotalNotionalScaled;
+    bool private liquidationTrackingActive;
+
+    // Debug events for liquidation reward pipeline
+    event DebugMakerContributionAdded(address indexed maker, uint256 notionalScaled, uint256 totalScaledAfter);
+    event DebugRewardComputation(address indexed liquidatedUser, uint256 expectedPenalty, uint256 obBalance, uint256 rewardPool, uint256 makerCount, uint256 totalScaled);
+    event DebugRewardDistributionStart(address indexed liquidatedUser, uint256 rewardAmount);
+    event DebugMakerRewardPayOutcome(address indexed liquidatedUser, address indexed maker, uint256 amount, bool success, bytes errorData);
+    event DebugRewardDistributionEnd(address indexed liquidatedUser);
+
+    function _resetLiquidationTracking() private {
+        delete liquidationMakers;
+        delete liquidationMakerNotionalScaled;
+        liquidationTotalNotionalScaled = 0;
+        liquidationRewardedRecipients = 0;
+        liquidationLastRewardRecipient = address(0);
+        liquidationTrackingActive = false;
+    }
+
+    function _recordLiquidationMakerContribution(address maker, uint256 price, uint256 amount) private {
+        if (!liquidationTrackingActive) return;
+        if (maker == address(0)) return;
+        // Do not attribute contributions to the OrderBook contract itself
+        if (maker == address(this)) return;
+        // Scale amount to prevent overflow: amount(1e18) -> 1e6
+        uint256 scaledAmount = amount / 1e12;
+        if (scaledAmount == 0) return;
+        uint256 notionalScaled = scaledAmount * price; // effectively 1e12 scale; only relative weights matter
+        // Try to find existing maker
+        for (uint256 i = 0; i < liquidationMakers.length; i++) {
+            if (liquidationMakers[i] == maker) {
+                liquidationMakerNotionalScaled[i] += notionalScaled;
+                liquidationTotalNotionalScaled += notionalScaled;
+                emit DebugMakerContributionAdded(maker, notionalScaled, liquidationTotalNotionalScaled);
+                return;
+            }
+        }
+        // New maker
+        if (liquidationMakers.length < MAX_LIQUIDATION_REWARD_RECIPIENTS) {
+            liquidationMakers.push(maker);
+            liquidationMakerNotionalScaled.push(notionalScaled);
+            liquidationTotalNotionalScaled += notionalScaled;
+            emit DebugMakerContributionAdded(maker, notionalScaled, liquidationTotalNotionalScaled);
+        } else {
+            // Cap reached: ignore excess makers by policy
+            liquidationTotalNotionalScaled += notionalScaled; // still count in total to avoid bias in averaging
+            emit DebugMakerContributionAdded(maker, notionalScaled, liquidationTotalNotionalScaled);
+        }
+    }
+
+    function _distributeLiquidationRewards(address liquidatedUser, uint256 rewardAmount) private {
+        if (rewardAmount == 0) return;
+        if (liquidationMakers.length == 0) return; // nothing to do
+        // Avoid division by zero
+        if (liquidationTotalNotionalScaled == 0) return;
+        emit DebugRewardDistributionStart(liquidatedUser, rewardAmount);
+        uint256 remaining = rewardAmount;
+        // Distribute proportionally to tracked makers (capped set)
+        for (uint256 i = 0; i < liquidationMakers.length; i++) {
+            // Skip rewarding the OrderBook contract itself if it was ever recorded
+            if (liquidationMakers[i] == address(this)) continue;
+            uint256 share = (rewardAmount * liquidationMakerNotionalScaled[i]) / liquidationTotalNotionalScaled;
+            if (share > 0) {
+                // Attempt payout with debugging and without reverting the entire flow
+                try vault.payMakerLiquidationReward(liquidatedUser, marketId, liquidationMakers[i], share) {
+                    emit DebugMakerRewardPayOutcome(liquidatedUser, liquidationMakers[i], share, true, "");
+                } catch (bytes memory err) {
+                    emit DebugMakerRewardPayOutcome(liquidatedUser, liquidationMakers[i], share, false, err);
+                }
+                if (remaining >= share) remaining -= share; else remaining = 0;
+            }
+        }
+        // Handle dust: if any remainder, give to the first maker
+        if (remaining > 0) {
+            address firstMaker = liquidationMakers[0] == address(this) && liquidationMakers.length > 1 ? liquidationMakers[1] : liquidationMakers[0];
+            if (firstMaker != address(this)) {
+            try vault.payMakerLiquidationReward(liquidatedUser, marketId, firstMaker, remaining) {
+                emit DebugMakerRewardPayOutcome(liquidatedUser, liquidationMakers[0], remaining, true, "");
+            } catch (bytes memory err2) {
+                emit DebugMakerRewardPayOutcome(liquidatedUser, firstMaker, remaining, false, err2);
+            }
+            }
+        }
+        emit DebugRewardDistributionEnd(liquidatedUser);
+    }
     
     // Enhanced liquidation execution tracking
     uint256 private liquidationExecutionTotalVolume;    // Total volume executed
@@ -343,7 +439,7 @@ contract OrderBook {
                 
                 // ============ ENHANCED THREE-LAYER LIQUIDATION DEFENSE ============
                 
-                if (marketOrderSuccess && liquidationResult.filledAmount > 0) {
+                if (liquidationResult.filledAmount > 0) {
                     // Market order succeeded - check for gap loss and apply three-layer protection
                     _processEnhancedLiquidationWithGapProtection(
                         trader,
@@ -351,6 +447,17 @@ contract OrderBook {
                         markPrice,
                         liquidationResult
                     );
+                // Distribute the penalty reward pool that was credited to OrderBook by the vault
+                // Determine reward budget as min(OrderBook collateral, computed penalty at average price)
+                uint256 absSizeExec = uint256(size > 0 ? size : -size);
+                uint256 notional6 = (absSizeExec * liquidationResult.averageExecutionPrice) / (10**18);
+                // 10% default penalty; final pool is bounded by OB balance credited by vault
+                uint256 expectedPenalty = (notional6 * 1000) / 10000;
+                // Pull available OB balance as the actual pool (guard against short credit in partials)
+                uint256 obBalance = vault.getAvailableCollateral(address(this));
+                uint256 rewardPool = expectedPenalty > 0 ? (expectedPenalty < obBalance ? expectedPenalty : obBalance) : obBalance;
+                emit DebugRewardComputation(trader, expectedPenalty, obBalance, rewardPool, liquidationMakers.length, liquidationTotalNotionalScaled);
+                _distributeLiquidationRewards(trader, rewardPool);
                     liquidationCompleted = true;
                 }
                 
@@ -509,6 +616,13 @@ contract OrderBook {
         liquidationMode = true;
         liquidationTarget = trader;
         liquidationClosesShort = isBuy; // buy to close short, sell to close long
+        // Start per-liquidation maker tracking
+        liquidationTrackingActive = true;
+        // Ensure OrderBook has a local reward buffer; fees are deducted from seized funds by the vault, so we just credit from OB to makers
+        // Reset contribution arrays
+        delete liquidationMakers;
+        delete liquidationMakerNotionalScaled;
+        liquidationTotalNotionalScaled = 0;
         
         if (isBuy) {
             remainingAmount = _matchBuyOrderWithSlippage(liquidationOrder, amount, maxPrice);
@@ -531,6 +645,7 @@ contract OrderBook {
         
         liquidationMode = false;
         liquidationTarget = address(0);
+        liquidationTrackingActive = false;
         
         // Calculate results
         result.remainingAmount = remainingAmount;
@@ -612,7 +727,7 @@ contract OrderBook {
             uint256 totalCollateral,
             uint256 marginUsed,
             uint256 /*marginReserved*/,
-            uint256 availableMargin,
+            uint256 /*availableMargin*/,
             int256 /*realizedPnL*/,
             int256 /*unrealizedPnL*/,
             uint256 /*totalMarginCommitted*/,
@@ -1504,6 +1619,14 @@ contract OrderBook {
                     buyOrder.isMarginOrder, 
                     sellOrder.isMarginOrder
                 );
+                // If this is a liquidation market order, record maker contribution (the maker is the resting buy order)
+                if (liquidationMode) {
+                    _recordLiquidationMakerContribution(buyOrder.trader, currentPrice, matchAmount);
+                }
+                // If this is a liquidation market order, record maker contribution (the maker is the resting sell order)
+                if (liquidationMode) {
+                    _recordLiquidationMakerContribution(sellOrder.trader, currentPrice, matchAmount);
+                }
                 
                 // Track execution prices for liquidation if in liquidation mode
                 if (liquidationMode) {
@@ -2269,7 +2392,7 @@ contract OrderBook {
         // For liquidation trades, use liquidation-specific margin handling that confiscates margin
         if (isLiquidationTrade) {
             // During liquidation, we MUST use the liquidation-specific path; do not fall back
-            vault.updatePositionWithLiquidation(user, marketId, amount, price, msg.sender);
+            vault.updatePositionWithLiquidation(user, marketId, amount, price, address(this));
             
             // Emit debug info best-effort; do not affect flow
             try vault.getPositionSummary(user, marketId) returns (int256, uint256, uint256 marginLocked) {

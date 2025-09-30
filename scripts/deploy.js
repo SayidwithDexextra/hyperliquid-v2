@@ -8,7 +8,7 @@
 //   3. Sets up all authorization and roles between modular contracts
 //   4. Creates ALUMINUM market
 //   5. Funds trading accounts with USDC and collateral
-//   6. Places initial limit buy order (10 ALU @ $1.00 from deployer)
+//   6. Places initial limit buy orders (5 ALU @ $1.00 from deployer and User1)
 //   7. Executes market sell order from User3 (creates first trade & short position)
 //   8. Places User2 limit buy order (20 ALU @ $2.50 for liquidity)
 //   9. Updates configuration files
@@ -289,6 +289,23 @@ async function main() {
     await coreVault.grantRole(SETTLEMENT_ROLE, contracts.ALUMINUM_ORDERBOOK);
     console.log("     ✅ SETTLEMENT_ROLE granted to OrderBook");
 
+    // Verify role assignments and market registration
+    try {
+      const hasObRole = await coreVault.hasRole(
+        ORDERBOOK_ROLE,
+        contracts.ALUMINUM_ORDERBOOK
+      );
+      console.log(
+        `     🔎 Verification: ORDERBOOK_ROLE on OB = ${
+          hasObRole ? "true" : "false"
+        }`
+      );
+    } catch (e) {
+      console.log(
+        `     ⚠️  Could not verify ORDERBOOK_ROLE on OB: ${e?.message || e}`
+      );
+    }
+
     // Configure margin requirements for 1:1 longs, 150% shorts (no leverage)
     console.log("  🔧 Configuring margin requirements...");
     const orderBook = await ethers.getContractAt(
@@ -312,10 +329,7 @@ async function main() {
 
     // No VaultRouter – liquidation is integrated
 
-    // SKIP INITIAL LIQUIDITY SEEDING
-    console.log("  💧 Skipping initial liquidity seeding...");
-    console.log("     ℹ️  Market will start with empty order book");
-    console.log("     ℹ️  Users can place orders at any price");
+    // Minimal initial seeding will be performed after collateral funding
 
     // ============================================
     // STEP 4: FUND TRADING ACCOUNTS
@@ -590,9 +604,19 @@ async function main() {
           "LiquidatorRewardPaid",
           (liquidator, user, marketId, reward, liqCollat) => {
             console.log(
-              `🎁 LiquidatorRewardPaid → ${liquidator} reward=${fmt6(
+              `🎁 (legacy) LiquidatorRewardPaid → ${liquidator} reward=${fmt6(
                 reward
               )} for=${user}`
+            );
+          }
+        );
+        coreVault.on(
+          "MakerLiquidationRewardPaid",
+          (maker, user, marketId, reward) => {
+            console.log(
+              `🎁 MakerLiquidationRewardPaid → maker=${maker} reward=${fmt6(
+                reward
+              )} forLiquidationOf=${user}`
             );
           }
         );
@@ -697,24 +721,28 @@ async function main() {
         console.log(`⚠️  Failed to set up debug listeners: ${e.message}`);
       }
 
-      console.log("  🔸 Placing limit buy order from deployer...");
+      console.log("  🔸 Placing limit buy orders from deployer and User1...");
       console.log("     Price: $1.00");
-      console.log("     Amount: 10 ALU");
+      console.log("     Amount: 5 ALU each");
       console.log("     Side: BUY");
 
-      // Place limit buy order: 10 ALU at $1.00
+      // Place two limit buy orders: 5 ALU at $1.00 from deployer and User1
       const price = ethers.parseUnits("1", 6); // $1.00 in USDC (6 decimals)
-      const amount = ethers.parseUnits("10", 18); // 10 ALU (18 decimals)
+      const amountEach = ethers.parseUnits("4", 18);
+      const amountEach2 = ethers.parseUnits("6", 18);
 
-      // Place the order using margin limit order function
-      const placeTx = await orderBook.connect(deployer).placeMarginLimitOrder(
-        price,
-        amount,
-        true // isBuy = true
-      );
+      const buyTx1 = await orderBook
+        .connect(deployer)
+        .placeMarginLimitOrder(price, amountEach, true);
+      await buyTx1.wait();
+      console.log("     ✅ Deployer limit buy placed (5 ALU @ $1.00)");
 
-      await placeTx.wait();
-      console.log("     ✅ Limit buy order placed successfully!");
+      const user1Signer = signers[1]; // User1 is the 2nd signer
+      const buyTx2 = await orderBook
+        .connect(user1Signer)
+        .placeMarginLimitOrder(price, amountEach2, true);
+      await buyTx2.wait();
+      console.log("     ✅ User1 limit buy placed (5 ALU @ $1.00)");
 
       // Check the order book state
       const bestBid = await orderBook.bestBid();
@@ -727,13 +755,12 @@ async function main() {
       console.log("     Amount: 10 ALU");
       console.log("     Side: SELL (market order)");
 
-      const signers = await ethers.getSigners();
       const user3 = signers[3]; // User3 is the 4th signer
 
-      const sellTx = await orderBook.connect(user3).placeMarginMarketOrder(
-        amount, // Same 10 ALU amount
-        false // isBuy = false for sell order
-      );
+      const totalSellAmount = ethers.parseUnits("10", 18); // 10 ALU to match both bids
+      const sellTx = await orderBook
+        .connect(user3)
+        .placeMarginMarketOrder(totalSellAmount, false);
 
       await sellTx.wait();
       console.log("     ✅ Market sell order executed successfully!");
@@ -756,7 +783,7 @@ async function main() {
       console.log("     Side: SELL (limit order)");
 
       const user2 = signers[2]; // User2 is the 3rd signer
-      const user2Price = ethers.parseUnits("5", 6); // $2.50 in USDC (6 decimals)
+      const user2Price = ethers.parseUnits("2.2", 6); // $2.50 in USDC (6 decimals)
       const user2Amount = ethers.parseUnits("20", 18); // 20 ALU (18 decimals)
 
       const user2OrderTx = await orderBook.connect(user2).placeMarginLimitOrder(
@@ -940,7 +967,9 @@ async function main() {
     console.log("  • All authorizations configured ✅");
 
     console.log("\n🎯 READY TO TRADE!");
-    console.log("  • Initial limit buy order: 10 ALU @ $1.00 (from deployer)");
+    console.log(
+      "  • Initial limit buy orders: 5 ALU @ $1.00 (deployer) + 5 ALU @ $1.00 (User1)"
+    );
     console.log(
       "  • Market sell order: 10 ALU @ $1.00 (from User3) - EXECUTED"
     );
