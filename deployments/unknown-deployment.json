@@ -1,7 +1,7 @@
 {
   "network": "unknown",
   "chainId": 31337,
-  "timestamp": "2025-09-29T00:39:32.603Z",
+  "timestamp": "2025-10-01T12:52:06.538Z",
   "contracts": {
     "MOCK_USDC": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
     "VAULT_ANALYTICS": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
@@ -32,10 +32,15 @@
       "index": 3,
       "address": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
       "role": "user3"
+    },
+    {
+      "index": 4,
+      "address": "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65",
+      "role": "user4"
     }
   ],
   "aluminumMarket": {
-    "marketId": "0x79850d81a26d47abfa836eb6ecef9e8fc362139cc1e7cecab4cc15140ad14c6f",
+    "marketId": "0x26657b8e760f1b2b9ed4932fde0426423d27bd38d6cf4ff898a755f7b93c4acc",
     "symbol": "ALU-USD",
     "orderBook": "0x856e4424f806D16E8CBC702B3c0F2ede5468eae5"
   }

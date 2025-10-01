@@ -1246,7 +1246,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     function liquidateShort(
         address user,
         bytes32 marketId,
-        address liquidator
+        address liquidator,
+        uint256 executionPrice
     ) external onlyRole(ORDERBOOK_ROLE) nonReentrant {
         PositionManager.Position[] storage positions = userPositions[user];
         for (uint256 i = 0; i < positions.length; i++) {
@@ -1255,20 +1256,21 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 uint256 locked = positions[i].marginLocked;
                 uint256 entryPrice = positions[i].entryPrice;
                 uint256 markPrice = getMarkPrice(marketId);
+                uint256 settlePrice = executionPrice > 0 ? executionPrice : markPrice;
 
                 // Calculate trading loss for short liquidation (USDC amount for collateral deduction)
                 // Note: This differs from standard P&L tracking (18 decimals) as it calculates actual USDC loss
                 uint256 tradingLoss = 0;
-                if (markPrice > entryPrice) {
+                if (settlePrice > entryPrice) {
                     // Short position loss: (current price - entry price) * position size
-                    uint256 lossPerUnit = markPrice - entryPrice;
+                    uint256 lossPerUnit = settlePrice - entryPrice;
                 // Convert to USDC: (lossPerUnit_6dec * size_18dec) / (DECIMAL_SCALE_12dec * TICK_PRECISION_6dec) = 6 decimals
                 tradingLoss = (lossPerUnit * uint256(-oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
             }
             
             // Apply liquidation penalty (notional-based at current mark)
             uint256 absSizeMark = uint256(-oldSize);
-            uint256 notional6 = (absSizeMark * markPrice) / (10**18);
+            uint256 notional6 = (absSizeMark * settlePrice) / (10**18);
             uint256 penalty = (notional6 * LIQUIDATION_PENALTY_BPS) / 10000;
             uint256 actualLoss = tradingLoss + penalty;
             
@@ -1294,7 +1296,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 // Compute realized P&L for full liquidation using original signed size
                 int256 realizedPnL = 0;
                 {
-                    int256 priceDiff = int256(markPrice) - int256(entryPrice);
+                    int256 priceDiff = int256(settlePrice) - int256(entryPrice);
                     realizedPnL = (priceDiff * oldSize) / int256(TICK_PRECISION);
                 }
 
@@ -1336,7 +1338,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     function liquidateLong(
         address user,
         bytes32 marketId,
-        address liquidator
+        address liquidator,
+        uint256 executionPrice
     ) external onlyRole(ORDERBOOK_ROLE) nonReentrant {
         PositionManager.Position[] storage positions = userPositions[user];
         for (uint256 i = 0; i < positions.length; i++) {
@@ -1345,20 +1348,21 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 uint256 locked = positions[i].marginLocked;
                 uint256 entryPrice = positions[i].entryPrice;
                 uint256 markPrice = getMarkPrice(marketId);
+                uint256 settlePrice = executionPrice > 0 ? executionPrice : markPrice;
 
                 // Calculate trading loss for long liquidation (USDC amount for collateral deduction)
                 // Note: This differs from standard P&L tracking (18 decimals) as it calculates actual USDC loss
                 uint256 tradingLoss = 0;
-                if (markPrice < entryPrice) {
+                if (settlePrice < entryPrice) {
                     // Long position loss: (entry price - current price) * position size
-                    uint256 lossPerUnit = entryPrice - markPrice;
+                    uint256 lossPerUnit = entryPrice - settlePrice;
                 // Convert to USDC: (lossPerUnit_6dec * size_18dec) / (DECIMAL_SCALE_12dec * TICK_PRECISION_6dec) = 6 decimals
                 tradingLoss = (lossPerUnit * uint256(oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
             }
             
             // Apply liquidation penalty (notional-based at current mark)
             uint256 absSizeMark = uint256(oldSize);
-            uint256 notional6 = (absSizeMark * markPrice) / (10**18);
+            uint256 notional6 = (absSizeMark * settlePrice) / (10**18);
             uint256 penalty = (notional6 * LIQUIDATION_PENALTY_BPS) / 10000;
             uint256 actualLoss = tradingLoss + penalty;
             
@@ -1383,7 +1387,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             // Compute realized P&L for full liquidation using original signed size
             int256 realizedPnL = 0;
             {
-                int256 priceDiff = int256(markPrice) - int256(entryPrice);
+                int256 priceDiff = int256(settlePrice) - int256(entryPrice);
                 realizedPnL = (priceDiff * oldSize) / int256(TICK_PRECISION);
             }
 

@@ -187,6 +187,23 @@ function boxText(text, color = colors.cyan) {
   ].join("\n");
 }
 
+// 🧩 Compact, aligned event block printer
+function logEventBlock(title, icon, color, fields) {
+  try {
+    const ts = new Date().toLocaleTimeString();
+    const labelColor = colors.dim;
+    const pad = (s) => String(s).padEnd(18);
+
+    const header = `${colors.dim}[${ts}]${colors.reset} ${color}${icon} ${title}${colors.reset}`;
+    const lines = Object.entries(fields)
+      .filter(([, v]) => v !== undefined && v !== null && v !== "")
+      .map(([k, v]) => `  ${labelColor}${pad(k)}:${colors.reset} ${v}`);
+
+    console.log(header);
+    for (const line of lines) console.log(line);
+  } catch (_) {}
+}
+
 // 📊 UTILITY FUNCTIONS - ENHANCED PRICE ACCURACY
 function formatPrice(price, decimals = 6, displayDecimals = 2) {
   // Handle MaxUint256 case (used for empty order book)
@@ -557,6 +574,7 @@ class InteractiveTrader {
     this.currentUser = null;
     this.currentUserIndex = 0;
     this.isRunning = true;
+    this.hackHistory = [];
   }
 
   async initialize() {
@@ -564,6 +582,16 @@ class InteractiveTrader {
     await this.showWelcomeScreen();
     await this.loadContracts();
     await this.loadUsers();
+
+    // CLI: --hack-file <path> optional batch file runner
+    const argv = process.argv.slice(2);
+    const fileFlagIdx = argv.findIndex((a) => a === "--hack-file");
+    if (fileFlagIdx !== -1 && argv[fileFlagIdx + 1]) {
+      const filePath = argv[fileFlagIdx + 1];
+      await this.runHackFile(filePath);
+      // After batch, proceed to normal UI
+    }
+
     await this.selectUser();
   }
 
@@ -1633,7 +1661,6 @@ ${
         this.contracts.orderBook.on(
           "CounterpartyUnitsReceived",
           (user, marketId, amount, isBuySide, price, event) => {
-            const timestamp = new Date().toLocaleTimeString();
             const userShort = user.slice(0, 8) + "..." + user.slice(-6);
             const amountFormatted = formatWithAutoDecimalDetection(
               amount,
@@ -1641,15 +1668,17 @@ ${
               4
             );
             const priceFormatted = formatWithAutoDecimalDetection(price, 6, 2);
-            const side = isBuySide ? "BUY" : "SELL";
+            const side = isBuySide
+              ? colorText("BUY", colors.green)
+              : colorText("SELL", colors.green);
 
-            console.log(
-              `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightGreen}📦 UNITS RECEIVED${colors.reset} | ` +
-                `${colors.cyan}${amountFormatted} ALU${colors.reset} @ ${colors.yellow}$${priceFormatted}${colors.reset} ` +
-                `via ${colors.magenta}LIQUIDATION MATCH${colors.reset} | ` +
-                `${colors.green}${side} COUNTERPARTY${colors.reset} | ` +
-                `${colors.dim}${userShort}${colors.reset}`
-            );
+            logEventBlock("UNITS RECEIVED", "📦", colors.brightGreen, {
+              Amount: colorText(`${amountFormatted} ALU`, colors.cyan),
+              Price: colorText(`$${priceFormatted}`, colors.yellow),
+              Source: colorText("LIQUIDATION MATCH", colors.magenta),
+              Counterparty: side,
+              Address: colorText(userShort, colors.dim),
+            });
           }
         );
 
@@ -1699,7 +1728,6 @@ ${
         this.contracts.orderBook.on(
           "DebugMakerContributionAdded",
           (maker, notionalScaled, totalScaledAfter, event) => {
-            const ts = new Date().toLocaleTimeString();
             const makerShort = maker.slice(0, 8) + "..." + maker.slice(-6);
             const ns =
               notionalScaled && notionalScaled.toString
@@ -1709,9 +1737,11 @@ ${
               totalScaledAfter && totalScaledAfter.toString
                 ? totalScaledAfter.toString()
                 : String(totalScaledAfter);
-            console.log(
-              `${colors.dim}[${ts}]${colors.reset} ${colors.brightCyan}🔧 MakerContribution${colors.reset} | maker=${makerShort} notionalScaled=${ns} totalScaled=${total}`
-            );
+            logEventBlock("Maker Contribution", "🔧", colors.brightCyan, {
+              Maker: colorText(makerShort, colors.cyan),
+              NotionalScaled: colorText(ns, colors.yellow),
+              TotalScaled: colorText(total, colors.yellow),
+            });
           }
         );
 
@@ -1726,7 +1756,6 @@ ${
             totalScaled,
             event
           ) => {
-            const ts = new Date().toLocaleTimeString();
             const uShort =
               liquidatedUser.slice(0, 8) + "..." + liquidatedUser.slice(-6);
             const exp =
@@ -1745,24 +1774,34 @@ ${
               totalScaled && totalScaled.toString
                 ? totalScaled.toString()
                 : String(totalScaled);
-            console.log(
-              `${colors.dim}[${ts}]${colors.reset} ${colors.brightYellow}🧮 RewardComputation${colors.reset} | user=${uShort} expected=${exp} obBal=${ob} pool=${pool} makers=${makerCount} totalScaled=${tScaled}`
-            );
+            logEventBlock("Reward Computation", "🧮", colors.brightYellow, {
+              User: colorText(uShort, colors.cyan),
+              Expected: colorText(exp, colors.yellow),
+              OrderBookBal: colorText(ob, colors.yellow),
+              Pool: colorText(pool, colors.yellow),
+              Makers: colorText(makerCount, colors.green),
+              TotalScaled: colorText(tScaled, colors.yellow),
+            });
           }
         );
 
         this.contracts.orderBook.on(
           "DebugRewardDistributionStart",
           (liquidatedUser, rewardAmount, event) => {
-            const ts = new Date().toLocaleTimeString();
             const uShort =
               liquidatedUser.slice(0, 8) + "..." + liquidatedUser.slice(-6);
             const amt =
               rewardAmount && rewardAmount.toString
                 ? rewardAmount.toString()
                 : String(rewardAmount);
-            console.log(
-              `${colors.dim}[${ts}]${colors.reset} ${colors.brightGreen}🚀 RewardDistributionStart${colors.reset} | user=${uShort} amount=${amt}`
+            logEventBlock(
+              "Reward Distribution Start",
+              "🚀",
+              colors.brightGreen,
+              {
+                User: colorText(uShort, colors.cyan),
+                Amount: colorText(amt, colors.yellow),
+              }
             );
           }
         );
@@ -1770,7 +1809,6 @@ ${
         this.contracts.orderBook.on(
           "DebugMakerRewardPayOutcome",
           (liquidatedUser, maker, amount, success, errorData, event) => {
-            const ts = new Date().toLocaleTimeString();
             const uShort =
               liquidatedUser.slice(0, 8) + "..." + liquidatedUser.slice(-6);
             const mShort = maker.slice(0, 8) + "..." + maker.slice(-6);
@@ -1785,22 +1823,26 @@ ${
                 : errorData && errorData.toString
                 ? errorData.toString()
                 : "";
-            console.log(
-              `${colors.dim}[${ts}]${colors.reset} ${colors.cyan}💸 MakerPayout${colors.reset} | user=${uShort} maker=${mShort} amount=${amt} status=${status}` +
-                (success ? "" : ` err=${errHex.slice(0, 18)}...`)
-            );
+            logEventBlock("Maker Payout", "💸", colors.cyan, {
+              User: colorText(uShort, colors.cyan),
+              Maker: colorText(mShort, colors.magenta),
+              Amount: colorText(amt, colors.yellow),
+              Status: status,
+              Error: success
+                ? undefined
+                : colorText(`${errHex.slice(0, 18)}...`, colors.red),
+            });
           }
         );
 
         this.contracts.orderBook.on(
           "DebugRewardDistributionEnd",
           (liquidatedUser, event) => {
-            const ts = new Date().toLocaleTimeString();
             const uShort =
               liquidatedUser.slice(0, 8) + "..." + liquidatedUser.slice(-6);
-            console.log(
-              `${colors.dim}[${ts}]${colors.reset} ${colors.brightGreen}✅ RewardDistributionEnd${colors.reset} | user=${uShort}`
-            );
+            logEventBlock("Reward Distribution End", "✅", colors.brightGreen, {
+              User: colorText(uShort, colors.cyan),
+            });
           }
         );
       }
@@ -4531,11 +4573,20 @@ ${colors.brightRed}└───────────────────�
       );
     }
 
-    // Overview option
+    // Overview option + Hack mode hint
     console.log(colorText(`\n0. Overview (All Users)`, colors.brightYellow));
+    console.log(
+      colorText(
+        `H. Hack mode (type 'H' to open command console)`,
+        colors.brightMagenta
+      )
+    );
 
     const choiceRaw = await this.askQuestion(
-      colorText("\n🎯 Select account (0-5 or O): ", colors.brightMagenta)
+      colorText(
+        "\n🎯 Select account (0-5 or O, H for Hack): ",
+        colors.brightMagenta
+      )
     );
     const choice = String(choiceRaw || "")
       .trim()
@@ -4543,6 +4594,11 @@ ${colors.brightRed}└───────────────────�
 
     if (choice === "0" || choice === "o") {
       await this.showOverview();
+      return;
+    }
+
+    if (choice === "h") {
+      await this.enterHackMode();
       return;
     }
 
@@ -4562,6 +4618,699 @@ ${colors.brightRed}└───────────────────�
     } else {
       console.log(colorText("❌ Invalid selection", colors.red));
       await this.selectUser();
+    }
+  }
+
+  // HACK MODE: power-user command console
+  async enterHackMode() {
+    console.clear();
+    await this.renderHackHeader();
+    this.printHackLegend();
+
+    while (true) {
+      const line = await this.askQuestion(
+        colorText("\nhack> ", colors.brightMagenta)
+      );
+      const raw = String(line || "").trim();
+      if (!raw) continue;
+      if (raw.toLowerCase() === "back" || raw.toLowerCase() === "exit") {
+        await this.selectUser();
+        return;
+      }
+      if (raw.toLowerCase() === "help" || raw.toLowerCase() === "?") {
+        this.printHackLegend();
+        continue;
+      }
+      // Run a command file directly
+      if (raw.toLowerCase().startsWith("run ")) {
+        const p = raw.slice(4).trim();
+        await this.runHackFile(p);
+        this.renderHackLedger();
+        continue;
+      }
+
+      const commands = raw
+        .split(/[;,]/)
+        .map((c) => c.trim())
+        .filter(Boolean);
+      for (const cmd of commands) {
+        try {
+          const summary = await this.executeHackCommand(cmd);
+          this.recordHackHistory({ status: "ok", cmd, summary });
+        } catch (err) {
+          console.log(colorText(`❌ ${err.message}`, colors.red));
+          this.recordHackHistory({
+            status: "err",
+            cmd,
+            summary: err.message || String(err),
+          });
+        }
+      }
+      this.renderHackLedger();
+    }
+  }
+
+  // Parse and execute one hack command string
+  async executeHackCommand(cmd) {
+    // Tokenize by spaces (multiple spaces allowed)
+    const parts = cmd.split(/\s+/).filter(Boolean);
+    if (parts.length === 0) throw new Error("Empty command");
+
+    // Optional user selector at start: U{n}
+    let user = this.currentUser;
+    let userIndex = this.currentUserIndex;
+    let cursor = 0;
+    if (/^u\d+$/i.test(parts[0])) {
+      const idx = parseInt(parts[0].slice(1), 10);
+      if (Number.isNaN(idx) || idx < 1 || idx > this.users.length) {
+        throw new Error(`Invalid user: ${parts[0]}`);
+      }
+      userIndex = idx - 1;
+      user = this.users[userIndex];
+      cursor++;
+    }
+
+    if (!user) throw new Error("No user selected");
+
+    if (cursor >= parts.length) throw new Error("Missing operation");
+    const op = parts[cursor].toUpperCase();
+    cursor++;
+
+    switch (op) {
+      case "LB":
+      case "LS": {
+        const isBuy = op === "LB";
+        // Expected: price, mode(1=units,2=usdc), value
+        const priceStr = parts[cursor++];
+        const modeStr = parts[cursor++];
+        const valStr = parts[cursor++];
+        if ([priceStr, modeStr, valStr].some((v) => v === undefined)) {
+          throw new Error("LB/LS usage: [U#] LB price mode value");
+        }
+        const price = Number(priceStr);
+        const mode = Number(modeStr);
+        const value = Number(valStr);
+        if (!isFinite(price) || price <= 0) throw new Error("Invalid price");
+        if (!(mode === 1 || mode === 2)) throw new Error("Mode must be 1 or 2");
+        if (!isFinite(value) || value <= 0) throw new Error("Invalid value");
+
+        let amountAlu;
+        let usdcTotal;
+        if (mode === 1) {
+          amountAlu = value;
+          usdcTotal = price * amountAlu;
+        } else {
+          usdcTotal = value;
+          amountAlu = usdcTotal / price;
+        }
+
+        const priceWei = ethers.parseUnits(String(price), 6);
+        const amountWei = ethers.parseUnits(String(amountAlu), 18);
+
+        // Optional quick pre-check for collateral availability
+        try {
+          const required6 = (amountWei * priceWei) / 10n ** 18n;
+          const available6 = await this.contracts.vault.getAvailableCollateral(
+            user.address
+          );
+          if (available6 < required6) {
+            console.log(
+              colorText(
+                `⚠️ ${this.formatUserDisplay(
+                  user.address
+                )} insufficient available collateral: need $${formatUSDC(
+                  required6
+                )}, have $${formatUSDC(available6)}`,
+                colors.yellow
+              )
+            );
+          }
+        } catch (_) {}
+
+        const tx = await this.contracts.orderBook
+          .connect(user)
+          .placeMarginLimitOrder(priceWei, amountWei, isBuy);
+        const rcpt = await tx.wait();
+        console.log(
+          colorText(
+            `✅ ${this.formatUserDisplay(user.address)} ${
+              isBuy ? "LB" : "LS"
+            } ${amountAlu} @ $${price} (tx ${tx.hash})`,
+            isBuy ? colors.green : colors.red
+          )
+        );
+        console.log(
+          colorText(`   ⛽ ${rcpt.gasUsed.toString()} gas`, colors.dim)
+        );
+        return `${isBuy ? "LB" : "LS"} ${amountAlu} @ $${price}`;
+      }
+
+      case "MB":
+      case "MS": {
+        const isBuy = op === "MB";
+        // Expected: mode(1=units,2=usdc), value, [slipBps]
+        const modeStr = parts[cursor++];
+        const valStr = parts[cursor++];
+        const slipStr = parts[cursor];
+        if ([modeStr, valStr].some((v) => v === undefined)) {
+          throw new Error("MB/MS usage: [U#] MB mode value [slipBps]");
+        }
+        const mode = Number(modeStr);
+        const value = Number(valStr);
+        const slippageBps = slipStr !== undefined ? Number(slipStr) : 100; // default 1%
+        if (!(mode === 1 || mode === 2)) throw new Error("Mode must be 1 or 2");
+        if (!isFinite(value) || value <= 0) throw new Error("Invalid value");
+        if (!isFinite(slippageBps) || slippageBps < 0) {
+          throw new Error("Invalid slippage bps");
+        }
+
+        let amountAlu;
+        if (mode === 1) {
+          amountAlu = value;
+        } else {
+          // Convert USDC position value to ALU using reference price
+          const [bestBid, bestAsk] =
+            await this.contracts.orderBook.getBestPrices();
+          const ref = isBuy ? bestAsk : bestBid;
+          if (!ref || ref === 0n) throw new Error("No liquidity for market");
+          const refPrice = Number(formatPrice(ref));
+          amountAlu = value / refPrice;
+        }
+
+        const amountWei = ethers.parseUnits(String(amountAlu), 18);
+        const tx = await this.contracts.orderBook
+          .connect(user)
+          .placeMarginMarketOrderWithSlippage(amountWei, isBuy, slippageBps);
+        const rcpt = await tx.wait();
+        console.log(
+          colorText(
+            `✅ ${this.formatUserDisplay(user.address)} ${
+              isBuy ? "MB" : "MS"
+            } ${amountAlu} (tx ${tx.hash})`,
+            isBuy ? colors.brightGreen : colors.brightRed
+          )
+        );
+        console.log(
+          colorText(`   ⛽ ${rcpt.gasUsed.toString()} gas`, colors.dim)
+        );
+        return `${isBuy ? "MB" : "MS"} ${amountAlu} slip ${slippageBps}bps`;
+      }
+
+      case "DEP": {
+        // Deposit collateral: amountUSDC
+        const amtStr = parts[cursor++];
+        if (!amtStr) throw new Error("DEP usage: [U#] DEP amountUSDC");
+        const amount = Number(amtStr);
+        if (!isFinite(amount) || amount <= 0) throw new Error("Invalid amount");
+        const amount6 = ethers.parseUnits(String(amount), 6);
+
+        // Approve and deposit
+        const approveTx = await this.contracts.mockUSDC
+          .connect(user)
+          .approve(await this.contracts.vault.getAddress(), amount6);
+        await approveTx.wait();
+        const tx = await this.contracts.vault
+          .connect(user)
+          .depositCollateral(amount6);
+        const rcpt = await tx.wait();
+        console.log(
+          colorText(
+            `✅ ${this.formatUserDisplay(
+              user.address
+            )} deposited $${amount} USDC (tx ${tx.hash})`,
+            colors.green
+          )
+        );
+        console.log(
+          colorText(`   ⛽ ${rcpt.gasUsed.toString()} gas`, colors.dim)
+        );
+        return `DEP $${amount}`;
+      }
+
+      case "WDR": {
+        // Withdraw collateral: amountUSDC
+        const amtStr = parts[cursor++];
+        if (!amtStr) throw new Error("WDR usage: [U#] WDR amountUSDC");
+        const amount = Number(amtStr);
+        if (!isFinite(amount) || amount <= 0) throw new Error("Invalid amount");
+        const amount6 = ethers.parseUnits(String(amount), 6);
+        const tx = await this.contracts.vault
+          .connect(user)
+          .withdrawCollateral(amount6);
+        const rcpt = await tx.wait();
+        console.log(
+          colorText(
+            `✅ ${this.formatUserDisplay(
+              user.address
+            )} withdrew $${amount} USDC (tx ${tx.hash})`,
+            colors.yellow
+          )
+        );
+        console.log(
+          colorText(`   ⛽ ${rcpt.gasUsed.toString()} gas`, colors.dim)
+        );
+        return `WDR $${amount}`;
+      }
+
+      case "CA": {
+        // Cancel All orders for user
+        const orders = await this.contracts.orderBook.getUserOrders(
+          user.address
+        );
+        let success = 0;
+        for (const orderId of orders) {
+          try {
+            const order = await this.contracts.orderBook.getOrder(orderId);
+            if (order.trader !== ethers.ZeroAddress && order.amount > 0) {
+              const tx = await this.contracts.orderBook
+                .connect(user)
+                .cancelOrder(orderId);
+              await tx.wait();
+              success++;
+            }
+          } catch (_) {}
+        }
+        console.log(
+          colorText(
+            `✅ ${this.formatUserDisplay(
+              user.address
+            )} cancelled ${success} orders`,
+            colors.magenta
+          )
+        );
+        return `CA ${success}`;
+      }
+
+      case "CO": {
+        // Cancel One by orderId (decimal)
+        const idStr = parts[cursor++];
+        if (!idStr) throw new Error("CO usage: [U#] CO orderId");
+        const orderId = BigInt(idStr);
+        const tx = await this.contracts.orderBook
+          .connect(user)
+          .cancelOrder(orderId);
+        await tx.wait();
+        console.log(
+          colorText(
+            `✅ ${this.formatUserDisplay(
+              user.address
+            )} cancelled order ${orderId}`,
+            colors.magenta
+          )
+        );
+        return `CO ${orderId}`;
+      }
+
+      case "CNO": {
+        const idxStr = parts[cursor++];
+        if (!idxStr) throw new Error("CNO usage: [U#] CNO index");
+        const idx = Number(idxStr) - 1;
+        const orders = await this.contracts.orderBook.getUserOrders(
+          user.address
+        );
+        if (isNaN(idx) || idx < 0 || idx >= orders.length)
+          throw new Error("Invalid order index");
+        const orderId = orders[idx];
+        const tx = await this.contracts.orderBook
+          .connect(user)
+          .cancelOrder(orderId);
+        await tx.wait();
+        console.log(
+          colorText(
+            `✅ Cancelled order #${idx + 1} (${orderId})`,
+            colors.magenta
+          )
+        );
+        return `CNO #${idx + 1}`;
+      }
+
+      case "POS": {
+        await this.viewOpenPositionsFor(user);
+        return `POS`;
+      }
+
+      case "ORDS": {
+        await this.viewMyOrdersFor(user);
+        return `ORDS`;
+      }
+
+      case "OB": {
+        await this.displayOrderBook();
+        return `OB`;
+      }
+
+      case "PF": {
+        await this.displayPortfolio();
+        return `PF`;
+      }
+
+      case "OVR": {
+        await this.showOverview();
+        return `OVR`;
+      }
+
+      case "DPA": {
+        await this.detailedPortfolioAnalysis();
+        return `DPA`;
+      }
+
+      case "DMA": {
+        await this.viewDetailedMarginAnalysis();
+        return `DMA`;
+      }
+
+      case "TH": {
+        await this.viewTradeHistory();
+        return `TH`;
+      }
+
+      case "LH": {
+        await this.viewLiquidationHistory();
+        return `LH`;
+      }
+
+      case "SLT": {
+        await this.testSlippageRequirement();
+        return `SLT`;
+      }
+
+      case "TUP": {
+        const idxStr = parts[cursor++];
+        const amtStr = parts[cursor++];
+        if (!idxStr || !amtStr)
+          throw new Error("TUP usage: [U#] TUP index amountUSDC");
+        const idx = Number(idxStr) - 1;
+        const amount6 = ethers.parseUnits(String(Number(amtStr)), 6);
+        const positions = await this.contracts.vault.getUserPositions(
+          user.address
+        );
+        if (isNaN(idx) || idx < 0 || idx >= positions.length)
+          throw new Error("Invalid position index");
+        const pos = positions[idx];
+        const tx = await this.contracts.vault
+          .connect(user)
+          .topUpPositionMargin(pos.marketId, amount6);
+        const rcpt = await tx.wait();
+        console.log(
+          colorText(
+            `✅ Topped up position #${idx + 1} by $${Number(amtStr)} (gas ${
+              rcpt.gasUsed
+            })`,
+            colors.brightGreen
+          )
+        );
+        return `TUP #${idx + 1} $${Number(amtStr)}`;
+      }
+
+      case "RED": {
+        const idxStr = parts[cursor++];
+        const amtStr = parts[cursor++];
+        if (!idxStr || !amtStr)
+          throw new Error("RED usage: [U#] RED index amountUSDC");
+        const idx = Number(idxStr) - 1;
+        const amount6 = ethers.parseUnits(String(Number(amtStr)), 6);
+        const positions = await this.contracts.vault.getUserPositions(
+          user.address
+        );
+        if (isNaN(idx) || idx < 0 || idx >= positions.length)
+          throw new Error("Invalid position index");
+        const pos = positions[idx];
+        try {
+          const tx = await this.contracts.vault
+            .connect(user)
+            .releaseMargin(user.address, pos.marketId, amount6);
+          const rcpt = await tx.wait();
+          console.log(
+            colorText(
+              `✅ Reduced margin on position #${idx + 1} by $${Number(
+                amtStr
+              )} (gas ${rcpt.gasUsed})`,
+              colors.brightYellow
+            )
+          );
+          return `RED #${idx + 1} $${Number(amtStr)}`;
+        } catch (err) {
+          throw new Error(
+            "Direct margin release not permitted; use partial close"
+          );
+        }
+      }
+
+      case "SU": {
+        const idxStr = parts[cursor++];
+        if (!idxStr) throw new Error("SU usage: SU userIndex");
+        const idx = Number(idxStr) - 1;
+        if (isNaN(idx) || idx < 0 || idx >= this.users.length)
+          throw new Error("Invalid user index");
+        this.currentUser = this.users[idx];
+        this.currentUserIndex = idx;
+        console.log(
+          colorText(
+            `✅ Switched to ${idx === 0 ? "Deployer" : `User ${idx}`}`,
+            colors.brightCyan
+          )
+        );
+        return `SU ${idx + 1}`;
+      }
+
+      default:
+        throw new Error(`Unknown op: ${op}`);
+    }
+  }
+
+  // ==== Hack Mode Helpers ====
+  async renderHackHeader() {
+    console.log(gradient("═".repeat(80)));
+    console.log(colorText("🟣 HACK MODE CONSOLE", colors.brightMagenta));
+    console.log(gradient("═".repeat(80)));
+    try {
+      const [totalCollateral, _mu, _mr, available] =
+        await this.contracts.vault.getUnifiedMarginSummary(
+          this.currentUser?.address || ethers.ZeroAddress
+        );
+      const [bestBid, bestAsk] = await this.contracts.orderBook.getBestPrices();
+      console.log(
+        colorText(
+          `User: ${
+            this.currentUserIndex === 0
+              ? "Deployer"
+              : `User ${this.currentUserIndex}`
+          }  |  Avail: $${formatUSDC(available)}  |  Collat: $${formatUSDC(
+            totalCollateral
+          )}  |  Bid/Ask: $${formatPrice(bestBid)}/$${formatPrice(bestAsk)}`,
+          colors.dim
+        )
+      );
+    } catch (_) {}
+  }
+
+  printHackLegend() {
+    console.log(colorText("\n📘 COMMAND LEGEND", colors.brightCyan));
+    console.log(
+      colorText(
+        "┌─────────────────────────────────────────────────────────────┐",
+        colors.cyan
+      )
+    );
+    console.log(
+      colorText(
+        "│ Prefix: U{n} targets user (e.g., U2)                      │",
+        colors.white
+      )
+    );
+    console.log(
+      colorText(
+        "│ Orders: LB price mode val | LS price mode val              │",
+        colors.white
+      )
+    );
+    console.log(
+      colorText(
+        "│         MB mode val [slipBps] | MS mode val [slipBps]      │",
+        colors.white
+      )
+    );
+    console.log(
+      colorText(
+        "│ Collat: DEP amt | WDR amt                                  │",
+        colors.white
+      )
+    );
+    console.log(
+      colorText(
+        "│ Cancel: CA (all) | CO orderId | CNO idx                    │",
+        colors.white
+      )
+    );
+    console.log(
+      colorText(
+        "│ Views: ORDS | POS | OB | PF | OVR                          │",
+        colors.white
+      )
+    );
+    console.log(
+      colorText(
+        "│ Analyt: DPA (portfolio) | DMA (margin) | TH (trades) | LH   │",
+        colors.white
+      )
+    );
+    console.log(
+      colorText(
+        "│ Margin: TUP idx amt | RED idx amt                          │",
+        colors.white
+      )
+    );
+    console.log(
+      colorText(
+        "│ Misc:   SU n (switch user) | SLT (slippage test)           │",
+        colors.white
+      )
+    );
+    console.log(
+      colorText(
+        "│ Batch:  RUN <path> (execute file with commands)            │",
+        colors.white
+      )
+    );
+    console.log(
+      colorText(
+        "│ Tips:   Separate multiple with comma or semicolon          │",
+        colors.dim
+      )
+    );
+    console.log(
+      colorText(
+        "└─────────────────────────────────────────────────────────────┘",
+        colors.cyan
+      )
+    );
+    console.log(
+      colorText("Type 'help' for this legend, 'back' to return.", colors.dim)
+    );
+  }
+
+  recordHackHistory(entry) {
+    const ts = new Date().toLocaleTimeString();
+    this.hackHistory.push({ ...entry, ts });
+    if (this.hackHistory.length > 50) this.hackHistory.shift();
+  }
+
+  renderHackLedger() {
+    if (!this.hackHistory.length) return;
+    console.log(colorText("\n📒 LEDGER (recent)", colors.brightYellow));
+    const recent = this.hackHistory.slice(-8);
+    for (const e of recent) {
+      const icon = e.status === "ok" ? "✅" : "❌";
+      console.log(
+        colorText(
+          `${e.ts} ${icon} ${e.cmd} ${e.summary ? "- " + e.summary : ""}`,
+          e.status === "ok" ? colors.green : colors.red
+        )
+      );
+    }
+  }
+
+  // Batch runner for file-driven hack commands
+  async runHackFile(filePath) {
+    const fs = require("fs");
+    const path = require("path");
+    try {
+      const absolute = path.isAbsolute(filePath)
+        ? filePath
+        : path.join(process.cwd(), filePath);
+      if (!fs.existsSync(absolute)) {
+        console.log(colorText(`❌ File not found: ${absolute}`, colors.red));
+        return;
+      }
+      const raw = fs.readFileSync(absolute, "utf8");
+      // Accept comma, semicolon, and newline as separators; ignore blank/comment lines (#)
+      const tokens = raw
+        .split(/[\n;,]+/)
+        .map((s) => s.trim())
+        .filter((s) => s && !s.startsWith("#"));
+      console.log(
+        colorText(
+          `📦 Loaded ${tokens.length} commands from file`,
+          colors.brightCyan
+        )
+      );
+      for (const cmd of tokens) {
+        try {
+          const summary = await this.executeHackCommand(cmd);
+          this.recordHackHistory({ status: "ok", cmd, summary });
+        } catch (err) {
+          console.log(colorText(`❌ ${cmd} -> ${err.message}`, colors.red));
+          this.recordHackHistory({
+            status: "err",
+            cmd,
+            summary: err.message || String(err),
+          });
+        }
+      }
+      console.log(colorText("✅ Batch complete.", colors.brightGreen));
+    } catch (e) {
+      console.log(colorText(`❌ Batch failed: ${e.message}`, colors.red));
+    }
+  }
+
+  // Non-interactive views for hack mode
+  async viewOpenPositionsFor(user) {
+    const positions = await this.contracts.vault.getUserPositions(user.address);
+    if (!positions.length) {
+      console.log(colorText("(no positions)", colors.dim));
+      return;
+    }
+    for (let i = 0; i < positions.length; i++) {
+      const p = positions[i];
+      const side = BigInt(p.size.toString()) >= 0n ? "LONG" : "SHORT";
+      const sizeAbs =
+        BigInt(p.size.toString()) >= 0n
+          ? BigInt(p.size.toString())
+          : -BigInt(p.size.toString());
+      const entryStr = formatPriceWithValidation(
+        BigInt(p.entryPrice.toString()),
+        6,
+        4,
+        false
+      );
+      console.log(
+        colorText(
+          `${i + 1}. ${side} ${formatAmount(
+            sizeAbs,
+            18,
+            4
+          )} ALU @ $${entryStr}`,
+          side === "LONG" ? colors.green : colors.red
+        )
+      );
+    }
+  }
+
+  async viewMyOrdersFor(user) {
+    const orders = await this.contracts.orderBook.getUserOrders(user.address);
+    if (!orders.length) {
+      console.log(colorText("(no orders)", colors.dim));
+      return;
+    }
+    for (let i = 0; i < orders.length; i++) {
+      try {
+        const order = await this.contracts.orderBook.getOrder(orders[i]);
+        if (order.trader !== ethers.ZeroAddress && order.amount > 0) {
+          const type = order.isBuy ? "BUY" : "SELL";
+          const price = formatPriceWithValidation(order.price, 6, 4, false);
+          const amount = formatAmount(order.amount, 18, 6);
+          console.log(
+            colorText(
+              `${i + 1}. ${type} ${amount} ALU @ $${price} (ID: ${orders[i]})`,
+              order.isBuy ? colors.green : colors.red
+            )
+          );
+        }
+      } catch (_) {
+        console.log(
+          colorText(`${i + 1}. (error loading order ${orders[i]})`, colors.red)
+        );
+      }
     }
   }
   async showOverview() {

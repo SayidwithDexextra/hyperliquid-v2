@@ -7,8 +7,8 @@ import "./PositionManager.sol";
 interface ICoreVault {
     function isLiquidatable(address user, bytes32 marketId, uint256 markPrice) external view returns (bool);
     function getPositionSummary(address user, bytes32 marketId) external view returns (int256 size, uint256 entryPrice, uint256 marginLocked);
-    function liquidateShort(address user, bytes32 marketId, address liquidator) external;
-    function liquidateLong(address user, bytes32 marketId, address liquidator) external;
+    function liquidateShort(address user, bytes32 marketId, address liquidator, uint256 executionPrice) external;
+    function liquidateLong(address user, bytes32 marketId, address liquidator, uint256 executionPrice) external;
     function lockMargin(address user, bytes32 marketId, uint256 amount) external;
     function releaseMargin(address user, bytes32 marketId, uint256 amount) external;
     function reserveMargin(address user, bytes32 orderId, bytes32 marketId, uint256 amount) external;
@@ -444,7 +444,7 @@ contract OrderBook {
                     _processEnhancedLiquidationWithGapProtection(
                         trader,
                         size,
-                        markPrice,
+                        liquidationResult.worstExecutionPrice,
                         liquidationResult
                     );
                 // Distribute the penalty reward pool that was credited to OrderBook by the vault
@@ -471,7 +471,7 @@ contract OrderBook {
                         // Try long liquidation
                         // DEBUG: PAST - Attempting long position socialized loss liquidation
                         emit LiquidationSocializedLossAttempt(trader, true, "liquidateLong");
-                        try vault.liquidateLong(trader, marketId, msg.sender) {
+                        try vault.liquidateLong(trader, marketId, msg.sender, markPrice) {
                             liquidationCompleted = true;
                             // DEBUG: PAST - Long socialized loss liquidation successful
                             emit LiquidationSocializedLossResult(trader, true, "liquidateLong");
@@ -484,7 +484,7 @@ contract OrderBook {
                         // Try short liquidation
                         // DEBUG: PAST - Attempting short position socialized loss liquidation
                         emit LiquidationSocializedLossAttempt(trader, false, "liquidateShort");
-                        try vault.liquidateShort(trader, marketId, msg.sender) {
+                        try vault.liquidateShort(trader, marketId, msg.sender, markPrice) {
                             liquidationCompleted = true;
                             // DEBUG: PAST - Short socialized loss liquidation successful
                             emit LiquidationSocializedLossResult(trader, true, "liquidateShort");
@@ -691,13 +691,13 @@ contract OrderBook {
                 // Long position liquidation (selling at lower price is bad)
                 if (executionResult.worstExecutionPrice < liquidationTriggerPrice) {
                     priceGap = liquidationTriggerPrice - executionResult.worstExecutionPrice;
-                    gapLoss = (priceGap * uint256(positionSize)) / PRICE_SCALE;
+                    gapLoss = (priceGap * uint256(positionSize)) / AMOUNT_SCALE;
                 }
             } else {
                 // Short position liquidation (buying at higher price is bad)
                 if (executionResult.worstExecutionPrice > liquidationTriggerPrice) {
                     priceGap = executionResult.worstExecutionPrice - liquidationTriggerPrice;
-                    gapLoss = (priceGap * uint256(-positionSize)) / PRICE_SCALE;
+                    gapLoss = (priceGap * uint256(-positionSize)) / AMOUNT_SCALE;
                 }
             }
             
@@ -747,7 +747,7 @@ contract OrderBook {
                 uint256 currentMarkPrice = _calculateMarkPrice();
                 vault.updateMarkPrice(marketId, currentMarkPrice);
                 
-                try vault.liquidateLong(trader, marketId, msg.sender) {
+                try vault.liquidateLong(trader, marketId, msg.sender, executionResult.worstExecutionPrice) {
                     vaultLiquidationSuccess = true;
                     emit LiquidationPositionProcessed(trader, positionSize, executionResult.averageExecutionPrice);
                 } catch (bytes memory /*reason*/) {
@@ -761,7 +761,7 @@ contract OrderBook {
                 
                 // 🔍 DEBUG: About to call vault.liquidateShort
                 emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort");
-                try vault.liquidateShort(trader, marketId, msg.sender) {
+                try vault.liquidateShort(trader, marketId, msg.sender, executionResult.worstExecutionPrice) {
                     vaultLiquidationSuccess = true;
                     emit LiquidationPositionProcessed(trader, positionSize, executionResult.averageExecutionPrice);
                     emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort_SUCCESS");
@@ -978,6 +978,12 @@ contract OrderBook {
     uint256 public vwapTimeWindow = 3600; // Default 1 hour window in seconds
     uint256 public minVolumeForVWAP = 100 * AMOUNT_SCALE; // Minimum 100 units volume for valid VWAP
     bool public useVWAPForMarkPrice = true; // Enable/disable VWAP for mark price
+
+    // ============ Smoothed Last Trade (EMA) Settings ============
+    // Alpha in basis points (0-10000). 1000 = 10% weight to last trade
+    uint256 public lastTradeSmoothingAlphaBps = 1000;
+    // Toggle EMA smoothing when using last trade as fallback for mark price
+    bool public useSmoothedLastTrade = true;
     
     // Trade events
     event TradeExecuted(
@@ -1010,6 +1016,8 @@ contract OrderBook {
     // VWAP events
     event VWAPConfigUpdated(uint256 timeWindow, uint256 minVolume, bool useVWAP);
     event VWAPCalculated(uint256 vwap, uint256 volume, uint256 tradeCount, uint256 timeWindow);
+    // Mark price smoothing events
+    event MarkSmoothingUpdated(uint256 alphaBps, bool enabled);
     
     // DEBUG EVENTS for _executeTrade function
     event TradeExecutionStarted(address indexed buyer, address indexed seller, uint256 price, uint256 amount, bool buyerMargin, bool sellerMargin);
@@ -2586,6 +2594,8 @@ contract OrderBook {
         // Update price and check liquidations (optimized for gas efficiency)
         lastTradePrice = price;
         uint256 currentMark = _calculateMarkPrice();
+        // Persist the last mark for next EMA step
+        lastMarkPrice = currentMark;
         
         // 🔧 CRITICAL FIX: Synchronize mark price with CoreVault for ADL system
         // The CoreVault's ADL system depends on accurate mark prices to find profitable positions
@@ -3081,6 +3091,18 @@ contract OrderBook {
     }
 
     /**
+     * @dev Update mark price smoothing configuration
+     * @param _alphaBps Alpha in basis points (0-10000)
+     * @param _enabled Whether smoothing is enabled
+     */
+    function updateMarkSmoothing(uint256 _alphaBps, bool _enabled) external onlyAdmin {
+        require(_alphaBps <= 10000, "OrderBook: alpha too high");
+        lastTradeSmoothingAlphaBps = _alphaBps;
+        useSmoothedLastTrade = _enabled;
+        emit MarkSmoothingUpdated(_alphaBps, _enabled);
+    }
+
+    /**
      * @dev Update maximum slippage tolerance for market orders
      * @param _maxSlippageBps New maximum slippage in basis points
      */
@@ -3365,7 +3387,20 @@ contract OrderBook {
             // Use mid-price if both sides exist
             return (bestBid / 2) + (bestAsk / 2) + ((bestBid % 2 + bestAsk % 2) / 2);
         } else if (lastTradePrice > 0) {
-            // Use last trade price if available
+            // Use smoothed last trade price if enabled and we have a previous mark
+            if (useSmoothedLastTrade && lastMarkPrice > 0) {
+                // EMA: mark = alpha*lastTrade + (1-alpha)*prevMark
+                // alpha in bps
+                uint256 alpha = lastTradeSmoothingAlphaBps;
+                if (alpha > 10000) {
+                    alpha = 10000;
+                }
+                uint256 weightedLast = (lastTradePrice * alpha) / 10000;
+                uint256 weightedPrev = (lastMarkPrice * (10000 - alpha)) / 10000;
+                uint256 ema = weightedLast + weightedPrev;
+                return ema;
+            }
+            // Otherwise use last trade price as-is
             return lastTradePrice;
         } else if (bestBid > 0) {
             // If only bid exists, use bid as proxy
