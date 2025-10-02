@@ -5765,7 +5765,6 @@ ${colors.brightRed}└───────────────────�
       );
     } catch (_) {}
   }
-
   printHackLegend() {
     console.log(colorText("\n📘 COMMAND LEGEND", colors.brightCyan));
     console.log(
@@ -10061,7 +10060,6 @@ ${colors.brightRed}└───────────────────�
       colorText("\n📱 Press Enter to continue...", colors.dim)
     );
   }
-
   async viewLiquidationHistory() {
     console.clear();
     console.log(boxText("📊 LIQUIDATION HISTORY", colors.brightRed));
@@ -11942,7 +11940,6 @@ ${colors.brightRed}└───────────────────�
   async pause(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
-
   /**
    * Display detailed margin analysis from all sources
    */
@@ -12193,7 +12190,9 @@ ${colors.brightRed}└───────────────────�
         console.log(
           colorText(
             `   Total Margin Locked: ${colorText(
-              unified.totalMarginCommitted,
+              comprehensiveMarginData.totals.totalMarginLocked
+                .toFixed(2)
+                .padEnd(16),
               colors.yellow
             )} USDC`,
             colors.white
@@ -12310,7 +12309,7 @@ ${colors.brightRed}└───────────────────�
         formatUSDC(marginReservedForOrders)
       );
       marginData.totals.totalMarginLocked = Number(
-        formatUSDC(totalMarginCommitted)
+        formatUSDC(marginUsedInPositions)
       );
 
       // Get OrderBook's view for verification

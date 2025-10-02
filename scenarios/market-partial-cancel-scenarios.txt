@@ -6,7 +6,6 @@
 STRICT ON
 U1 CA, U2 CA, U3 CA, U4 CA
 U1 DEP 200, U2 DEP 200, U3 DEP 200, U4 DEP 200
-SLEEP 250
 
 # ============================================================
 # 11a) MARKET BUY cannot fully execute within 1% slippage
@@ -14,14 +13,12 @@ SLEEP 250
 
 # Seed asks: best ask 2.50 (2 units), next 2.53 (10 units, +1.2% > 1%)
 U2 LS 2.50 1 2, U3 LS 2.53 1 10
-SLEEP 200
 ASSERT ASK == 2.50
 ASSERT DEPTH ASK 2.50 == 2
 ASSERT DEPTH ASK 2.53 == 10
 
 # Action: U1 MB 5 units with 1% slippage (100 bps) → can only fill 2 @ 2.50
 U1 MB 1 5 100
-SLEEP 300
 ASSERT DEPTH ASK 2.50 == 0
 ASSERT ASK == 2.53
 ASSERT POSITION U1 LONG >= 2
@@ -30,7 +27,6 @@ ASSERT NO_ORDER U1 BUY 2.53
 
 # Cleanup
 U1 CA, U2 CA, U3 CA, U4 CA
-SLEEP 200
 ASSERT BOOK_EMPTY
 
 # ============================================================
@@ -39,14 +35,12 @@ ASSERT BOOK_EMPTY
 
 # Seed bids: best bid 2.40 (2 units), next 2.37 (10 units, -1.25% < -1%)
 U1 LB 2.40 1 2, U3 LB 2.37 1 10
-SLEEP 200
 ASSERT BID == 2.40
 ASSERT DEPTH BID 2.40 == 2
 ASSERT DEPTH BID 2.37 == 10
 
 # Action: U2 MS 5 units with 1% slippage (100 bps) → can only fill 2 @ 2.40
 U2 MS 1 5 100
-SLEEP 300
 ASSERT DEPTH BID 2.40 == 0
 ASSERT BID == 2.37
 ASSERT POSITION U2 SHORT >= 2

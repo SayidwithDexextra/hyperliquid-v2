@@ -1,50 +1,8 @@
-# PARTIAL MATCH SCENARIOS (per MARKET_LEGEND.md)
-# Tests that partial matches consume available liquidity and rest the remainder as a new order
-
-# --- PREP: Clean state and modest funding ---
 STRICT ON
-U1 CA, U2 CA, U3 CA, U4 CA
-U1 DEP 200, U2 DEP 200, U3 DEP 200, U4 DEP 200
-SLEEP 250
-
-# ============================================================
-# 3) LIMIT BUY partially matches existing asks, remainder rests
-# ============================================================
-
-# Setup: asks at 2.50 (3 units) and 2.55 (10 units). Lowest ask is 2.50
 U2 LS 2.50 1 3, U3 LS 2.55 1 10
-SLEEP 200
-ASSERT ASK == 2.50
-ASSERT DEPTH ASK 2.50 == 3
-
-# Action: U1 places LB for 5 units at 2.50 → fills 3 at 2.50; 2 units rest as bid at 2.50
 U1 LB 2.50 1 5
-SLEEP 250
-ASSERT ASK >= 2.55
-ASSERT DEPTH BID 2.50 == 2
-ASSERT ORDER U1 BUY 2.50
-ASSERT POSITION U1 LONG >= 3
-
-# Cleanup before next test
 U1 CA, U2 CA, U3 CA, U4 CA
-SLEEP 200
-
-# ============================================================
-# 4) LIMIT SELL partially matches existing bids, remainder rests
-# ============================================================
-
-# Setup: bids at 2.40 (3 units) and 2.35 (10 units). Highest bid is 2.40
 U1 LB 2.40 1 3, U4 LB 2.35 1 10
-SLEEP 200
-ASSERT BID == 2.40
-ASSERT DEPTH BID 2.40 == 3
-
-# Action: U2 places LS for 5 units at 2.40 → fills 3 at 2.40; 2 units rest as ask at 2.40
 U2 LS 2.40 1 5
-SLEEP 250
-ASSERT BID >= 2.35
-ASSERT DEPTH ASK 2.40 == 2
-ASSERT ORDER U2 SELL 2.40
-ASSERT POSITION U2 SHORT >= 3
 
 

@@ -5,48 +5,40 @@
 STRICT ON
 U1 CA, U2 CA, U3 CA, U4 CA
 U1 DEP 200, U2 DEP 200, U3 DEP 200, U4 DEP 200
-SLEEP 250
 ASSERT BOOK_EMPTY
 
 # A) First bid appears → BID updates; ASK remains NONE
 U1 LB 2.40 1 2
-SLEEP 200
 ASSERT BID == 2.40
 ASSERT ASK NONE
 
 # B) First ask appears → ASK updates
 U2 LS 2.60 1 2
-SLEEP 200
 ASSERT BID == 2.40
 ASSERT ASK == 2.60
 
 # C) Better bid arrives → BID updates to higher level
 U3 LB 2.45 1 1
-SLEEP 200
 ASSERT BID == 2.45
 ASSERT ASK == 2.60
 
 # D) Better ask arrives → ASK updates to lower level
 U4 LS 2.55 1 1
-SLEEP 200
 ASSERT BID == 2.45
 ASSERT ASK == 2.55
 
 # E) Consume best ask → ASK should roll up to next ask level
 U1 MB 1 1 200
-SLEEP 300
 ASSERT BID == 2.45
 ASSERT ASK == 2.60
 
 # F) Consume best bid → BID should roll down to next bid level
 U2 MS 1 1 200
-SLEEP 300
 ASSERT BID == 2.40
 ASSERT ASK == 2.60
 
 # Cleanup
 U1 CA, U2 CA, U3 CA, U4 CA
-SLEEP 200
 ASSERT BOOK_EMPTY
 
 

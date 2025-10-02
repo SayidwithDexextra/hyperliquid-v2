@@ -128,7 +128,18 @@ library VaultAnalytics {
     ) external pure returns (MarginSummary memory) {
         uint256 marginUsed = getTotalMarginUsed(positions);
         uint256 marginReserved = getTotalMarginReserved(pendingOrders);
-        uint256 availableCollateral = getAvailableCollateral(userCollateral, positions);
+        
+        // Base available = collateral - margin used
+        uint256 baseAvailable = getAvailableCollateral(userCollateral, positions);
+        
+        // Include realized PnL (convert 18d -> 6d) in available collateral
+        int256 realizedPnL6 = realizedPnL / int256(DECIMAL_SCALE);
+        int256 baseWithRealized = int256(baseAvailable) + realizedPnL6;
+        uint256 availableAfterRealized = baseWithRealized > 0 ? uint256(baseWithRealized) : 0;
+        
+        // Subtract reserved margin for pending orders
+        uint256 availableCollateral = availableAfterRealized > marginReserved ? (availableAfterRealized - marginReserved) : 0;
+        
         int256 unrealizedPnL = getUnrealizedPnL(positions, markPrices);
         
         // Calculate portfolio value inline

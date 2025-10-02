@@ -227,25 +227,32 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
 
     function withdrawCollateral(uint256 amount) external nonReentrant whenNotPaused {
         require(amount > 0, "!amount");
-        require(userCollateral[msg.sender] >= amount, "!balance");
         
-        // Check available collateral through library
-        VaultAnalytics.Position[] memory positions = new VaultAnalytics.Position[](userPositions[msg.sender].length);
-        for (uint256 i = 0; i < userPositions[msg.sender].length; i++) {
-            positions[i] = VaultAnalytics.Position({
-                marketId: userPositions[msg.sender][i].marketId,
-                size: userPositions[msg.sender][i].size,
-                entryPrice: userPositions[msg.sender][i].entryPrice,
-                marginLocked: userPositions[msg.sender][i].marginLocked
-            });
-        }
-        uint256 available = VaultAnalytics.getAvailableCollateral(userCollateral[msg.sender], positions);
+        // Use unified available collateral including realized PnL
+        uint256 available = getAvailableCollateral(msg.sender);
         require(available >= amount, "!available");
-        
-        userCollateral[msg.sender] -= amount;
-        totalCollateralDeposited -= amount;
+
+        // Determine how much to withdraw from realized PnL (6 decimals) vs deposited collateral
+        int256 realizedPnL18 = userRealizedPnL[msg.sender];
+        uint256 realizedPnL6 = realizedPnL18 > 0 ? uint256(realizedPnL18 / int256(DECIMAL_SCALE)) : 0;
+        uint256 fromPnL = amount <= realizedPnL6 ? amount : realizedPnL6;
+        uint256 fromDeposit = amount - fromPnL;
+
+        // Apply withdrawal against realized PnL first (reduce realized PnL balance)
+        if (fromPnL > 0) {
+            // Convert back to 18 decimals to adjust realized PnL mapping
+            userRealizedPnL[msg.sender] -= int256(fromPnL * DECIMAL_SCALE);
+        }
+
+        // Withdraw the remainder from deposited collateral
+        if (fromDeposit > 0) {
+            require(userCollateral[msg.sender] >= fromDeposit, "!balance");
+            userCollateral[msg.sender] -= fromDeposit;
+            totalCollateralDeposited -= fromDeposit;
+        }
+
+        // Transfer total amount out
         collateralToken.safeTransfer(msg.sender, amount);
-        
         emit CollateralWithdrawn(msg.sender, amount);
     }
 
@@ -557,8 +564,15 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         }
         
         totalMarginCommitted = marginUsedInPositions + marginReservedForOrders;
-        availableMargin = totalCollateral > totalMarginCommitted ? 
-            totalCollateral - totalMarginCommitted : 0;
+        // Include realized PnL (18d -> 6d) in available margin
+        {
+            int256 realizedPnL6 = realizedPnL / int256(DECIMAL_SCALE);
+            int256 baseWithRealized = int256(totalCollateral) + realizedPnL6;
+            uint256 availableBeforeReserved = baseWithRealized > 0 ? uint256(baseWithRealized) : 0;
+            availableMargin = availableBeforeReserved > totalMarginCommitted
+                ? (availableBeforeReserved - totalMarginCommitted)
+                : 0;
+        }
         
         // Simple health check: available margin should be positive
         isMarginHealthy = (int256(totalCollateral) + realizedPnL + unrealizedPnL) > int256(totalMarginCommitted);
@@ -624,13 +638,20 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         }
         // Base available = collateral - margin locked in positions
         uint256 baseAvailable = VaultAnalytics.getAvailableCollateral(userCollateral[user], positions);
+        
+        // Add realized PnL converted to 6 decimals (PnL is tracked in 18 decimals)
+        int256 realizedPnL18 = userRealizedPnL[user];
+        int256 realizedPnL6 = realizedPnL18 / int256(DECIMAL_SCALE);
+        int256 baseWithRealized = int256(baseAvailable) + realizedPnL6;
+        uint256 availableWithRealized = baseWithRealized > 0 ? uint256(baseWithRealized) : 0;
+
         // Subtract margin reserved for pending orders
         uint256 reserved = 0;
         VaultAnalytics.PendingOrder[] storage pending = userPendingOrders[user];
         for (uint256 i = 0; i < pending.length; i++) {
             reserved += pending[i].marginReserved;
         }
-        return baseAvailable > reserved ? baseAvailable - reserved : 0;
+        return availableWithRealized > reserved ? availableWithRealized - reserved : 0;
     }
 
     function getTotalMarginUsed(address user) public view returns (uint256) {
@@ -759,8 +780,23 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     // Backward-compatible helpers used by OrderBook and router flows
     function deductFees(address user, uint256 amount, address recipient) external {
         require(hasRole(FACTORY_ROLE, msg.sender) || hasRole(ORDERBOOK_ROLE, msg.sender), "unauthorized");
-        require(userCollateral[user] >= amount, "!balance");
-        userCollateral[user] -= amount;
+        require(amount > 0, "!amount");
+
+        // Prefer consuming realized PnL (6 decimals) first, then deposited collateral
+        int256 realizedPnL18 = userRealizedPnL[user];
+        uint256 realizedPnL6 = realizedPnL18 > 0 ? uint256(realizedPnL18 / int256(DECIMAL_SCALE)) : 0;
+        uint256 fromPnL = amount <= realizedPnL6 ? amount : realizedPnL6;
+        uint256 fromDeposit = amount - fromPnL;
+
+        if (fromPnL > 0) {
+            userRealizedPnL[user] -= int256(fromPnL * DECIMAL_SCALE);
+        }
+
+        if (fromDeposit > 0) {
+            require(userCollateral[user] >= fromDeposit, "!balance");
+            userCollateral[user] -= fromDeposit;
+        }
+
         userCollateral[recipient] += amount;
     }
 

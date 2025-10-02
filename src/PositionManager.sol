@@ -87,20 +87,9 @@ library PositionManager {
                 // Closing size SIGNED the same as the original position (not the trade delta)
                 int256 closingSizeSigned = position.size > 0 ? int256(closedAbs) : -int256(closedAbs);
 
-                // CRITICAL OVERFLOW FIX: Use fixed precision arithmetic with extreme scaling
+                // Standard P&L calculation in 18 decimals: (P_exec - P_entry) * Q / TICK_PRECISION
                 int256 priceDiff = int256(executionPrice) - int256(position.entryPrice);
-                
-                unchecked {
-                    // Scale down to whole units (from 18 decimals to 0)
-                    int256 wholeUnitSize = closingSizeSigned / int256(1e18);
-                    if (wholeUnitSize == 0) {
-                        // For tiny amounts, use 1 with adjusted precision
-                        wholeUnitSize = closingSizeSigned > 0 ? int256(1) : int256(-1);
-                    }
-                    
-                    // Calculate PnL with adjusted precision
-                    result.realizedPnL = (priceDiff * wholeUnitSize);
-                }
+                result.realizedPnL = (priceDiff * closingSizeSigned) / int256(TICK_PRECISION);
             }
 
             // Calculate new entry price
