@@ -47,6 +47,8 @@ interface ICoreVault {
     function getPositionEquity(address user, bytes32 marketId) external view returns (int256 equity6, uint256 notional6, bool hasPosition);
     function getEffectiveMaintenanceMarginBps(address user, bytes32 marketId) external view returns (uint256 mmrBps, uint256 fillRatio1e18, bool hasPosition);
     function debugEmitIsLiquidatable(address user, bytes32 marketId, uint256 markPrice) external;
+    // Under-liquidation control
+    function setUnderLiquidation(address user, bytes32 marketId, bool state) external;
 }
 
 /**
@@ -502,17 +504,37 @@ contract OrderBook {
             LiquidationExecutionResult memory liquidationResult;
             bool marketOrderSuccess = false;
             if (size < 0) {
-                emit LiquidationMarketOrderAttempt(trader, uint256(-size), true, markPrice);
-                liquidationResult = _executeLiquidationMarketOrder(trader, uint256(-size), true, markPrice);
+                // For shorts, attempt up to available best-ask depth; fall back to partial amount if full size not available
+                uint256 requestAmount = uint256(-size);
+                emit LiquidationMarketOrderAttempt(trader, requestAmount, true, markPrice);
+                liquidationResult = _executeLiquidationMarketOrder(trader, requestAmount, true, markPrice);
+                if (!liquidationResult.success && liquidationResult.filledAmount == 0 && bestAsk > 0) {
+                    uint256 levelAmt = sellLevels[bestAsk].totalAmount;
+                    if (levelAmt > 0 && levelAmt < requestAmount) {
+                        // Retry with best-ask available size to consume incremental liquidity
+                        emit LiquidationMarketOrderAttempt(trader, levelAmt, true, markPrice);
+                        liquidationResult = _executeLiquidationMarketOrder(trader, levelAmt, true, markPrice);
+                    }
+                }
                 marketOrderSuccess = liquidationResult.success;
             } else {
-                emit LiquidationMarketOrderAttempt(trader, uint256(size), false, markPrice);
-                liquidationResult = _executeLiquidationMarketOrder(trader, uint256(size), false, markPrice);
+                uint256 requestAmount = uint256(size);
+                emit LiquidationMarketOrderAttempt(trader, requestAmount, false, markPrice);
+                liquidationResult = _executeLiquidationMarketOrder(trader, requestAmount, false, markPrice);
+                if (!liquidationResult.success && liquidationResult.filledAmount == 0 && bestBid > 0) {
+                    uint256 levelAmt = buyLevels[bestBid].totalAmount;
+                    if (levelAmt > 0 && levelAmt < requestAmount) {
+                        emit LiquidationMarketOrderAttempt(trader, levelAmt, false, markPrice);
+                        liquidationResult = _executeLiquidationMarketOrder(trader, levelAmt, false, markPrice);
+                    }
+                }
                 marketOrderSuccess = liquidationResult.success;
             }
             emit LiquidationMarketOrderResult(trader, marketOrderSuccess, marketOrderSuccess ? "Market order filled" : "No liquidity available");
 
             if (liquidationResult.filledAmount > 0) {
+                // Mark position under liquidation control to avoid full close paths
+                try vault.setUnderLiquidation(trader, marketId, true) {} catch {}
                 _processEnhancedLiquidationWithGapProtection(
                     trader,
                     size,
@@ -530,27 +552,10 @@ contract OrderBook {
                 return (true, size, true);
             }
 
-            // Fallback to vault liquidation
+            // Remove fallback full liquidation: if no market liquidity, leave position under liquidation and retry later
             if (!marketOrderSuccess) {
-                if (size > 0) {
-                    emit LiquidationSocializedLossAttempt(trader, true, "liquidateLong");
-                    try vault.liquidateLong(trader, marketId, msg.sender, markPrice) {
-                        emit LiquidationSocializedLossResult(trader, true, "liquidateLong");
-                        return (true, size, false);
-                    } catch {
-                        emit LiquidationSocializedLossResult(trader, false, "liquidateLong");
-                        return (false, 0, false);
-                    }
-                } else {
-                    emit LiquidationSocializedLossAttempt(trader, false, "liquidateShort");
-                    try vault.liquidateShort(trader, marketId, msg.sender, markPrice) {
-                        emit LiquidationSocializedLossResult(trader, true, "liquidateShort");
-                        return (true, size, false);
-                    } catch {
-                        emit LiquidationSocializedLossResult(trader, false, "liquidateShort");
-                        return (false, 0, false);
-                    }
-                }
+                try vault.setUnderLiquidation(trader, marketId, true) {} catch {}
+                return (false, 0, false);
             }
 
             // If we reach here with success=false but filledAmount==0, nothing done
@@ -1990,6 +1995,8 @@ contract OrderBook {
             orders[level.lastOrderId].nextOrderId = orderId;
             level.lastOrderId = orderId;
             level.totalAmount += amount;
+            // New liquidity at existing price may enable partial liquidations; trigger scan
+            _onOrderBookLiquidityChanged();
         }
         
         // Update best bid
@@ -2021,6 +2028,8 @@ contract OrderBook {
             orders[level.lastOrderId].nextOrderId = orderId;
             level.lastOrderId = orderId;
             level.totalAmount += amount;
+            // New liquidity at existing price may enable partial liquidations; trigger scan
+            _onOrderBookLiquidityChanged();
         }
         
         // Update best ask
@@ -2028,6 +2037,19 @@ contract OrderBook {
             bestAsk = price;
             _onMarkPricePotentiallyChanged();
         }
+    }
+
+    // Internal hook: trigger liquidation scan when order book depth increases (even if mark unchanged)
+    function _onOrderBookLiquidityChanged() private {
+        if (liquidationInProgress) {
+            emit LiquidationRecursionGuardSet(true);
+            return;
+        }
+        uint256 currentMark = _calculateMarkPrice();
+        vault.updateMarkPrice(marketId, currentMark);
+        emit LiquidationCheckTriggered(currentMark, lastMarkPrice);
+        _checkPositionsForLiquidation(currentMark);
+        lastMarkPrice = currentMark;
     }
 
     /**

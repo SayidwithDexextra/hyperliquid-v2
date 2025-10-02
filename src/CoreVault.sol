@@ -81,6 +81,21 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     mapping(bytes32 => address) public marketToOrderBook;
     // Track positions that are currently under liquidation control
     mapping(address => mapping(bytes32 => bool)) public isUnderLiquidationPosition;
+
+    /**
+     * @dev Set or clear under-liquidation control flag for a user's position
+     */
+    function setUnderLiquidation(
+        address user,
+        bytes32 marketId,
+        bool state
+    ) external onlyRole(ORDERBOOK_ROLE) {
+        isUnderLiquidationPosition[user][marketId] = state;
+        if (!state) {
+            // Optionally restore liquidation price on clear
+            _recomputeAndStoreLiquidationPrice(user, marketId);
+        }
+    }
     mapping(address => bool) public registeredOrderBooks;
     mapping(address => bytes32[]) public orderBookToMarkets;
     address[] public allOrderBooks;
@@ -995,6 +1010,10 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         PositionManager.Position[] storage positions = userPositions[user];
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size != 0) {
+                // If this position is under liquidation control, force liquidatable until cleared
+                if (isUnderLiquidationPosition[user][marketId]) {
+                    return true;
+                }
                 uint256 trigger = positions[i].liquidationPrice;
                 if (trigger == 0) {
                     // Fallback: compute real-time health if trigger not yet initialized
