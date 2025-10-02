@@ -1,0 +1,57 @@
+# MARKET SLIPPAGE SCENARIOS (per MARKET_LEGEND.md)
+# 5) Market buy respects max slippage; 6) Market sell respects max slippage
+
+# --- PREP: Clean and modest funding ---
+STRICT ON
+U1 CA, U2 CA, U3 CA, U4 CA
+U1 DEP 200, U2 DEP 200, U3 DEP 200, U4 DEP 200
+SLEEP 250
+
+# ============================================================
+# 5) MARKET BUY should only consume asks within max slippage
+# ============================================================
+
+# Seed asks: best ask 2.50, then 2.52 (+0.8%), then 2.53 (+1.2%)
+U2 LS 2.50 1 2, U3 LS 2.52 1 2, U4 LS 2.53 1 2
+SLEEP 200
+ASSERT ASK == 2.50
+ASSERT DEPTH ASK 2.50 == 2
+ASSERT DEPTH ASK 2.52 == 2
+ASSERT DEPTH ASK 2.53 == 2
+
+# Action: U1 MB 4 units with 1% slippage (100 bps)
+# Expected: consume 2 @ 2.50 and 2 @ 2.52; leave 2 @ 2.53 intact (beyond 1%)
+U1 MB 1 4 100
+SLEEP 300
+ASSERT DEPTH ASK 2.50 == 0
+ASSERT DEPTH ASK 2.52 == 0
+ASSERT ASK == 2.53
+ASSERT POSITION U1 LONG >= 4
+
+# Cleanup
+U1 CA, U2 CA, U3 CA, U4 CA
+SLEEP 200
+ASSERT BOOK_EMPTY
+
+# ============================================================
+# 6) MARKET SELL should only consume bids within max slippage
+# ============================================================
+
+# Seed bids: best bid 2.40, then 2.39 (-0.42%), then 2.37 (-1.25%)
+U1 LB 2.40 1 2, U3 LB 2.39 1 2, U4 LB 2.37 1 2
+SLEEP 200
+ASSERT BID == 2.40
+ASSERT DEPTH BID 2.40 == 2
+ASSERT DEPTH BID 2.39 == 2
+ASSERT DEPTH BID 2.37 == 2
+
+# Action: U2 MS 4 units with 1% slippage (100 bps)
+# Expected: consume 2 @ 2.40 and 2 @ 2.39; leave 2 @ 2.37 intact (beyond 1%)
+U2 MS 1 4 100
+SLEEP 300
+ASSERT DEPTH BID 2.40 == 0
+ASSERT DEPTH BID 2.39 == 0
+ASSERT BID == 2.37
+ASSERT POSITION U2 SHORT >= 4
+
+

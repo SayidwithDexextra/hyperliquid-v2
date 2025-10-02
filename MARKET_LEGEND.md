@@ -46,6 +46,26 @@ Use this guide to interact with the trading terminal’s Hack Mode. It provides 
 - Liquidation History: `LH`
 - Slippage Test: `SLT`
 
+### Assertions (for automated checks)
+- Strict mode: `STRICT ON|OFF` — when ON, failing assertions throw and stop batch execution.
+- Sleep: `SLEEP <ms>` — pause between steps to allow state to propagate.
+- Assert best-of-book:
+  - `ASSERT BID <op> <price|NONE>` — check best bid matches operation (e.g., `== 2.40`, `>= 2.30`, or `NONE`).
+  - `ASSERT ASK <op> <price|NONE>` — check best ask.
+- Assert market depth at a price level:
+  - `ASSERT DEPTH BID|ASK <price> <op> <units>` — verify total units available at a specific price level.
+- Assert user orders:
+  - `ASSERT ORDER [U{n}] BUY|SELL <price>` — verify that user has an order at price and side.
+  - `ASSERT NO_ORDER [U{n}] BUY|SELL <price>` — verify absence of such order.
+- Assert book empty:
+  - `ASSERT BOOK_EMPTY` — verifies no bids and no asks in the book.
+- Assert net positions:
+  - `ASSERT POSITION [U{n}] LONG|SHORT <op> <units>` — verify net user exposure (long or short) in ALU units across all markets.
+- Assert balances and socialized loss:
+  - `ASSERT COLLAT [U{n}] <op> <usdc>` — user collateral in USDC.
+  - `ASSERT AVAIL [U{n}] <op> <usdc>` — available collateral.
+  - `ASSERT HAIRCUT [U{n}] <op> <usdc>` — accumulated socialized loss for user.
+
 ### Margin Operations
 - Top Up Position Margin: `TUP <positionIndex> <amountUSDC>`
 - Reduce Margin (if permitted): `RED <positionIndex> <amountUSDC>`
@@ -69,6 +89,13 @@ Use this guide to interact with the trading terminal’s Hack Mode. It provides 
   - `RUN ./scenarios/opening-bids.txt`
  - CLI run on start (skips to batch before UI):
   - `npx hardhat run scripts/interactive-trader.js --network localhost -- --hack-file ./scenarios/opening-bids.txt`
+
+### Example Assertions
+- `ASSERT BID == 2.40`
+- `ASSERT ASK NONE`
+- `ASSERT ORDER U1 BUY 2.40`
+- `ASSERT NO_ORDER U2 SELL 2.60`
+- `STRICT ON` (stop on first failure)
 - Margin operations:
   - `U3 TUP 1 250` (top up position #1 by $250)
   - `U4 RED 1 100` (reduce margin on position #1 by $100, if permitted)

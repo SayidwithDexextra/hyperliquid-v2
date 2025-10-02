@@ -992,7 +992,22 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size != 0) {
                 uint256 trigger = positions[i].liquidationPrice;
-                if (trigger == 0) return false; // not initialized yet
+                if (trigger == 0) {
+                    // Fallback: compute real-time health if trigger not yet initialized
+                    // equity6 = marginLocked + pnl6(mark), notional6 = |Q| * markPrice / 1e18
+                    uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
+                    if (markPrice == 0 || absSize == 0) {
+                        return false;
+                    }
+                    uint256 notional6 = (absSize * markPrice) / (10**18);
+                    int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
+                    int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
+                    int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
+                    int256 equity6 = int256(positions[i].marginLocked) + pnl6;
+                    (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
+                    uint256 maintenance6 = (notional6 * mmrBps) / 10000;
+                    return equity6 <= int256(maintenance6);
+                }
                 if (positions[i].size > 0) {
                     // Long: liquidatable if mark <= trigger
                     return markPrice <= trigger;
@@ -1631,6 +1646,14 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         }
         
         return usersWithPositions;
+    }
+
+    /**
+     * @dev Public view: return all users who currently have non-zero positions in the given market.
+     *      This is used by liquidation scanners to build a comprehensive candidate set.
+     */
+    function getUsersWithPositionsInMarket(bytes32 marketId) external view returns (address[] memory) {
+        return _getUsersWithPositionsInMarket(marketId);
     }
     
     // ============ Administrative Position Closure Implementation ============

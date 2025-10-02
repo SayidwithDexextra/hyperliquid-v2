@@ -39,6 +39,13 @@ interface ICoreVault {
     // Mark price management
     function updateMarkPrice(bytes32 marketId, uint256 price) external;
     function payMakerLiquidationReward(address liquidatedUser, bytes32 marketId, address maker, uint256 amount) external;
+    // Enumerate users with open positions in a market (for liquidation scanning)
+    function getUsersWithPositionsInMarket(bytes32 marketId) external view returns (address[] memory users);
+    // Get stored liquidation trigger price for a user in a market
+    function getLiquidationPrice(address user, bytes32 marketId) external view returns (uint256 liquidationPrice, bool hasPosition);
+    // Position equity and maintenance
+    function getPositionEquity(address user, bytes32 marketId) external view returns (int256 equity6, uint256 notional6, bool hasPosition);
+    function getEffectiveMaintenanceMarginBps(address user, bytes32 marketId) external view returns (uint256 mmrBps, uint256 fillRatio1e18, bool hasPosition);
 }
 
 /**
@@ -118,6 +125,7 @@ contract OrderBook {
     
     // Liquidation settings
     uint256 public constant MAX_POSITIONS_TO_CHECK = 5;     // Reduced to 5 positions per check for gas efficiency
+    uint256 public constant MAX_LIQUIDATIONS_PER_CALL = 5;   // Cap liquidations per check to manage gas
     uint256 public constant LIQUIDATION_INTERVAL = 0; // No throttle between checks
     uint256 public lastLiquidationCheck;
     uint256 public lastCheckedIndex;
@@ -342,9 +350,16 @@ contract OrderBook {
         // This ensures ALL users with liquidatable positions are checked,
         // regardless of any synchronization issues with OrderBook state.
         //
-        // LIQUIDATION FIX: Use recent traders from trade history plus active traders
-        address[] memory recentTraders = _getRecentUniqueTraders();
-        uint256 tradersLength = recentTraders.length;
+        // LIQUIDATION FIX (production): Query vault for all users with positions in this market
+        address[] memory usersWithPositions;
+        try vault.getUsersWithPositionsInMarket(marketId) returns (address[] memory users) {
+            usersWithPositions = users;
+        } catch {
+            // Fallback to recent traders if vault query fails (should be rare)
+            usersWithPositions = _getRecentUniqueTraders();
+        }
+        uint256 tradersLength = usersWithPositions.length;
+        emit ArithmeticDebug("precheck.start", "_checkPositionsForLiquidation", tradersLength, markPrice, 0);
         
         // DEBUG: PAST - Recent traders retrieved successfully from trade history
         // This section gets all traders who have participated in recent trades
@@ -362,160 +377,53 @@ contract OrderBook {
         uint256 startIndex = lastCheckedIndex;
         uint256 endIndex = Math.min(startIndex + MAX_POSITIONS_TO_CHECK, tradersLength);
         uint256 liquidationsTriggered = 0;
+        uint256 tradersChecked = 0;
+        uint256 lastIndexProcessed = startIndex;
         
         // DEBUG: PAST - Liquidation batch parameters calculated and verified
         // This section determines which subset of traders to check in this batch
         emit LiquidationCheckStarted(markPrice, tradersLength, startIndex, endIndex);
+        if (endIndex <= startIndex) {
+            emit ArithmeticDebug("precheck.noRange", "_checkPositionsForLiquidation", startIndex, endIndex, tradersLength);
+        }
         
-        // Process liquidations one by one to avoid array allocation issues
+        // Process liquidations in-batch up to limits
         for (uint256 i = startIndex; i < endIndex; i++) {
-            if (i >= recentTraders.length) break; // Safety check
+            lastIndexProcessed = i;
+            emit ArithmeticDebug("precheck.iterBegin", "_checkPositionsForLiquidation", i, tradersLength, 0);
+            tradersChecked++;
+            if (i >= usersWithPositions.length) break; // Safety check
             
-            address trader = recentTraders[i];
+            address trader = usersWithPositions[i];
             
             // DEBUG: PAST - Trader extracted from array, beginning liquidation check
             // This section processes each trader individually to check liquidation status
             emit LiquidationTraderBeingChecked(trader, i, tradersLength);
-            
-            // Check if trader is liquidatable
-            bool isLiquidatable = false;
-            try vault.isLiquidatable(trader, marketId, markPrice) returns (bool liquidatable) {
-                isLiquidatable = liquidatable;
-                // DEBUG: PAST - Liquidatable check completed successfully via vault
-                // This section queries the vault to determine if trader needs liquidation
-                emit LiquidationLiquidatableCheck(trader, isLiquidatable, markPrice);
-            } catch {
-                // DEBUG: PAST - Liquidatable check failed, skipping trader
-                // This section handles vault query failures gracefully
-                emit LiquidationLiquidatableCheck(trader, false, markPrice);
-                continue;
-            }
-            
-            if (!isLiquidatable) {
-                // DEBUG: PAST - Trader not liquidatable, continuing to next trader
-                // This section confirms trader is healthy and skips liquidation
-                continue;
-            }
-            
-            // DEBUG: PAST - Trader confirmed as liquidatable, proceeding with liquidation
-            // This section begins the actual liquidation process for unhealthy positions
-            
-            // Attempt liquidation
-            bool liquidationCompleted = false;
-            try vault.getPositionSummary(trader, marketId) returns (int256 size, uint256 marginLocked, uint256 unrealizedPnL) {
-                // DEBUG: PAST - Position summary retrieved successfully from vault
-                // This section gets the current position details for liquidation
-                emit LiquidationPositionRetrieved(trader, size, marginLocked, unrealizedPnL);
-                
-                if (size == 0) {
-                    // DEBUG: PAST - Position already closed, skipping liquidation
-                    // This section handles positions that were closed between checks
-                    continue;
-                }
-                
-                // DEBUG: PAST - Position confirmed open, attempting market order liquidation
-                // This section tries to liquidate via market order matching first
-                
-                // Try market order liquidation first
-                LiquidationExecutionResult memory liquidationResult;
-                bool marketOrderSuccess = false;
-                if (size < 0) {
-                    // Short liquidation: Create market BUY order
-                    // DEBUG: PAST - Attempting short liquidation via market buy order
-                    emit LiquidationMarketOrderAttempt(trader, uint256(-size), true, markPrice);
-                    liquidationResult = _executeLiquidationMarketOrder(trader, uint256(-size), true, markPrice);
-                    marketOrderSuccess = liquidationResult.success;
-                } else {
-                    // Long liquidation: Create market SELL order
-                    // DEBUG: PAST - Attempting long liquidation via market sell order
-                    emit LiquidationMarketOrderAttempt(trader, uint256(size), false, markPrice);
-                    liquidationResult = _executeLiquidationMarketOrder(trader, uint256(size), false, markPrice);
-                    marketOrderSuccess = liquidationResult.success;
-                }
-                
-                // DEBUG: PAST - Market order liquidation attempt completed
-                // This section reports the result of the market order liquidation
-                emit LiquidationMarketOrderResult(trader, marketOrderSuccess, marketOrderSuccess ? "Market order filled" : "No liquidity available");
-                
-                // ============ ENHANCED THREE-LAYER LIQUIDATION DEFENSE ============
-                
-                if (liquidationResult.filledAmount > 0) {
-                    // Market order succeeded - check for gap loss and apply three-layer protection
-                    _processEnhancedLiquidationWithGapProtection(
-                        trader,
-                        size,
-                        liquidationResult.worstExecutionPrice,
-                        liquidationResult
-                    );
-                // Distribute the penalty reward pool that was credited to OrderBook by the vault
-                // Determine reward budget as min(OrderBook collateral, computed penalty at average price)
-                uint256 absSizeExec = uint256(size > 0 ? size : -size);
-                uint256 notional6 = (absSizeExec * liquidationResult.averageExecutionPrice) / (10**18);
-                // 10% default penalty; final pool is bounded by OB balance credited by vault
-                uint256 expectedPenalty = (notional6 * 1000) / 10000;
-                // Pull available OB balance as the actual pool (guard against short credit in partials)
-                uint256 obBalance = vault.getAvailableCollateral(address(this));
-                uint256 rewardPool = expectedPenalty > 0 ? (expectedPenalty < obBalance ? expectedPenalty : obBalance) : obBalance;
-                emit DebugRewardComputation(trader, expectedPenalty, obBalance, rewardPool, liquidationMakers.length, liquidationTotalNotionalScaled);
-                _distributeLiquidationRewards(trader, rewardPool);
-                    liquidationCompleted = true;
-                }
-                
-                // If market order failed, use vault liquidation as backup
-                if (!marketOrderSuccess) {
-                    // DEBUG: PAST - Market order failed, attempting direct vault liquidation
-                    // This section handles liquidation when no market liquidity is available
-                    // The vault liquidation methods will automatically trigger ADL if needed
-                    
-                    if (size > 0) {
-                        // Try long liquidation
-                        // DEBUG: PAST - Attempting long position socialized loss liquidation
-                        emit LiquidationSocializedLossAttempt(trader, true, "liquidateLong");
-                        try vault.liquidateLong(trader, marketId, msg.sender, markPrice) {
-                            liquidationCompleted = true;
-                            // DEBUG: PAST - Long socialized loss liquidation successful
-                            emit LiquidationSocializedLossResult(trader, true, "liquidateLong");
-                        } catch {
-                            // DEBUG: PAST - Long socialized loss liquidation failed, skipping trader
-                            emit LiquidationSocializedLossResult(trader, false, "liquidateLong");
-                            continue;
+
+            // Pre-diagnostic: fetch stored liquidation trigger to aid debugging
+            try vault.getLiquidationPrice(trader, marketId) returns (uint256 liqPrice, bool hasPos) {
+                if (hasPos) {
+                    emit ArithmeticDebug("precheck.liqTrigger", "_checkPositionsForLiquidation", liqPrice, markPrice, 0);
+                    // Also emit equity and maintenance snapshot for clarity
+                    try vault.getPositionEquity(trader, marketId) returns (int256 eq6, uint256 notional6, bool pos2) {
+                        if (pos2) {
+                            try vault.getEffectiveMaintenanceMarginBps(trader, marketId) returns (uint256 mmrBps, uint256 /*fill*/, bool /*pos3*/) {
+                                uint256 maintenance6 = (notional6 * mmrBps) / 10000;
+                                uint256 eq6u = eq6 >= 0 ? uint256(eq6) : 0;
+                                emit ArithmeticDebug("precheck.equity6", "_checkPositionsForLiquidation", eq6u, maintenance6, notional6);
+                            } catch {}
                         }
-                    } else {
-                        // Try short liquidation
-                        // DEBUG: PAST - Attempting short position socialized loss liquidation
-                        emit LiquidationSocializedLossAttempt(trader, false, "liquidateShort");
-                        try vault.liquidateShort(trader, marketId, msg.sender, markPrice) {
-                            liquidationCompleted = true;
-                            // DEBUG: PAST - Short socialized loss liquidation successful
-                            emit LiquidationSocializedLossResult(trader, true, "liquidateShort");
-                        } catch {
-                            // DEBUG: PAST - Short socialized loss liquidation failed, skipping trader
-                            emit LiquidationSocializedLossResult(trader, false, "liquidateShort");
-                            continue;
-                        }
-                    }
-                } else {
-                    liquidationCompleted = true;
-                    // DEBUG: PAST - Market order liquidation successful, vault liquidation processing includes ADL check
+                    } catch {}
                 }
-                
-                if (liquidationCompleted) {
-                    liquidationsTriggered++;
-                    emit AutoLiquidationTriggered(trader, marketId, size, markPrice);
-                    
-                    // DEBUG: PAST - Liquidation completed successfully, updating counters
-                    // This section handles successful liquidation cleanup and tracking
-                    emit LiquidationCompleted(trader, liquidationsTriggered, marketOrderSuccess ? "Market Order" : "Socialized Loss");
-                    
-                    // Position liquidated successfully - vault tracking handles user list updates
-                    
-                    // Only liquidate one position per call to avoid gas issues
+            } catch {}
+            (bool _didLiq, int256 _posSize, bool _wasMarketOrder) = _checkAndLiquidateTrader(trader, markPrice);
+            if (_didLiq) {
+                liquidationsTriggered++;
+                emit AutoLiquidationTriggered(trader, marketId, _posSize, markPrice);
+                emit LiquidationCompleted(trader, liquidationsTriggered, _wasMarketOrder ? "Market Order" : "Socialized Loss");
+                if (liquidationsTriggered >= MAX_LIQUIDATIONS_PER_CALL) {
                     break;
                 }
-            } catch {
-                // DEBUG: PAST - Failed to get position summary, skipping trader
-                // This section handles vault query failures for position data
-                continue;
             }
         }
         
@@ -524,7 +432,12 @@ contract OrderBook {
         
         // Update tracking
         uint256 oldIndex = lastCheckedIndex;
-        lastCheckedIndex = endIndex >= tradersLength ? 0 : endIndex;
+        uint256 nextStartIndex = lastIndexProcessed + 1;
+        if (nextStartIndex >= tradersLength) {
+            lastCheckedIndex = 0;
+        } else {
+            lastCheckedIndex = nextStartIndex;
+        }
         lastLiquidationCheck = block.timestamp;
         
         // DEBUG: PAST - Tracking indices updated successfully
@@ -535,8 +448,102 @@ contract OrderBook {
         
         // DEBUG: PAST - Liquidation check completed, recursion guard cleared
         // This section finalizes the liquidation check and reports results
-        emit LiquidationCheckFinished(endIndex - startIndex, liquidationsTriggered, lastCheckedIndex);
-        emit LiquidationCheckCompleted(endIndex - startIndex, liquidationsTriggered);
+        emit LiquidationCheckFinished(tradersChecked, liquidationsTriggered, lastCheckedIndex);
+        emit LiquidationCheckCompleted(tradersChecked, liquidationsTriggered);
+    }
+
+    /**
+     * @dev Isolated per-trader liquidation checker to reduce stack depth in the main loop
+     * @return didLiquidate Whether a liquidation occurred
+     * @return positionSize Position size used for event emission
+     * @return usedMarketOrder Whether market order path was used
+     */
+    function _checkAndLiquidateTrader(address trader, uint256 markPrice)
+        internal
+        returns (bool didLiquidate, int256 positionSize, bool usedMarketOrder)
+    {
+        // Liquidatable check
+        bool isLiquidatable = false;
+        try vault.isLiquidatable(trader, marketId, markPrice) returns (bool liquidatable) {
+            isLiquidatable = liquidatable;
+            emit LiquidationLiquidatableCheck(trader, isLiquidatable, markPrice);
+        } catch {
+            emit LiquidationLiquidatableCheck(trader, false, markPrice);
+            return (false, 0, false);
+        }
+        if (!isLiquidatable) {
+            return (false, 0, false);
+        }
+
+        // Fetch position
+        try vault.getPositionSummary(trader, marketId) returns (int256 size, uint256 marginLocked, uint256 unrealizedPnL) {
+            emit LiquidationPositionRetrieved(trader, size, marginLocked, unrealizedPnL);
+            if (size == 0) {
+                return (false, 0, false);
+            }
+            positionSize = size;
+
+            // Try market order path
+            LiquidationExecutionResult memory liquidationResult;
+            bool marketOrderSuccess = false;
+            if (size < 0) {
+                emit LiquidationMarketOrderAttempt(trader, uint256(-size), true, markPrice);
+                liquidationResult = _executeLiquidationMarketOrder(trader, uint256(-size), true, markPrice);
+                marketOrderSuccess = liquidationResult.success;
+            } else {
+                emit LiquidationMarketOrderAttempt(trader, uint256(size), false, markPrice);
+                liquidationResult = _executeLiquidationMarketOrder(trader, uint256(size), false, markPrice);
+                marketOrderSuccess = liquidationResult.success;
+            }
+            emit LiquidationMarketOrderResult(trader, marketOrderSuccess, marketOrderSuccess ? "Market order filled" : "No liquidity available");
+
+            if (liquidationResult.filledAmount > 0) {
+                _processEnhancedLiquidationWithGapProtection(
+                    trader,
+                    size,
+                    liquidationResult.worstExecutionPrice,
+                    liquidationResult
+                );
+                // Distribute maker rewards best-effort
+                uint256 absSizeExec = uint256(size > 0 ? size : -size);
+                uint256 notional6 = (absSizeExec * liquidationResult.averageExecutionPrice) / (10**18);
+                uint256 expectedPenalty = (notional6 * 1000) / 10000;
+                uint256 obBalance = vault.getAvailableCollateral(address(this));
+                uint256 rewardPool = expectedPenalty > 0 ? (expectedPenalty < obBalance ? expectedPenalty : obBalance) : obBalance;
+                emit DebugRewardComputation(trader, expectedPenalty, obBalance, rewardPool, liquidationMakers.length, liquidationTotalNotionalScaled);
+                _distributeLiquidationRewards(trader, rewardPool);
+                return (true, size, true);
+            }
+
+            // Fallback to vault liquidation
+            if (!marketOrderSuccess) {
+                if (size > 0) {
+                    emit LiquidationSocializedLossAttempt(trader, true, "liquidateLong");
+                    try vault.liquidateLong(trader, marketId, msg.sender, markPrice) {
+                        emit LiquidationSocializedLossResult(trader, true, "liquidateLong");
+                        return (true, size, false);
+                    } catch {
+                        emit LiquidationSocializedLossResult(trader, false, "liquidateLong");
+                        return (false, 0, false);
+                    }
+                } else {
+                    emit LiquidationSocializedLossAttempt(trader, false, "liquidateShort");
+                    try vault.liquidateShort(trader, marketId, msg.sender, markPrice) {
+                        emit LiquidationSocializedLossResult(trader, true, "liquidateShort");
+                        return (true, size, false);
+                    } catch {
+                        emit LiquidationSocializedLossResult(trader, false, "liquidateShort");
+                        return (false, 0, false);
+                    }
+                }
+            }
+
+            // If we reach here with success=false but filledAmount==0, nothing done
+            return (false, 0, false);
+        } catch {
+            // Could not get position
+            return (false, 0, false);
+        }
     }
     
     /**
@@ -1704,6 +1711,9 @@ contract OrderBook {
         // DEBUG: Matching completed
         uint256 filledAmount = originalAmount - remainingAmount;
         emit MatchingCompleted(buyOrder.trader, originalAmount, filledAmount, remainingAmount);
+
+        // Finalize mark update once after potential bestAsk changes during matching
+        _onMarkPricePotentiallyChanged();
         
         return remainingAmount;
     }
@@ -1815,6 +1825,8 @@ contract OrderBook {
             currentPrice = _getPrevBuyPrice(currentPrice);
         }
         
+        // Finalize mark update once after potential bestBid changes during matching
+        _onMarkPricePotentiallyChanged();
         return remainingAmount;
     }
 
@@ -1930,6 +1942,8 @@ contract OrderBook {
             currentPrice = _getNextSellPrice(currentPrice);
         }
         
+        // Finalize mark update once after potential bestAsk changes during matching
+        _onMarkPricePotentiallyChanged();
         return remainingAmount;
     }
 
@@ -2015,6 +2029,8 @@ contract OrderBook {
             currentPrice = _getPrevBuyPrice(currentPrice);
         }
         
+        // Finalize mark update once after potential bestBid changes during matching
+        _onMarkPricePotentiallyChanged();
         return remainingAmount;
     }
 
@@ -2594,8 +2610,6 @@ contract OrderBook {
         // Update price and check liquidations (optimized for gas efficiency)
         lastTradePrice = price;
         uint256 currentMark = _calculateMarkPrice();
-        // Persist the last mark for next EMA step
-        lastMarkPrice = currentMark;
         
         // 🔧 CRITICAL FIX: Synchronize mark price with CoreVault for ADL system
         // The CoreVault's ADL system depends on accurate mark prices to find profitable positions
@@ -2604,17 +2618,16 @@ contract OrderBook {
         // DEBUG: Price updated and synchronized with vault
         emit PriceUpdated(lastTradePrice, currentMark);
         
-        // CRITICAL FIX: Only check liquidations if not already in liquidation process
-        // and price has moved significantly (>= 2%) to save gas
-        // Also skip liquidation checks for micro amounts to prevent overflow
-        if (!skipLiquidationCheck && !liquidationInProgress && 
-            (lastLiquidationCheck == 0 || 
-            (currentMark > lastMarkPrice && (currentMark - lastMarkPrice) * 100 / lastMarkPrice >= 2) ||
-            (lastMarkPrice > currentMark && (lastMarkPrice - currentMark) * 100 / lastMarkPrice >= 2))) {
-            
+        // Trigger liquidation scan on any mark change or on interval, guarded against recursion
+        if (!skipLiquidationCheck && !liquidationInProgress &&
+            (lastLiquidationCheck == 0 ||
+             LIQUIDATION_INTERVAL == 0 ||
+             block.timestamp >= lastLiquidationCheck + LIQUIDATION_INTERVAL ||
+             currentMark != lastMarkPrice)) {
+
             // DEBUG: Liquidation check triggered
             emit LiquidationCheckTriggered(currentMark, lastMarkPrice);
-            
+
             _checkPositionsForLiquidation(currentMark);
             lastMarkPrice = currentMark;
         }
@@ -2630,52 +2643,14 @@ contract OrderBook {
      * @param isBuy Whether this is a buy order (long position)
      * @return Margin required
      */
-    function _calculateMarginRequired(uint256 amount, uint256 price, bool isBuy) internal returns (uint256) {
-        // ROBUST FIX: Use dynamic scaling for all price points
-        
-        // Emit debug event for input values
-        emit MarginCalculationDebug(amount, price, isBuy, 0);
-        
-        // ROBUST FIX: Ultra-conservative scaling for all price points
-        // This approach works for any price, not just specific values
-        
-        // First scale down by a large factor to prevent any possibility of overflow
-        // We use different scaling factors based on the size of the amount and price
-        uint256 scalingFactor;
-        
-        // Determine appropriate scaling factor based on amount and price magnitudes
-        if (amount > 1e24 || price > 1e12) {
-            // For extremely large values, use more aggressive scaling
-            scalingFactor = 1e30;
-        } else if (amount > 1e20 || price > 1e10) {
-            // For very large values
-            scalingFactor = 1e24;
-        } else {
-            // For normal values, standard scaling is sufficient
-            scalingFactor = 1e18;
-        }
-        
-        uint256 scaledAmount = amount / scalingFactor;
-        if (scaledAmount == 0) scaledAmount = 1; // Ensure minimum value
-        
-        // Calculate notional value with scaled amount
-        uint256 notionalValue = scaledAmount * price;
-        
-        // Apply margin requirement
-        uint256 marginBps = isBuy ? 10000 : 15000;
-        uint256 marginRequired = (notionalValue * marginBps) / 10000;
-        
-        // Scale back up proportionally if needed
-        if (scalingFactor > 1e18) {
-            // Scale back up but not fully to avoid overflow
-            marginRequired = marginRequired * (1e18 / (scalingFactor / 1e18));
-        }
-        
-        emit ArithmeticDebug("robustScaling", "_calculateMarginRequired", amount, price, marginRequired);
-        emit ArithmeticScaling("_calculateMarginRequired.robust", amount, scaledAmount, scalingFactor);
-        emit MarginCalculationDebug(amount, price, isBuy, marginRequired);
-        
-        return marginRequired;
+    function _calculateMarginRequired(uint256 amount, uint256 price, bool isBuy) internal pure returns (uint256) {
+        // amount: ALU in 18 decimals
+        // price:  price in 6 decimals (USDC precision)
+        // Return: required margin in USDC (6 decimals)
+        // notional6 = (amount18 * price6) / 1e18
+        uint256 notional6 = (amount * price) / 1e18;
+        uint256 marginBps = isBuy ? 10000 : 15000; // 100% for buys, 150% for sells (shorts)
+        return (notional6 * marginBps) / 10000;
     }
 
     /**
@@ -3377,6 +3352,23 @@ contract OrderBook {
         // to process liquidations after fetching the mark price.
         return _calculateMarkPrice();
     }
+
+    /**
+     * @dev Keeper function: update vault mark and force a liquidation scan.
+     *      Callable by anyone; guarded internally to avoid recursion.
+     */
+    function pokeLiquidations() external {
+        if (liquidationInProgress) {
+            emit LiquidationRecursionGuardSet(true);
+            return;
+        }
+        uint256 currentMark = _calculateMarkPrice();
+        vault.updateMarkPrice(marketId, currentMark);
+        emit PriceUpdated(lastTradePrice, currentMark);
+        emit LiquidationCheckTriggered(currentMark, lastMarkPrice);
+        _checkPositionsForLiquidation(currentMark);
+        lastMarkPrice = currentMark;
+    }
     
     /**
      * @dev Internal function to calculate mark price
@@ -3422,7 +3414,7 @@ contract OrderBook {
         return calculateMarkPrice();
     }
 
-    // Internal hook: trigger liquidation scan when best prices move significantly
+    // Internal hook: trigger liquidation scan when mark potentially changed
     function _onMarkPricePotentiallyChanged() private {
         if (liquidationInProgress) {
             emit LiquidationRecursionGuardSet(true);
@@ -3435,13 +3427,12 @@ contract OrderBook {
             return;
         }
 
-        bool movedUp = currentMark > lastMarkPrice && (currentMark - lastMarkPrice) * 100 / lastMarkPrice >= 2;
-        bool movedDown = lastMarkPrice > currentMark && (lastMarkPrice - currentMark) * 100 / lastMarkPrice >= 2;
-        if (movedUp || movedDown) {
-            // Sync mark for ADL and equity math
-            vault.updateMarkPrice(marketId, currentMark);
-            emit PriceUpdated(lastTradePrice, currentMark);
+        // Sync mark for ADL and equity math
+        vault.updateMarkPrice(marketId, currentMark);
+        emit PriceUpdated(lastTradePrice, currentMark);
 
+        if (currentMark != lastMarkPrice ||
+            (LIQUIDATION_INTERVAL > 0 && block.timestamp >= lastLiquidationCheck + LIQUIDATION_INTERVAL)) {
             emit LiquidationCheckTriggered(currentMark, lastMarkPrice);
             _checkPositionsForLiquidation(currentMark);
             lastMarkPrice = currentMark;

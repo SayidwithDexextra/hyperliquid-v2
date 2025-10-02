@@ -2602,6 +2602,189 @@ ${colors.brightRed}└───────────────────�
     );
   }
 
+  // ===== Detailed Liquidation Pipeline Handlers (missing before) =====
+  handleLiquidationCheckTriggeredEvent(currentMark, lastMarkPrice, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const cur = formatWithAutoDecimalDetection(currentMark, 6, 4);
+    const last = formatWithAutoDecimalDetection(lastMarkPrice, 6, 4);
+    const block = event && (event.blockNumber ?? event.log?.blockNumber);
+    const tx =
+      event && (event.transactionHash || event.log?.transactionHash || "");
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightCyan}🔔 CHECK TRIGGERED${colors.reset} | ` +
+        `${colors.yellow}Mark: $${cur}${colors.reset} | ${colors.dim}Prev: $${last}${colors.reset}` +
+        (block != null ? ` | ${colors.dim}Block ${block}${colors.reset}` : "") +
+        (tx ? ` | ${colors.dim}Tx ${tx.slice(0, 10)}...${colors.reset}` : "")
+    );
+  }
+
+  handleLiquidationCheckStartedEvent(
+    markPrice,
+    tradersLength,
+    startIndex,
+    endIndex,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const mp = formatWithAutoDecimalDetection(markPrice, 6, 4);
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightBlue}🔎 SCAN STARTED${colors.reset} | ` +
+        `${colors.cyan}Mark $${mp}${colors.reset} | ` +
+        `${colors.yellow}Traders: ${tradersLength}${colors.reset} | ` +
+        `${colors.magenta}Range: ${startIndex}→${endIndex}${colors.reset}`
+    );
+  }
+
+  handleLiquidationRecursionGuardSetEvent(inProgress, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.yellow}🛡️ RECURSION GUARD${colors.reset} | ` +
+        `${inProgress ? colors.red + "ENABLED" : colors.green + "DISABLED"}${
+          colors.reset
+        }`
+    );
+  }
+
+  handleLiquidationTraderBeingCheckedEvent(trader, index, totalTraders, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const tShort = trader.slice(0, 8) + "..." + trader.slice(-6);
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.cyan}👤 CHECKING TRADER${colors.reset} | ` +
+        `${tShort} (${index + 1}/${totalTraders})`
+    );
+  }
+
+  handleLiquidationLiquidatableCheckEvent(
+    trader,
+    isLiquidatable,
+    markPrice,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const mp = formatWithAutoDecimalDetection(markPrice, 6, 4);
+    const tShort = trader.slice(0, 8) + "..." + trader.slice(-6);
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightYellow}⚖️ LIQUIDATABLE?${colors.reset} | ` +
+        `${tShort} | Mark $${mp} | ${
+          isLiquidatable ? colors.red + "YES" : colors.green + "NO"
+        }${colors.reset}`
+    );
+  }
+
+  handleLiquidationPositionRetrievedEvent(
+    trader,
+    size,
+    marginLocked,
+    unrealizedPnL,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const sizeAbs = formatWithAutoDecimalDetection(Math.abs(size), 18, 4);
+    const ml = formatWithAutoDecimalDetection(marginLocked, 6, 2);
+    const pnl = formatWithAutoDecimalDetection(unrealizedPnL, 6, 2);
+    const side =
+      size >= 0
+        ? `${colors.green}LONG${colors.reset}`
+        : `${colors.red}SHORT${colors.reset}`;
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.blue}📥 POSITION RETRIEVED${colors.reset} | ` +
+        `${side} ${sizeAbs} ALU | Margin $${ml} | uPnL $${pnl}`
+    );
+  }
+
+  handleLiquidationMarketOrderAttemptEvent(
+    trader,
+    amount,
+    isBuy,
+    markPrice,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    const amt = formatWithAutoDecimalDetection(amount, 18, 4);
+    const mp = formatWithAutoDecimalDetection(markPrice, 6, 2);
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.magenta}🛒 MARKET ORDER TRY${colors.reset} | ` +
+        `${isBuy ? "BUY" : "SELL"} ${amt} ALU @ ~$${mp}`
+    );
+  }
+
+  handleLiquidationMarketOrderResultEvent(trader, success, reason, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${
+        success
+          ? colors.green + "✅ MARKET ORDER OK"
+          : colors.red + "❌ MARKET ORDER FAIL"
+      }${colors.reset}` +
+        (reason
+          ? ` | ${colors.dim}${String(reason).slice(0, 64)}${colors.reset}`
+          : "")
+    );
+  }
+
+  handleLiquidationSocializedLossAttemptEvent(trader, isLong, method, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightMagenta}📣 SOCIALIZE TRY${colors.reset} | ` +
+        `${method} | ${isLong ? "LONG" : "SHORT"}`
+    );
+  }
+
+  handleLiquidationSocializedLossResultEvent(trader, success, method, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${
+        success
+          ? colors.green + "✅ SOCIALIZE OK"
+          : colors.red + "❌ SOCIALIZE FAIL"
+      }${colors.reset} | ${method}`
+    );
+  }
+
+  handleLiquidationTradeDetectedEvent(
+    isLiquidationTrade,
+    liquidationTarget,
+    liquidationClosesShort,
+    event
+  ) {
+    const timestamp = new Date().toLocaleTimeString();
+    if (!isLiquidationTrade) return;
+    const tShort = liquidationTarget
+      ? liquidationTarget.slice(0, 8) + "..." + liquidationTarget.slice(-6)
+      : "(n/a)";
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.red}🚨 LIQUIDATION TRADE DETECTED${colors.reset} | ` +
+        `${tShort} | closes ${liquidationClosesShort ? "SHORT" : "LONG"}`
+    );
+  }
+
+  handleMarginUpdatesStartedEvent(isLiquidationTrade, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.yellow}🔧 MARGIN UPDATES STARTED${colors.reset}` +
+        (isLiquidationTrade
+          ? ` | ${colors.red}liquidation path${colors.reset}`
+          : "")
+    );
+  }
+
+  handleMarginUpdatesCompletedEvent(event) {
+    const timestamp = new Date().toLocaleTimeString();
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.green}✅ MARGIN UPDATES COMPLETED${colors.reset}`
+    );
+  }
+
+  handleTradeExecutionCompletedEvent(buyer, seller, price, amount, event) {
+    const timestamp = new Date().toLocaleTimeString();
+    const px = formatWithAutoDecimalDetection(price, 6, 2);
+    const amt = formatWithAutoDecimalDetection(amount, 18, 4);
+    console.log(
+      `${colors.dim}[${timestamp}]${colors.reset} ${colors.brightGreen}✅ TRADE EXECUTION DONE${colors.reset} | ` +
+        `${amt} ALU @ $${px}`
+    );
+  }
+
   handleLiquidationIndexUpdatedEvent(oldIndex, newIndex, tradersLength, event) {
     const timestamp = new Date().toLocaleTimeString();
     const progress = Math.round((newIndex / tradersLength) * 100);
@@ -4653,18 +4836,24 @@ ${colors.brightRed}└───────────────────�
         .split(/[;,]/)
         .map((c) => c.trim())
         .filter(Boolean);
-      for (const cmd of commands) {
-        try {
-          const summary = await this.executeHackCommand(cmd);
-          this.recordHackHistory({ status: "ok", cmd, summary });
-        } catch (err) {
-          console.log(colorText(`❌ ${err.message}`, colors.red));
-          this.recordHackHistory({
-            status: "err",
-            cmd,
-            summary: err.message || String(err),
-          });
+      const isBatchLine = commands.length > 1;
+      if (isBatchLine) await this.attachHackBatchLiquidationListeners();
+      try {
+        for (const cmd of commands) {
+          try {
+            const summary = await this.executeHackCommand(cmd);
+            this.recordHackHistory({ status: "ok", cmd, summary });
+          } catch (err) {
+            console.log(colorText(`❌ ${err.message}`, colors.red));
+            this.recordHackHistory({
+              status: "err",
+              cmd,
+              summary: err.message || String(err),
+            });
+          }
         }
+      } finally {
+        if (isBatchLine) await this.detachHackBatchLiquidationListeners();
       }
       this.renderHackLedger();
     }
@@ -4690,13 +4879,223 @@ ${colors.brightRed}└───────────────────�
       cursor++;
     }
 
-    if (!user) throw new Error("No user selected");
-
     if (cursor >= parts.length) throw new Error("Missing operation");
     const op = parts[cursor].toUpperCase();
     cursor++;
 
+    // Determine whether this operation requires a user
+    const requiresUserOps = new Set([
+      "LB",
+      "LS",
+      "MB",
+      "MS",
+      "DEP",
+      "WDR",
+      "CA",
+      "CO",
+      "CNO",
+      "POS",
+      "ORDS",
+      "TUP",
+      "RED",
+      "PF",
+      "DPA",
+      "DMA",
+    ]);
+    if (requiresUserOps.has(op)) {
+      if (!user) {
+        if (this.currentUser) {
+          user = this.currentUser;
+          userIndex = this.currentUserIndex ?? 0;
+        } else if (this.users && this.users.length > 0) {
+          user = this.users[0];
+          this.currentUser = user;
+          this.currentUserIndex = 0;
+          try {
+            console.log(
+              colorText(
+                "ℹ️ No user selected; defaulting to Deployer (U1)",
+                colors.dim
+              )
+            );
+          } catch (_) {}
+        } else {
+          throw new Error("No user selected");
+        }
+      }
+    }
+
     switch (op) {
+      case "SLEEP": {
+        const msStr = parts[cursor++];
+        if (!msStr) throw new Error("SLEEP usage: SLEEP milliseconds");
+        const ms = Number(msStr);
+        if (!isFinite(ms) || ms < 0) throw new Error("Invalid milliseconds");
+        await this.pause(ms);
+        return `SLEEP ${ms}ms`;
+      }
+
+      case "STRICT": {
+        const mode = (parts[cursor++] || "").toUpperCase();
+        if (mode !== "ON" && mode !== "OFF")
+          throw new Error("STRICT usage: STRICT ON|OFF");
+        this.strictBatch = mode === "ON";
+        console.log(
+          colorText(
+            `⚙️ Strict mode ${this.strictBatch ? "ENABLED" : "DISABLED"}`,
+            colors.brightYellow
+          )
+        );
+        return `STRICT ${mode}`;
+      }
+
+      case "ASSERT": {
+        const what = (parts[cursor++] || "").toUpperCase();
+        if (!what)
+          throw new Error("ASSERT usage: ASSERT <BID|ASK|POSITION|AVAIL> ...");
+
+        const compare = (left, opSym, right) => {
+          switch (opSym) {
+            case ">=":
+              return left >= right;
+            case ">":
+              return left > right;
+            case "<=":
+              return left <= right;
+            case "<":
+              return left < right;
+            case "==":
+              return left === right;
+            case "!=":
+              return left !== right;
+            default:
+              throw new Error(`Unsupported operator: ${opSym}`);
+          }
+        };
+
+        if (what === "BID" || what === "ASK") {
+          const opSym = parts[cursor++];
+          const rhsStr = parts[cursor++];
+          if (!opSym || !rhsStr)
+            throw new Error(
+              "ASSERT BID/ASK usage: ASSERT BID|ASK <op> <price>"
+            );
+          const [bestBid, bestAsk] =
+            await this.contracts.orderBook.getBestPrices();
+          const actual6 =
+            what === "BID" ? BigInt(bestBid || 0n) : BigInt(bestAsk || 0n);
+          const expect6 = ethers.parseUnits(String(Number(rhsStr)), 6);
+          const ok = compare(actual6, opSym, expect6);
+          if (!ok)
+            throw new Error(
+              `ASSERT failed: ${what} ${opSym} ${rhsStr} (actual ${formatPrice(
+                actual6
+              )})`
+            );
+          console.log(
+            colorText(`✅ ASSERT ${what} ${opSym} ${rhsStr} ok`, colors.green)
+          );
+          return `ASSERT ${what}`;
+        }
+
+        if (what === "POSITION") {
+          // ASSERT POSITION [U#] LONG|SHORT <op> <units>
+          let targetUser = null;
+          if (parts[cursor] && /^u\d+$/i.test(parts[cursor])) {
+            const idx = parseInt(parts[cursor++].slice(1), 10) - 1;
+            if (Number.isNaN(idx) || idx < 0 || idx >= this.users.length)
+              throw new Error("Invalid user index in ASSERT POSITION");
+            targetUser = this.users[idx];
+          } else {
+            targetUser = this.currentUser || this.users?.[0];
+          }
+          if (!targetUser)
+            throw new Error("No user available for ASSERT POSITION");
+
+          const side = (parts[cursor++] || "").toUpperCase();
+          if (side !== "LONG" && side !== "SHORT")
+            throw new Error(
+              "ASSERT POSITION usage: ASSERT POSITION [U#] LONG|SHORT <op> <units>"
+            );
+          const opSym = parts[cursor++];
+          const rhsUnitsStr = parts[cursor++];
+          if (!opSym || !rhsUnitsStr)
+            throw new Error(
+              "ASSERT POSITION usage: ASSERT POSITION [U#] LONG|SHORT <op> <units>"
+            );
+
+          const marketId = MARKET_INFO.ALUMINUM.marketId;
+          const positions = await this.contracts.vault.getUserPositions(
+            targetUser.address
+          );
+          const pos =
+            positions.find((p) => p.marketId === marketId) || positions[0];
+          const size18 = pos ? BigInt(pos.size.toString()) : 0n;
+          const expected18 = ethers.parseUnits(String(Number(rhsUnitsStr)), 18);
+          const actualAbs18 = size18 >= 0n ? size18 : -size18;
+
+          let ok = false;
+          if (side === "LONG") {
+            ok = size18 > 0n && compare(actualAbs18, opSym, expected18);
+          } else {
+            ok = size18 < 0n && compare(actualAbs18, opSym, expected18);
+          }
+          if (!ok)
+            throw new Error(
+              `ASSERT failed: POSITION ${side} ${opSym} ${rhsUnitsStr} (actual ${ethers.formatUnits(
+                size18,
+                18
+              )} ALU)`
+            );
+          console.log(
+            colorText(
+              `✅ ASSERT POSITION ${side} ${opSym} ${rhsUnitsStr} ok`,
+              colors.green
+            )
+          );
+          return "ASSERT POSITION";
+        }
+
+        if (what === "AVAIL") {
+          // ASSERT AVAIL [U#] <op> <usdc>
+          let targetUser = null;
+          if (parts[cursor] && /^u\d+$/i.test(parts[cursor])) {
+            const idx = parseInt(parts[cursor++].slice(1), 10) - 1;
+            if (Number.isNaN(idx) || idx < 0 || idx >= this.users.length)
+              throw new Error("Invalid user index in ASSERT AVAIL");
+            targetUser = this.users[idx];
+          } else {
+            targetUser = this.currentUser || this.users?.[0];
+          }
+          if (!targetUser)
+            throw new Error("No user available for ASSERT AVAIL");
+          const opSym = parts[cursor++];
+          const rhsStr = parts[cursor++];
+          if (!opSym || !rhsStr)
+            throw new Error(
+              "ASSERT AVAIL usage: ASSERT AVAIL [U#] <op> <usdc>"
+            );
+          const [_, __, ___, available] =
+            await this.contracts.vault.getUnifiedMarginSummary(
+              targetUser.address
+            );
+          const actual6 = BigInt((available || 0).toString());
+          const expect6 = ethers.parseUnits(String(Number(rhsStr)), 6);
+          const ok = compare(actual6, opSym, expect6);
+          if (!ok)
+            throw new Error(
+              `ASSERT failed: AVAIL ${opSym} ${rhsStr} (actual ${formatUSDC(
+                actual6
+              )} USDC)`
+            );
+          console.log(
+            colorText(`✅ ASSERT AVAIL ${opSym} ${rhsStr} ok`, colors.green)
+          );
+          return "ASSERT AVAIL";
+        }
+
+        throw new Error(`Unknown ASSERT target: ${what}`);
+      }
       case "LB":
       case "LS": {
         const isBuy = op === "LB";
@@ -5209,11 +5608,12 @@ ${colors.brightRed}└───────────────────�
       );
     }
   }
-
   // Batch runner for file-driven hack commands
   async runHackFile(filePath) {
     const fs = require("fs");
     const path = require("path");
+    // Enable scoped liquidation-pipeline listeners for the duration of this batch
+    await this.attachHackBatchLiquidationListeners();
     try {
       const absolute = path.isAbsolute(filePath)
         ? filePath
@@ -5250,7 +5650,215 @@ ${colors.brightRed}└───────────────────�
       console.log(colorText("✅ Batch complete.", colors.brightGreen));
     } catch (e) {
       console.log(colorText(`❌ Batch failed: ${e.message}`, colors.red));
+    } finally {
+      // Always tear down scoped listeners to avoid duplicates/leaks
+      await this.detachHackBatchLiquidationListeners();
     }
+  }
+
+  // Add a helper to register and track listeners for hack-batch scope
+  addHackBatchListener(contract, eventName, listener) {
+    if (!this._hackBatchListeners) this._hackBatchListeners = [];
+    try {
+      contract.on(eventName, listener);
+      this._hackBatchListeners.push({ contract, eventName, listener });
+    } catch (e) {
+      console.log(
+        colorText(
+          `⚠️ Failed to attach hack-batch listener ${eventName}: ${e.message}`,
+          colors.yellow
+        )
+      );
+    }
+  }
+
+  // Attach enhanced liquidation listeners only for batch runs
+  async attachHackBatchLiquidationListeners() {
+    if (this._hackBatchActive) return; // prevent duplicates
+    this._hackBatchActive = true;
+    if (!this._hackBatchListeners) this._hackBatchListeners = [];
+
+    console.log(
+      colorText(
+        "🛰️ Enabling hack-batch liquidation pipeline listeners…",
+        colors.brightYellow
+      )
+    );
+
+    const ob = this.contracts && this.contracts.orderBook;
+    if (!ob) {
+      console.log(
+        colorText("⚠️ OrderBook not available for listeners", colors.yellow)
+      );
+      return;
+    }
+
+    // LiquidationMarketGapDetected(address trader, uint liquidationPrice, uint actualExecutionPrice, int256 positionSize, uint gapLoss)
+    this.addHackBatchListener(
+      ob,
+      "LiquidationMarketGapDetected",
+      (
+        trader,
+        liquidationPrice,
+        actualExecutionPrice,
+        positionSize,
+        gapLoss,
+        event
+      ) => {
+        try {
+          const tShort = trader.slice(0, 8) + "..." + trader.slice(-6);
+          const liqPrice = formatPriceWithValidation(
+            BigInt(liquidationPrice.toString()),
+            6,
+            4,
+            false
+          );
+          const execPrice = formatPriceWithValidation(
+            BigInt(actualExecutionPrice.toString()),
+            6,
+            4,
+            false
+          );
+          const sizeStr =
+            formatAmount(BigInt(positionSize.toString()), 18, 6) + " ALU";
+          const gapStr = "$" + formatUSDC(BigInt(gapLoss.toString()));
+          logEventBlock("LIQUIDATION MARKET GAP", "⚠️", colors.brightYellow, {
+            Trader: colorText(tShort, colors.cyan),
+            LiquidationPrice: colorText(`$${liqPrice}`, colors.yellow),
+            ExecutionPrice: colorText(`$${execPrice}`, colors.yellow),
+            PositionSize: colorText(sizeStr, colors.magenta),
+            GapLoss: colorText(gapStr, colors.red),
+          });
+        } catch (_) {}
+      }
+    );
+
+    // LiquidationAvailableCollateralUsed(address trader, uint availableCollateralUsed, uint remainingAvailableCollateral, uint totalGapLossCovered)
+    this.addHackBatchListener(
+      ob,
+      "LiquidationAvailableCollateralUsed",
+      (
+        trader,
+        availableCollateralUsed,
+        remainingAvailableCollateral,
+        totalGapLossCovered,
+        event
+      ) => {
+        try {
+          const tShort = trader.slice(0, 8) + "..." + trader.slice(-6);
+          const used =
+            "$" + formatUSDC(BigInt(availableCollateralUsed.toString()));
+          const remaining =
+            "$" + formatUSDC(BigInt(remainingAvailableCollateral.toString()));
+          const covered =
+            "$" + formatUSDC(BigInt(totalGapLossCovered.toString()));
+          logEventBlock("AVAILABLE COLLATERAL USED", "🏦", colors.brightGreen, {
+            Trader: colorText(tShort, colors.cyan),
+            Used: colorText(used, colors.yellow),
+            Remaining: colorText(remaining, colors.yellow),
+            TotalCovered: colorText(covered, colors.green),
+          });
+        } catch (_) {}
+      }
+    );
+
+    // LiquidationRequiresSocialization(address trader, uint remainingShortfall, uint userCollateralExhausted)
+    this.addHackBatchListener(
+      ob,
+      "LiquidationRequiresSocialization",
+      (trader, remainingShortfall, userCollateralExhausted, event) => {
+        try {
+          const tShort = trader.slice(0, 8) + "..." + trader.slice(-6);
+          const shortfall =
+            "$" + formatUSDC(BigInt(remainingShortfall.toString()));
+          const exhausted =
+            "$" + formatUSDC(BigInt(userCollateralExhausted.toString()));
+          logEventBlock("SOCIALIZATION REQUIRED", "📣", colors.brightMagenta, {
+            Trader: colorText(tShort, colors.cyan),
+            RemainingShortfall: colorText(shortfall, colors.red),
+            UserCollateralExhausted: colorText(exhausted, colors.yellow),
+          });
+        } catch (_) {}
+      }
+    );
+
+    // LiquidationLayerBreakdown(address trader, uint layer1LockedMargin, uint layer2AvailableCollateral, uint layer3SocializedLoss, uint totalLoss)
+    this.addHackBatchListener(
+      ob,
+      "LiquidationLayerBreakdown",
+      (
+        trader,
+        layer1LockedMargin,
+        layer2AvailableCollateral,
+        layer3SocializedLoss,
+        totalLoss,
+        event
+      ) => {
+        try {
+          const tShort = trader.slice(0, 8) + "..." + trader.slice(-6);
+          const l1 = "$" + formatUSDC(BigInt(layer1LockedMargin.toString()));
+          const l2 =
+            "$" + formatUSDC(BigInt(layer2AvailableCollateral.toString()));
+          const l3 = "$" + formatUSDC(BigInt(layer3SocializedLoss.toString()));
+          const tot = "$" + formatUSDC(BigInt(totalLoss.toString()));
+          logEventBlock("LIQUIDATION LAYERS", "🧱", colors.brightCyan, {
+            Trader: colorText(tShort, colors.cyan),
+            Layer1LockedMargin: colorText(l1, colors.yellow),
+            Layer2Available: colorText(l2, colors.yellow),
+            Layer3Socialized: colorText(l3, colors.yellow),
+            TotalLoss: colorText(tot, colors.brightRed || colors.red),
+          });
+        } catch (_) {}
+      }
+    );
+
+    // DebugLiquidationCall(address trader, bytes32 marketId, int256 positionSize, string stage)
+    this.addHackBatchListener(
+      ob,
+      "DebugLiquidationCall",
+      async (trader, marketId, positionSize, stage, event) => {
+        try {
+          const tShort = trader.slice(0, 8) + "..." + trader.slice(-6);
+          const symbol = await safeDecodeMarketId(marketId, this.contracts);
+          const sizeStr =
+            formatAmount(BigInt(positionSize.toString()), 18, 6) + " ALU";
+          logEventBlock("LIQUIDATION TRACE", "🧭", colors.dim, {
+            Trader: colorText(tShort, colors.cyan),
+            Market: colorText(String(symbol), colors.yellow),
+            Size: colorText(sizeStr, colors.magenta),
+            Stage: colorText(String(stage), colors.green),
+          });
+        } catch (_) {}
+      }
+    );
+
+    console.log(
+      colorText(
+        "🟢 Hack-batch liquidation listeners active (scoped to this batch)",
+        colors.green
+      )
+    );
+  }
+
+  // Detach the scoped listeners after batch completes
+  async detachHackBatchLiquidationListeners() {
+    if (!this._hackBatchActive) return;
+    if (this._hackBatchListeners && this._hackBatchListeners.length) {
+      for (const { contract, eventName, listener } of this
+        ._hackBatchListeners) {
+        try {
+          contract.off(eventName, listener);
+        } catch (_) {}
+      }
+    }
+    this._hackBatchListeners = [];
+    this._hackBatchActive = false;
+    console.log(
+      colorText(
+        "🔴 Disabled hack-batch liquidation pipeline listeners",
+        colors.yellow
+      )
+    );
   }
 
   // Non-interactive views for hack mode
@@ -5672,7 +6280,6 @@ ${colors.brightRed}└───────────────────�
       await this.selectUser();
     }
   }
-
   async runSandboxSimulation(marketIdHex, newMarkPriceFloat) {
     try {
       console.clear();
