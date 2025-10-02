@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/utils/math/Math.sol";
 import "./PositionManager.sol";
 
 interface ICoreVault {
-    function isLiquidatable(address user, bytes32 marketId, uint256 markPrice) external view returns (bool);
+    function isLiquidatable(address user, bytes32 marketId, uint256 markPrice) external returns (bool);
     function getPositionSummary(address user, bytes32 marketId) external view returns (int256 size, uint256 entryPrice, uint256 marginLocked);
     function liquidateShort(address user, bytes32 marketId, address liquidator, uint256 executionPrice) external;
     function liquidateLong(address user, bytes32 marketId, address liquidator, uint256 executionPrice) external;
@@ -46,6 +46,7 @@ interface ICoreVault {
     // Position equity and maintenance
     function getPositionEquity(address user, bytes32 marketId) external view returns (int256 equity6, uint256 notional6, bool hasPosition);
     function getEffectiveMaintenanceMarginBps(address user, bytes32 marketId) external view returns (uint256 mmrBps, uint256 fillRatio1e18, bool hasPosition);
+    function debugEmitIsLiquidatable(address user, bytes32 marketId, uint256 markPrice) external;
 }
 
 /**
@@ -127,6 +128,9 @@ contract OrderBook {
     uint256 public constant MAX_POSITIONS_TO_CHECK = 5;     // Reduced to 5 positions per check for gas efficiency
     uint256 public constant MAX_LIQUIDATIONS_PER_CALL = 5;   // Cap liquidations per check to manage gas
     uint256 public constant LIQUIDATION_INTERVAL = 0; // No throttle between checks
+    // Gas-safe debug toggles
+    bool public liquidationScanOnTrade = false; // if false, scans only run via poke
+    bool public liquidationDebug = false; // if true, emit heavy per-trader debug events
     uint256 public lastLiquidationCheck;
     uint256 public lastCheckedIndex;
     uint256 public lastMarkPrice;
@@ -462,18 +466,29 @@ contract OrderBook {
         internal
         returns (bool didLiquidate, int256 positionSize, bool usedMarketOrder)
     {
-        // Liquidatable check
-        bool isLiquidatable = false;
-        try vault.isLiquidatable(trader, marketId, markPrice) returns (bool liquidatable) {
-            isLiquidatable = liquidatable;
-            emit LiquidationLiquidatableCheck(trader, isLiquidatable, markPrice);
-        } catch {
-            emit LiquidationLiquidatableCheck(trader, false, markPrice);
-            return (false, 0, false);
+        if (liquidationDebug) {
+            // Emit current context from vault storage if available
+            int256 dbgSize; uint256 dbgEntry; uint256 dbgMargin;
+            try vault.getPositionSummary(trader, marketId) returns (int256 size, uint256 entryPrice, uint256 marginLocked) {
+                dbgSize = size; dbgEntry = entryPrice; dbgMargin = marginLocked;
+            } catch { dbgSize = 0; dbgEntry = 0; dbgMargin = 0; }
+            emit DebugLiquidationContext(trader, marketId, markPrice, 0, dbgSize, dbgEntry, dbgMargin);
+
+            // Ask vault to emit its own detailed eligibility snapshot (best-effort)
+            try vault.debugEmitIsLiquidatable(trader, marketId, markPrice) { } catch { }
         }
-        if (!isLiquidatable) {
-            return (false, 0, false);
-        }
+         // Liquidatable check
+         bool isLiquidatable = false;
+         try vault.isLiquidatable(trader, marketId, markPrice) returns (bool liquidatable) {
+             isLiquidatable = liquidatable;
+             emit LiquidationLiquidatableCheck(trader, isLiquidatable, markPrice);
+         } catch {
+             emit LiquidationLiquidatableCheck(trader, false, markPrice);
+             return (false, 0, false);
+         }
+         if (!isLiquidatable) {
+             return (false, 0, false);
+         }
 
         // Fetch position
         try vault.getPositionSummary(trader, marketId) returns (int256 size, uint256 marginLocked, uint256 unrealizedPnL) {
@@ -1061,6 +1076,16 @@ contract OrderBook {
     event LiquidationRecursionGuardSet(bool inProgress);
     event LiquidationTraderBeingChecked(address indexed trader, uint256 index, uint256 totalTraders);
     event LiquidationLiquidatableCheck(address indexed trader, bool isLiquidatable, uint256 markPrice);
+    // Detailed context right before calling vault.isLiquidatable and right after
+    event DebugLiquidationContext(
+        address indexed trader,
+        bytes32 indexed marketId,
+        uint256 markPrice,
+        uint256 storedVaultTrigger,
+        int256 positionSize,
+        uint256 entryPrice,
+        uint256 marginLocked
+    );
     event LiquidationPositionRetrieved(address indexed trader, int256 size, uint256 marginLocked, uint256 unrealizedPnL);
     event LiquidationMarketOrderAttempt(address indexed trader, uint256 amount, bool isBuy, uint256 markPrice);
     event LiquidationMarketOrderResult(address indexed trader, bool success, string reason);
@@ -2619,7 +2644,7 @@ contract OrderBook {
         emit PriceUpdated(lastTradePrice, currentMark);
         
         // Trigger liquidation scan on any mark change or on interval, guarded against recursion
-        if (!skipLiquidationCheck && !liquidationInProgress &&
+        if (!skipLiquidationCheck && liquidationScanOnTrade && !liquidationInProgress &&
             (lastLiquidationCheck == 0 ||
              LIQUIDATION_INTERVAL == 0 ||
              block.timestamp >= lastLiquidationCheck + LIQUIDATION_INTERVAL ||
@@ -3553,5 +3578,17 @@ contract OrderBook {
         }
     }
 
-    
+    event LiquidationConfigUpdated(bool scanOnTrade, bool debug);
+
+    function setConfigLiquidationScanOnTrade(bool enabled) external {
+        require(msg.sender == leverageController || msg.sender == feeRecipient, "Unauthorized");
+        liquidationScanOnTrade = enabled;
+        emit LiquidationConfigUpdated(liquidationScanOnTrade, liquidationDebug);
+    }
+
+    function setConfigLiquidationDebug(bool enabled) external {
+        require(msg.sender == leverageController || msg.sender == feeRecipient, "Unauthorized");
+        liquidationDebug = enabled;
+        emit LiquidationConfigUpdated(liquidationScanOnTrade, liquidationDebug);
+    }
 }

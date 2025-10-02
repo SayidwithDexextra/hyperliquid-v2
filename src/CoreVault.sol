@@ -131,6 +131,20 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     event HaircutApplied(address indexed user, bytes32 indexed marketId, uint256 debitAmount, uint256 collateralAfter);
     event BadDebtRecorded(bytes32 indexed marketId, uint256 amount, address indexed liquidatedUser);
     event BadDebtOffset(bytes32 indexed marketId, uint256 amount, uint256 remainingBadDebt);
+    // Debug: Detailed liquidation eligibility check
+    event DebugIsLiquidatable(
+        address indexed user,
+        bytes32 indexed marketId,
+        int256 positionSize,
+        uint256 markPrice,
+        uint256 trigger,
+        uint256 oneTick,
+        uint256 notional6,
+        int256 equity6,
+        uint256 maintenance6,
+        bool usedFallback,
+        bool result
+    );
     
     // ============ Administrative Position Closure Events ============
     event SocializationStarted(bytes32 indexed marketId, uint256 totalLossAmount, address indexed liquidatedUser, uint256 timestamp);
@@ -987,7 +1001,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         address user,
         bytes32 marketId,
         uint256 markPrice
-    ) external view returns (bool) {
+    ) external returns (bool) {
         PositionManager.Position[] storage positions = userPositions[user];
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size != 0) {
@@ -1006,18 +1020,80 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                     int256 equity6 = int256(positions[i].marginLocked) + pnl6;
                     (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
                     uint256 maintenance6 = (notional6 * mmrBps) / 10000;
-                    return equity6 <= int256(maintenance6);
+                    // Include one-tick tolerance in fallback as well
+                    bool resFallback = equity6 <= (int256(maintenance6) + int256(1));
+                    return resFallback;
                 }
+                // Add 1-tick tolerance to account for rounding/quantization differences
+                // Prices are stored in 6 decimals. Treat near-equality within 1 unit (1e-6) as liquidatable.
+                uint256 oneTick = 1; // 1 unit at 6 decimals
                 if (positions[i].size > 0) {
-                    // Long: liquidatable if mark <= trigger
-                    return markPrice <= trigger;
+                    // Long: liquidatable if mark <= trigger (+ 1 tick tolerance)
+                    bool res = markPrice <= (trigger + oneTick);
+                    return res;
                 } else {
-                    // Short: liquidatable if mark >= trigger
-                    return markPrice >= trigger;
+                    // Short: liquidatable if mark >= trigger (- 1 tick tolerance)
+                    bool res2 = (markPrice + oneTick) >= trigger;
+                    return res2;
                 }
             }
         }
         return false;
+    }
+
+    /**
+     * @dev Debug helper to emit a DebugIsLiquidatable event using current stored data.
+     *      Restricted to ORDERBOOK_ROLE to avoid arbitrary spam.
+     */
+    function debugEmitIsLiquidatable(address user, bytes32 marketId, uint256 markPrice) external onlyRole(ORDERBOOK_ROLE) {
+        PositionManager.Position[] storage positions = userPositions[user];
+        for (uint256 i = 0; i < positions.length; i++) {
+            if (positions[i].marketId == marketId && positions[i].size != 0) {
+                uint256 trigger = positions[i].liquidationPrice;
+                uint256 oneTick = 1;
+                bool usedFallback = false;
+                uint256 notional6 = 0;
+                int256 equity6 = 0;
+                uint256 maintenance6 = 0;
+                bool result;
+                if (trigger == 0) {
+                    usedFallback = true;
+                    uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
+                    if (markPrice == 0 || absSize == 0) {
+                        emit DebugIsLiquidatable(user, marketId, positions[i].size, markPrice, 0, oneTick, 0, 0, 0, true, false);
+                        return;
+                    }
+                    notional6 = (absSize * markPrice) / (10**18);
+                    int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
+                    int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
+                    int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
+                    equity6 = int256(positions[i].marginLocked) + pnl6;
+                    (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
+                    maintenance6 = (notional6 * mmrBps) / 10000;
+                    result = equity6 <= int256(maintenance6);
+                } else if (positions[i].size > 0) {
+                    result = markPrice <= (trigger + oneTick);
+                } else {
+                    result = (markPrice + oneTick) >= trigger;
+                }
+                emit DebugIsLiquidatable(
+                    user,
+                    marketId,
+                    positions[i].size,
+                    markPrice,
+                    trigger,
+                    oneTick,
+                    notional6,
+                    equity6,
+                    maintenance6,
+                    usedFallback,
+                    result
+                );
+                return;
+            }
+        }
+        // No position; emit a minimal debug line
+        emit DebugIsLiquidatable(user, marketId, 0, markPrice, 0, 1, 0, 0, 0, false, false);
     }
 
     /**

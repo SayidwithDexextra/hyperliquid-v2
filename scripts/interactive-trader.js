@@ -4373,187 +4373,6 @@ ${
     console.log(notification);
   }
 
-  handleSocializationCompletedEvent(
-    marketId,
-    totalLossCovered,
-    remainingLoss,
-    positionsAffected,
-    liquidatedUser,
-    event
-  ) {
-    console.log("🔥 ADL EVENT DETECTED: SocializationCompleted");
-    const timestamp = new Date().toLocaleTimeString();
-    const marketName = this.getMarketDisplayName(marketId);
-    const coveredFormatted = formatWithAutoDecimalDetection(
-      totalLossCovered,
-      6,
-      2
-    );
-    const remainingFormatted = formatWithAutoDecimalDetection(
-      remainingLoss,
-      6,
-      2
-    );
-    const liquidatedUserType = this.formatUserDisplay(liquidatedUser);
-    const coveragePercent =
-      totalLossCovered > 0
-        ? Math.round(
-            (totalLossCovered / (totalLossCovered + remainingLoss)) * 100
-          )
-        : 0;
-
-    // Enhanced parameter display - ADL COMPLETION SUMMARY
-    console.log(
-      `\n${colors.brightGreen}📋 COMPLETE EVENT PARAMETERS - ADL SYSTEM COMPLETED:${colors.reset}`
-    );
-    console.log(`${colors.cyan}   📊 Market ID:${colors.reset} ${marketId}`);
-    console.log(
-      `${colors.cyan}   📊 Market Name:${colors.reset} ${marketName}`
-    );
-    console.log(
-      `${colors.red}   👤 Liquidated User:${colors.reset} ${liquidatedUser}`
-    );
-    console.log(
-      `${colors.red}   👤 User Type:${colors.reset} ${liquidatedUserType}`
-    );
-    console.log(
-      `${colors.brightGreen}   💰 Total Loss Covered:${
-        colors.reset
-      } ${totalLossCovered.toString()} (raw) = $${coveredFormatted} USDC`
-    );
-    console.log(
-      `${colors.yellow}   💸 Remaining Loss:${
-        colors.reset
-      } ${remainingLoss.toString()} (raw) = $${remainingFormatted} USDC`
-    );
-    console.log(
-      `${colors.brightMagenta}   👥 Positions Affected:${
-        colors.reset
-      } ${positionsAffected.toString()} users had their positions reduced`
-    );
-    console.log(
-      `${colors.brightCyan}   📈 Coverage Percentage:${colors.reset} ${coveragePercent}% of total loss covered`
-    );
-    console.log(
-      `${colors.magenta}   💰 Total Original Loss:${colors.reset} $${(
-        parseFloat(coveredFormatted) + parseFloat(remainingFormatted)
-      ).toFixed(2)} USDC`
-    );
-    console.log(
-      `${colors.yellow}   📊 Average Loss per Position:${colors.reset} $${(
-        parseFloat(coveredFormatted) / parseInt(positionsAffected.toString())
-      ).toFixed(2)} USDC`
-    );
-    console.log(
-      `${colors.dim}   ⏰ Local Timestamp:${colors.reset} ${timestamp}`
-    );
-    console.log(
-      `${colors.dim}   🧱 Block Number:${colors.reset} ${event.blockNumber}`
-    );
-    console.log(
-      `${colors.dim}   📊 Transaction Hash:${colors.reset} ${event.transactionHash}`
-    );
-    console.log(
-      `${colors.dim}   📄 Log Index:${colors.reset} ${event.logIndex}`
-    );
-    console.log(
-      `${colors.dim}   📄 Transaction Index:${colors.reset} ${event.transactionIndex}`
-    );
-    console.log(
-      `${colors.dim}   📋 Event Name:${colors.reset} ${
-        event.eventName || "SocializationCompleted"
-      }`
-    );
-    if (event.gasUsed)
-      console.log(
-        `${colors.dim}   ⛽ Gas Used:${
-          colors.reset
-        } ${event.gasUsed.toString()}`
-      );
-    if (event.effectiveGasPrice)
-      console.log(
-        `${colors.dim}   ⛽ Gas Price:${
-          colors.reset
-        } ${event.effectiveGasPrice.toString()}`
-      );
-    if (event.address)
-      console.log(
-        `${colors.dim}   📍 Contract Address:${colors.reset} ${event.address}`
-      );
-
-    const notification = `
-${colors.bgGreen}${colors.white}${
-      colors.bright
-    }                ✅ SOCIALIZATION COMPLETED                ${colors.reset}
-${
-  colors.brightGreen
-}┌─────────────────────────────────────────────────────────┐${colors.reset}
-${colors.brightGreen}│${colors.reset} ${
-      colors.brightYellow
-    }✅ ADL SYSTEM COMPLETED${colors.reset} ${colors.dim}at ${timestamp}${
-      colors.reset
-    }           ${colors.brightGreen}│${colors.reset}
-${colors.brightGreen}│${
-      colors.reset
-    }                                                         ${
-      colors.brightGreen
-    }│${colors.reset}
-${colors.brightGreen}│${colors.reset} ${colors.brightCyan}📊 Market:${
-      colors.reset
-    } ${marketName.padEnd(15)}                       ${colors.brightGreen}│${
-      colors.reset
-    }
-${colors.brightGreen}│${colors.reset} ${colors.brightRed}👤 Liquidated:${
-      colors.reset
-    } ${liquidatedUserType.padEnd(15)}           ${colors.brightGreen}│${
-      colors.reset
-    }
-${colors.brightGreen}│${
-      colors.reset
-    }                                                         ${
-      colors.brightGreen
-    }│${colors.reset}
-${colors.brightGreen}│${colors.reset} ${colors.brightGreen}💰 Loss Covered:${
-      colors.reset
-    } $${coveredFormatted} USDC                ${colors.brightGreen}│${
-      colors.reset
-    }
-${colors.brightGreen}│${colors.reset} ${colors.brightYellow}💸 Remaining Loss:${
-      colors.reset
-    } $${remainingFormatted} USDC           ${colors.brightGreen}│${
-      colors.reset
-    }
-${colors.brightGreen}│${colors.reset} ${colors.brightCyan}📈 Coverage:${
-      colors.reset
-    } ${coveragePercent}%                             ${colors.brightGreen}│${
-      colors.reset
-    }
-${colors.brightGreen}│${colors.reset} ${
-      colors.brightMagenta
-    }👥 Positions Affected:${
-      colors.reset
-    } ${positionsAffected}                    ${colors.brightGreen}│${
-      colors.reset
-    }
-${colors.brightGreen}│${
-      colors.reset
-    }                                                         ${
-      colors.brightGreen
-    }│${colors.reset}
-${colors.brightGreen}│${colors.reset} ${colors.dim}Block: ${
-      event.blockNumber
-    } | Tx: ${event.transactionHash.slice(0, 10)}...${colors.reset} ${
-      colors.brightGreen
-    }│${colors.reset}
-${
-  colors.brightGreen
-}└─────────────────────────────────────────────────────────┘${colors.reset}
-    `;
-
-    console.log(notification);
-    process.stdout.write("\x07\x07\x07"); // Triple beep for completion
-  }
-
   handleSocializationFailedEvent(
     marketId,
     lossAmount,
@@ -4950,7 +4769,6 @@ ${colors.brightRed}└───────────────────�
       this.renderHackLedger();
     }
   }
-
   // Parse and execute one hack command string
   async executeHackCommand(cmd) {
     // Tokenize by spaces (multiple spaces allowed)
@@ -5016,7 +4834,6 @@ ${colors.brightRed}└───────────────────�
         }
       }
     }
-
     switch (op) {
       case "SLEEP": {
         const msStr = parts[cursor++];
@@ -5609,6 +5426,48 @@ ${colors.brightRed}└───────────────────�
         return `SU ${idx + 1}`;
       }
 
+      case "POKE_LIQ": {
+        // Optional: ON/OFF to toggle liquidationScanOnTrade, or no arg to just poke now
+        const sub = (parts[cursor++] || "").toUpperCase();
+        if (sub === "ON" || sub === "OFF") {
+          const enable = sub === "ON";
+          await this.withRpcRetry(() =>
+            this.contracts.orderBook.setConfigLiquidationScanOnTrade(enable)
+          ).catch(() => {});
+          console.log(
+            colorText(
+              `⚙️ liquidationScanOnTrade ${enable ? "ENABLED" : "DISABLED"}`,
+              colors.brightYellow
+            )
+          );
+          return `POKE_LIQ ${sub}`;
+        }
+
+        // Just poke immediately
+        await this.withRpcRetry(() =>
+          this.contracts.orderBook.pokeLiquidations()
+        );
+        console.log(colorText("📣 pokeLiquidations() sent", colors.cyan));
+        return "POKE_LIQ";
+      }
+
+      case "LIQ_DEBUG": {
+        const mode = (parts[cursor++] || "").toUpperCase();
+        if (mode !== "ON" && mode !== "OFF")
+          throw new Error("LIQ_DEBUG usage: LIQ_DEBUG ON|OFF");
+        const enable = mode === "ON";
+        await this.withRpcRetry(() =>
+          this.contracts.orderBook.setConfigLiquidationDebug(enable)
+        );
+        console.log(
+          colorText(
+            `⚙️ liquidationDebug ${enable ? "ENABLED" : "DISABLED"}`,
+            colors.brightYellow
+          )
+        );
+        return `LIQ_DEBUG ${mode}`;
+      }
+
       default:
         throw new Error(`Unknown op: ${op}`);
     }
@@ -5803,7 +5662,6 @@ ${colors.brightRed}└───────────────────�
       await this.detachHackBatchLiquidationListeners();
     }
   }
-
   // Add a helper to register and track listeners for hack-batch scope
   addHackBatchListener(contract, eventName, listener) {
     if (!this._hackBatchListeners) this._hackBatchListeners = [];
