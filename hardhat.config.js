@@ -31,14 +31,22 @@ const config = {
     hardhat: {
       chainId: 31337,
       allowUnlimitedContractSize: true,
-      blockGasLimit: 30000000,
+      blockGasLimit: 100000000,
       gas: 30000000,
+      mining: {
+        auto: true,
+        interval: [100, 300],
+      },
+      accounts: {
+        count: 50,
+      },
     },
     localhost: {
       url: "http://127.0.0.1:8545",
       allowUnlimitedContractSize: true,
-      blockGasLimit: 30000000,
+      blockGasLimit: 100000000,
       gas: 30000000,
+      timeout: 120000,
     },
     ganache: {
       url: "http://127.0.0.1:7545",

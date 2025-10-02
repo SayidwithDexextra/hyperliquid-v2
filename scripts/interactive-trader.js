@@ -20,6 +20,9 @@ if (!process.env.HARDHAT_NETWORK) {
 }
 const { ethers } = require("hardhat");
 const readline = require("readline");
+const http = require("http");
+const https = require("https");
+let undiciAgent = null;
 const {
   getContract,
   getAddress,
@@ -575,6 +578,35 @@ class InteractiveTrader {
     this.currentUserIndex = 0;
     this.isRunning = true;
     this.hackHistory = [];
+
+    // Concurrency limiter for RPC calls (tunable via env)
+    const defaultConcurrency = 3;
+    const maxConc = parseInt(
+      process.env.HACK_MAX_CONCURRENCY || "" + defaultConcurrency,
+      10
+    );
+    this.maxConcurrency =
+      Number.isFinite(maxConc) && maxConc > 0 ? maxConc : defaultConcurrency;
+    this.activeTasks = 0;
+    this.pendingQueue = [];
+
+    // Enable HTTP keep-alive for RPC
+    try {
+      const { setGlobalDispatcher, Agent } = require("undici");
+      undiciAgent = new Agent({
+        keepAliveTimeout: 20000,
+        keepAliveMaxTimeout: 60000,
+        connections: 128,
+      });
+      setGlobalDispatcher(undiciAgent);
+    } catch (_) {
+      try {
+        http.globalAgent.keepAlive = true;
+        http.globalAgent.maxSockets = 128;
+        https.globalAgent.keepAlive = true;
+        https.globalAgent.maxSockets = 128;
+      } catch (__) {}
+    }
   }
 
   async initialize() {
@@ -593,6 +625,66 @@ class InteractiveTrader {
     }
 
     await this.selectUser();
+  }
+
+  // Simple concurrency limiter: runs at most this.maxConcurrency jobs concurrently
+  async withConcurrency(fn) {
+    if (this.activeTasks < this.maxConcurrency) {
+      this.activeTasks++;
+      try {
+        return await fn();
+      } finally {
+        this.activeTasks--;
+        const next = this.pendingQueue.shift();
+        if (next) next();
+      }
+    }
+    await new Promise((resolve) => this.pendingQueue.push(resolve));
+    return this.withConcurrency(fn);
+  }
+
+  // Retry wrapper with exponential backoff for transient network errors
+  async withRpcRetry(fn, attempts = 8, baseDelayMs = 250) {
+    let delay = baseDelayMs;
+    for (let i = 1; i <= attempts; i++) {
+      try {
+        return await fn();
+      } catch (e) {
+        const message = String(e && (e.code || e.message || e));
+        const isTransient =
+          /ECONNRESET|ETIMEDOUT|EPIPE|ECONNREFUSED|socket hang up|network error|NETWORK_ERROR/i.test(
+            message
+          );
+        if (!isTransient || i === attempts) throw e;
+        // quick readiness probe: cheap read
+        try {
+          if (this.contracts?.orderBook?.getBestPrices) {
+            await this.contracts.orderBook.getBestPrices();
+          }
+        } catch (_) {}
+        await this.pause(delay);
+        delay = Math.min(delay * 2, 5000);
+      }
+    }
+  }
+
+  async waitForRpcHealthy(timeoutMs = 8000, intervalMs = 200) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        // Prefer a basic RPC ping
+        await ethers.provider.send("eth_blockNumber", []);
+        return true;
+      } catch (_) {}
+      try {
+        if (this.contracts?.orderBook?.getBestPrices) {
+          await this.contracts.orderBook.getBestPrices();
+          return true;
+        }
+      } catch (_) {}
+      await this.pause(intervalMs);
+    }
+    return false;
   }
 
   async showWelcomeScreen() {
@@ -4980,8 +5072,9 @@ ${colors.brightRed}└───────────────────�
             throw new Error(
               "ASSERT BID/ASK usage: ASSERT BID|ASK <op> <price>"
             );
-          const [bestBid, bestAsk] =
-            await this.contracts.orderBook.getBestPrices();
+          const [bestBid, bestAsk] = await this.withConcurrency(() =>
+            this.withRpcRetry(() => this.contracts.orderBook.getBestPrices())
+          );
           const actual6 =
             what === "BID" ? BigInt(bestBid || 0n) : BigInt(bestAsk || 0n);
           const expect6 = ethers.parseUnits(String(Number(rhsStr)), 6);
@@ -5075,10 +5168,11 @@ ${colors.brightRed}└───────────────────�
             throw new Error(
               "ASSERT AVAIL usage: ASSERT AVAIL [U#] <op> <usdc>"
             );
-          const [_, __, ___, available] =
-            await this.contracts.vault.getUnifiedMarginSummary(
-              targetUser.address
-            );
+          const [_, __, ___, available] = await this.withConcurrency(() =>
+            this.withRpcRetry(() =>
+              this.contracts.vault.getUnifiedMarginSummary(targetUser.address)
+            )
+          );
           const actual6 = BigInt((available || 0).toString());
           const expect6 = ethers.parseUnits(String(Number(rhsStr)), 6);
           const ok = compare(actual6, opSym, expect6);
@@ -5129,8 +5223,10 @@ ${colors.brightRed}└───────────────────�
         // Optional quick pre-check for collateral availability
         try {
           const required6 = (amountWei * priceWei) / 10n ** 18n;
-          const available6 = await this.contracts.vault.getAvailableCollateral(
-            user.address
+          const available6 = await this.withConcurrency(() =>
+            this.withRpcRetry(() =>
+              this.contracts.vault.getAvailableCollateral(user.address)
+            )
           );
           if (available6 < required6) {
             console.log(
@@ -5146,10 +5242,15 @@ ${colors.brightRed}└───────────────────�
           }
         } catch (_) {}
 
-        const tx = await this.contracts.orderBook
-          .connect(user)
-          .placeMarginLimitOrder(priceWei, amountWei, isBuy);
-        const rcpt = await tx.wait();
+        const { tx, rcpt } = await this.withConcurrency(() =>
+          this.withRpcRetry(async () => {
+            const tx = await this.contracts.orderBook
+              .connect(user)
+              .placeMarginLimitOrder(priceWei, amountWei, isBuy);
+            const rcpt = await tx.wait();
+            return { tx, rcpt };
+          })
+        );
         console.log(
           colorText(
             `✅ ${this.formatUserDisplay(user.address)} ${
@@ -5188,8 +5289,9 @@ ${colors.brightRed}└───────────────────�
           amountAlu = value;
         } else {
           // Convert USDC position value to ALU using reference price
-          const [bestBid, bestAsk] =
-            await this.contracts.orderBook.getBestPrices();
+          const [bestBid, bestAsk] = await this.withConcurrency(() =>
+            this.withRpcRetry(() => this.contracts.orderBook.getBestPrices())
+          );
           const ref = isBuy ? bestAsk : bestBid;
           if (!ref || ref === 0n) throw new Error("No liquidity for market");
           const refPrice = Number(formatPrice(ref));
@@ -5197,10 +5299,19 @@ ${colors.brightRed}└───────────────────�
         }
 
         const amountWei = ethers.parseUnits(String(amountAlu), 18);
-        const tx = await this.contracts.orderBook
-          .connect(user)
-          .placeMarginMarketOrderWithSlippage(amountWei, isBuy, slippageBps);
-        const rcpt = await tx.wait();
+        const { tx, rcpt } = await this.withConcurrency(() =>
+          this.withRpcRetry(async () => {
+            const tx = await this.contracts.orderBook
+              .connect(user)
+              .placeMarginMarketOrderWithSlippage(
+                amountWei,
+                isBuy,
+                slippageBps
+              );
+            const rcpt = await tx.wait();
+            return { tx, rcpt };
+          })
+        );
         console.log(
           colorText(
             `✅ ${this.formatUserDisplay(user.address)} ${
@@ -5224,14 +5335,23 @@ ${colors.brightRed}└───────────────────�
         const amount6 = ethers.parseUnits(String(amount), 6);
 
         // Approve and deposit
-        const approveTx = await this.contracts.mockUSDC
-          .connect(user)
-          .approve(await this.contracts.vault.getAddress(), amount6);
-        await approveTx.wait();
-        const tx = await this.contracts.vault
-          .connect(user)
-          .depositCollateral(amount6);
-        const rcpt = await tx.wait();
+        await this.withConcurrency(() =>
+          this.withRpcRetry(async () => {
+            const approveTx = await this.contracts.mockUSDC
+              .connect(user)
+              .approve(await this.contracts.vault.getAddress(), amount6);
+            await approveTx.wait();
+          })
+        );
+        const { tx, rcpt } = await this.withConcurrency(() =>
+          this.withRpcRetry(async () => {
+            const tx = await this.contracts.vault
+              .connect(user)
+              .depositCollateral(amount6);
+            const rcpt = await tx.wait();
+            return { tx, rcpt };
+          })
+        );
         console.log(
           colorText(
             `✅ ${this.formatUserDisplay(
@@ -5253,10 +5373,15 @@ ${colors.brightRed}└───────────────────�
         const amount = Number(amtStr);
         if (!isFinite(amount) || amount <= 0) throw new Error("Invalid amount");
         const amount6 = ethers.parseUnits(String(amount), 6);
-        const tx = await this.contracts.vault
-          .connect(user)
-          .withdrawCollateral(amount6);
-        const rcpt = await tx.wait();
+        const { tx, rcpt } = await this.withConcurrency(() =>
+          this.withRpcRetry(async () => {
+            const tx = await this.contracts.vault
+              .connect(user)
+              .withdrawCollateral(amount6);
+            const rcpt = await tx.wait();
+            return { tx, rcpt };
+          })
+        );
         console.log(
           colorText(
             `✅ ${this.formatUserDisplay(
@@ -5281,10 +5406,14 @@ ${colors.brightRed}└───────────────────�
           try {
             const order = await this.contracts.orderBook.getOrder(orderId);
             if (order.trader !== ethers.ZeroAddress && order.amount > 0) {
-              const tx = await this.contracts.orderBook
-                .connect(user)
-                .cancelOrder(orderId);
-              await tx.wait();
+              await this.withConcurrency(() =>
+                this.withRpcRetry(async () => {
+                  const tx = await this.contracts.orderBook
+                    .connect(user)
+                    .cancelOrder(orderId);
+                  await tx.wait();
+                })
+              );
               success++;
             }
           } catch (_) {}
@@ -5305,10 +5434,14 @@ ${colors.brightRed}└───────────────────�
         const idStr = parts[cursor++];
         if (!idStr) throw new Error("CO usage: [U#] CO orderId");
         const orderId = BigInt(idStr);
-        const tx = await this.contracts.orderBook
-          .connect(user)
-          .cancelOrder(orderId);
-        await tx.wait();
+        await this.withConcurrency(() =>
+          this.withRpcRetry(async () => {
+            const tx = await this.contracts.orderBook
+              .connect(user)
+              .cancelOrder(orderId);
+            await tx.wait();
+          })
+        );
         console.log(
           colorText(
             `✅ ${this.formatUserDisplay(
@@ -5330,10 +5463,14 @@ ${colors.brightRed}└───────────────────�
         if (isNaN(idx) || idx < 0 || idx >= orders.length)
           throw new Error("Invalid order index");
         const orderId = orders[idx];
-        const tx = await this.contracts.orderBook
-          .connect(user)
-          .cancelOrder(orderId);
-        await tx.wait();
+        await this.withConcurrency(() =>
+          this.withRpcRetry(async () => {
+            const tx = await this.contracts.orderBook
+              .connect(user)
+              .cancelOrder(orderId);
+            await tx.wait();
+          })
+        );
         console.log(
           colorText(
             `✅ Cancelled order #${idx + 1} (${orderId})`,
@@ -5634,6 +5771,17 @@ ${colors.brightRed}└───────────────────�
           colors.brightCyan
         )
       );
+      // Ensure RPC is healthy before starting batch
+      const healthy = await this.waitForRpcHealthy(12000, 250);
+      if (!healthy) {
+        console.log(
+          colorText(
+            "⚠️ RPC not ready after 12s, attempting to proceed with retries…",
+            colors.yellow
+          )
+        );
+      }
+
       for (const cmd of tokens) {
         try {
           const summary = await this.executeHackCommand(cmd);
