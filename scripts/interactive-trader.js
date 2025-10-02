@@ -7674,6 +7674,36 @@ ${colors.brightRed}└───────────────────�
               colors.white
             )
           );
+          console.log(
+            colorText(
+              `│ 📦 Total Margin Reserved: ${colorText(
+                comprehensiveMarginData.sources.unifiedMargin
+                  .totalMarginCommitted
+                  ? Number(
+                      comprehensiveMarginData.sources.unifiedMargin
+                        .marginReservedForOrders
+                    ).toFixed(2)
+                  : "0.00",
+                colors.yellow
+              )} USDC │`,
+              colors.white
+            )
+          );
+          console.log(
+            colorText(
+              `│ 📚 Total Margin Committed: ${colorText(
+                comprehensiveMarginData.sources.unifiedMargin
+                  .totalMarginCommitted
+                  ? Number(
+                      comprehensiveMarginData.sources.unifiedMargin
+                        .totalMarginCommitted
+                    ).toFixed(2)
+                  : "0.00",
+                colors.magenta
+              )} USDC │`,
+              colors.white
+            )
+          );
         }
       }
 
@@ -8469,7 +8499,6 @@ ${colors.brightRed}└───────────────────�
     }
     await this.pause(3000);
   }
-
   // === Margin Reduction ===
   async reducePositionMarginFlow() {
     console.clear();
@@ -12194,6 +12223,34 @@ ${colors.brightRed}└───────────────────�
                 .toFixed(2)
                 .padEnd(16),
               colors.yellow
+            )} USDC`,
+            colors.white
+          )
+        );
+        console.log(
+          colorText(
+            `   Total Margin Reserved: ${colorText(
+              comprehensiveMarginData.sources.unifiedMargin.totalMarginCommitted
+                ? Number(
+                    comprehensiveMarginData.sources.unifiedMargin
+                      .marginReservedForOrders
+                  ).toFixed(2)
+                : "0.00",
+              colors.yellow
+            )} USDC`,
+            colors.white
+          )
+        );
+        console.log(
+          colorText(
+            `   Total Margin Committed: ${colorText(
+              comprehensiveMarginData.sources.unifiedMargin.totalMarginCommitted
+                ? Number(
+                    comprehensiveMarginData.sources.unifiedMargin
+                      .totalMarginCommitted
+                  ).toFixed(2)
+                : "0.00",
+              colors.magenta
             )} USDC`,
             colors.white
           )

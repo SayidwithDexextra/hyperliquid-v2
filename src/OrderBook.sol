@@ -1291,6 +1291,12 @@ contract OrderBook {
         // If there's remaining amount, add to order book
         if (remainingAmount > 0) {
             newOrder.amount = remainingAmount;
+            // Recompute reserved margin to reflect only remaining units
+            if (isMarginOrder) {
+                uint256 adjustedReserved = _calculateMarginRequired(remainingAmount, price, isBuy);
+                newOrder.marginRequired = adjustedReserved;
+                vault.releaseExcessMargin(msg.sender, bytes32(orderId), adjustedReserved);
+            }
             orders[orderId] = newOrder;
             userOrders[msg.sender].push(orderId);
             
@@ -1628,6 +1634,12 @@ contract OrderBook {
                     delete orders[currentOrderId];
                 } else {
                     emit OrderPartiallyFilled(currentOrderId, matchAmount, sellOrder.amount);
+                    // Reduce reserved margin proportionally for partially filled margin orders
+                    if (sellOrder.isMarginOrder) {
+                        uint256 newReserved = _calculateMarginRequired(sellOrder.amount, sellOrder.price, sellOrder.isBuy);
+                        vault.releaseExcessMargin(sellOrder.trader, bytes32(currentOrderId), newReserved);
+                        orders[currentOrderId].marginRequired = newReserved;
+                    }
                 }
                 
                 currentOrderId = nextSellOrderId;
@@ -1751,6 +1763,12 @@ contract OrderBook {
                     delete orders[currentOrderId];
                 } else {
                     emit OrderPartiallyFilled(currentOrderId, matchAmount, buyOrder.amount);
+                    // Reduce reserved margin proportionally for partially filled margin orders
+                    if (buyOrder.isMarginOrder) {
+                        uint256 newReserved = _calculateMarginRequired(buyOrder.amount, buyOrder.price, buyOrder.isBuy);
+                        vault.releaseExcessMargin(buyOrder.trader, bytes32(currentOrderId), newReserved);
+                        orders[currentOrderId].marginRequired = newReserved;
+                    }
                 }
                 
                 currentOrderId = nextBuyOrderId;
@@ -2328,17 +2346,39 @@ contract OrderBook {
             // CRITICAL FIX: Check for integer overflow in position calculation
             int256 newNet;
             
-            // Use unchecked for oldPosition + amount to handle potential overflow safely
+            // Always read the latest net position from the vault to avoid drift across multi-level matches
+            int256 currentNet;
+            try vault.getPositionSummary(user, marketId) returns (int256 size, uint256 /*entryPrice*/, uint256 /*marginLocked*/) {
+                currentNet = size;
+            } catch {
+                currentNet = oldPosition; // fallback to provided oldPosition
+            }
+            
+            // Use unchecked for addition to handle potential overflow safely
             unchecked {
-                newNet = oldPosition + amount;
+                newNet = currentNet + amount;
             }
             
             if (newNet == 0) {
                 marginRequired = 0;
             } else {
                 // Required margin should reflect the new net exposure
+                // If this trade only reduces exposure (without flipping side), use entry price as basis
+                // to avoid margin spikes; if it flips side (e.g., long -> short), use execution price
+                // so the new short correctly locks 150% at the actual trade price.
+                uint256 basisPrice = price;
+                bool reducesExposure = (oldPosition > 0 && amount < 0) || (oldPosition < 0 && amount > 0);
+                bool flipsSide = (oldPosition > 0 && newNet < 0) || (oldPosition < 0 && newNet > 0);
+                if (reducesExposure && !flipsSide) {
+                    // Try to fetch current entry price to use as a stable basis on partial close
+                    try vault.getPositionSummary(user, marketId) returns (int256 /*size*/, uint256 entryPrice, uint256 /*marginLocked*/) {
+                        if (entryPrice > 0) {
+                            basisPrice = entryPrice;
+                        }
+                    } catch {}
+                }
                 // Use safe calculation from _calculateExecutionMargin
-                marginRequired = _calculateExecutionMargin(newNet, price);
+                marginRequired = _calculateExecutionMargin(newNet, basisPrice);
             }
         }
         
