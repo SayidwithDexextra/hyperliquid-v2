@@ -744,103 +744,12 @@ contract OrderBook {
             }
         }
         
-        // Get user's position and collateral information
-        try vault.getUnifiedMarginSummary(trader) returns (
-            uint256 totalCollateral,
-            uint256 marginUsed,
-            uint256 /*marginReserved*/,
-            uint256 /*availableMargin*/,
-            int256 /*realizedPnL*/,
-            int256 /*unrealizedPnL*/,
-            uint256 /*totalMarginCommitted*/,
-            bool /*isMarginHealthy*/
-        ) {
-            // ============ CRITICAL FIX: ENSURE VAULT LIQUIDATION PROCESSING ============
-            // Layer 1: Process the actual liquidation through the vault first
-            // This ensures the position is properly closed and ADL is triggered if needed
-            
-            // STEP 1: Process the liquidation through vault's liquidation mechanism
-            // This will handle position closure, margin confiscation, and trigger ADL if user's collateral is insufficient
-            bool vaultLiquidationSuccess = false;
-            
-            if (positionSize > 0) {
-                // Long position liquidation
-                // 🔧 CRITICAL FIX: Ensure mark price is synchronized before ADL
-                uint256 currentMarkPrice = _calculateMarkPrice();
-                vault.updateMarkPrice(marketId, currentMarkPrice);
-                
-                try vault.liquidateLong(trader, marketId, msg.sender, executionResult.worstExecutionPrice) {
-                    vaultLiquidationSuccess = true;
-                    emit LiquidationPositionProcessed(trader, positionSize, executionResult.averageExecutionPrice);
-                } catch (bytes memory /*reason*/) {
-                    emit LiquidationProcessingFailed(trader, "LIQ_LONG_FAIL");
-                }
-            } else {
-                // Short position liquidation  
-                // 🔧 CRITICAL FIX: Ensure mark price is synchronized before ADL
-                uint256 currentMarkPrice = _calculateMarkPrice();
-                vault.updateMarkPrice(marketId, currentMarkPrice);
-                
-                // 🔍 DEBUG: About to call vault.liquidateShort
-                emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort");
-                try vault.liquidateShort(trader, marketId, msg.sender, executionResult.worstExecutionPrice) {
-                    vaultLiquidationSuccess = true;
-                    emit LiquidationPositionProcessed(trader, positionSize, executionResult.averageExecutionPrice);
-                    emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort_SUCCESS");
-                } catch (bytes memory /*reason*/) {
-                    emit LiquidationProcessingFailed(trader, "LIQ_SHORT_FAIL");
-                    emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort_FAILED");
-                }
-            }
-            
-            // Get updated margin info after vault processing
-            if (vaultLiquidationSuccess) {
-                try vault.getPositionSummary(trader, marketId) returns (int256 /*newSize*/, uint256 /*newEntryPrice*/, uint256 newMarginLocked) {
-                    layer1LockedMargin = newMarginLocked; // This reflects what was actually confiscated
-                } catch {
-                    layer1LockedMargin = marginUsed; // Fallback to original estimate
-                }
-            } else {
-                // Vault liquidation failed - proceed with gap loss processing as fallback
-                layer1LockedMargin = marginUsed;
-            }
-            
-            // Layer 2: Disabled by policy — do not confiscate user's available collateral for gap loss
-            // Any remaining gapLoss must be socialized via ADL and not taken from free collateral
-            
-            // Layer 3: Socialize any remaining gap loss
-            if (gapLoss > 0) {
-                layer3SocializedLoss = gapLoss;
-                
-                emit LiquidationRequiresSocialization(
-                    trader,
-                    gapLoss,
-                    totalCollateral
-                );
-                
-                // Trigger socialized loss mechanism
-                try vault.socializeLoss(marketId, gapLoss, trader) {
-                    // Socialized loss applied successfully
-                } catch {
-                    // Socialized loss failed - system is in critical state
-                    // This should be extremely rare
-                }
-            }
-            
-        } catch {
-            // Failed to get user's margin summary - proceed with basic liquidation
-            // Gap loss will be entirely socialized
-            if (gapLoss > 0) {
-                layer3SocializedLoss = gapLoss;
-                emit LiquidationRequiresSocialization(trader, gapLoss, 0);
-                
-                try vault.socializeLoss(marketId, gapLoss, trader) {
-                    // Socialized loss applied
-                } catch {
-                    // Critical system failure
-                }
-            }
-        }
+        // Updated policy: Partial liquidation is already applied per fill via updatePositionWithLiquidation.
+        // Do not fully liquidate the remaining position here and do not socialize gap loss at the OB layer.
+        // Keep mark price synchronized for accurate margin/MMR checks.
+        uint256 syncedMark = _calculateMarkPrice();
+        vault.updateMarkPrice(marketId, syncedMark);
+        // Leave layer metrics as zero; per-fill confiscation and any socialization happen inside the vault per trade.
         
         // Emit comprehensive liquidation breakdown
         emit LiquidationLayerBreakdown(

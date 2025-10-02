@@ -208,7 +208,7 @@ function logEventBlock(title, icon, color, fields) {
 }
 
 // 📊 UTILITY FUNCTIONS - ENHANCED PRICE ACCURACY
-function formatPrice(price, decimals = 6, displayDecimals = 2) {
+function formatPrice(price, decimals = 6, displayDecimals = 4) {
   // Handle MaxUint256 case (used for empty order book)
   if (!price || price === 0n) return "0.00";
   if (price >= ethers.MaxUint256) return "∞";
@@ -1222,6 +1222,120 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         }
       );
 
+      // Fallback provider-level listeners for debug events (in case ABI lacks fragments)
+      try {
+        const provider = this.contracts.orderBook.runner.provider;
+        const obAddr = await this.contracts.orderBook.getAddress();
+        const obIface = new ethers.Interface([
+          "event DebugLiquidationContext(address indexed trader, bytes32 indexed marketId, uint256 markPrice, uint256 storedVaultTrigger, int256 positionSize, uint256 entryPrice, uint256 marginLocked)",
+        ]);
+        const obTopic = obIface.getEventTopic("DebugLiquidationContext");
+        provider.on({ address: obAddr, topics: [obTopic] }, (log) => {
+          try {
+            const parsed = obIface.parseLog(log);
+            const a = parsed.args;
+            this.handleDebugLiquidationContextEvent(
+              a.trader,
+              a.marketId,
+              a.markPrice,
+              a.storedVaultTrigger,
+              a.positionSize,
+              a.entryPrice,
+              a.marginLocked,
+              log
+            );
+          } catch (_) {}
+        });
+
+        if (this.contracts.vault) {
+          const vaultAddr = await this.contracts.vault.getAddress();
+          const vIface = new ethers.Interface([
+            "event DebugIsLiquidatable(address indexed user, bytes32 indexed marketId, int256 positionSize, uint256 markPrice, uint256 trigger, uint256 oneTick, uint256 notional6, int256 equity6, uint256 maintenance6, bool usedFallback, bool result)",
+          ]);
+          const vTopic = vIface.getEventTopic("DebugIsLiquidatable");
+          provider.on({ address: vaultAddr, topics: [vTopic] }, (log) => {
+            try {
+              const parsed = vIface.parseLog(log);
+              const a = parsed.args;
+              this.handleDebugIsLiquidatableEvent(
+                a.user,
+                a.marketId,
+                a.positionSize,
+                a.markPrice,
+                a.trigger,
+                a.oneTick,
+                a.notional6,
+                a.equity6,
+                a.maintenance6,
+                a.usedFallback,
+                a.result,
+                log
+              );
+            } catch (_) {}
+          });
+        }
+      } catch (_) {}
+
+      // Listen for detailed liquidation debug context from OrderBook
+      this.contracts.orderBook.on(
+        "DebugLiquidationContext",
+        (
+          trader,
+          marketId,
+          markPrice,
+          storedVaultTrigger,
+          positionSize,
+          entryPrice,
+          marginLocked,
+          event
+        ) => {
+          this.handleDebugLiquidationContextEvent(
+            trader,
+            marketId,
+            markPrice,
+            storedVaultTrigger,
+            positionSize,
+            entryPrice,
+            marginLocked,
+            event
+          );
+        }
+      );
+
+      // Listen for CoreVault detailed liquidatability checks
+      this.contracts.vault.on(
+        "DebugIsLiquidatable",
+        (
+          user,
+          marketId,
+          positionSize,
+          markPrice,
+          trigger,
+          oneTick,
+          notional6,
+          equity6,
+          maintenance6,
+          usedFallback,
+          result,
+          event
+        ) => {
+          this.handleDebugIsLiquidatableEvent(
+            user,
+            marketId,
+            positionSize,
+            markPrice,
+            trigger,
+            oneTick,
+            notional6,
+            equity6,
+            maintenance6,
+            usedFallback,
+            result,
+            event
+          );
+        }
+      );
+
       this.contracts.orderBook.on(
         "LiquidationPositionRetrieved",
         (trader, size, marginLocked, unrealizedPnL, event) => {
@@ -1257,6 +1371,14 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
             reason,
             event
           );
+        }
+      );
+
+      // Listen for config updates to confirm debug toggles
+      this.contracts.orderBook.on(
+        "LiquidationConfigUpdated",
+        (scanOnTrade, debug, event) => {
+          this.handleLiquidationConfigUpdatedEvent(scanOnTrade, debug, event);
         }
       );
 
@@ -2814,6 +2936,17 @@ ${colors.brightRed}└───────────────────�
     );
   }
 
+  handleLiquidationConfigUpdatedEvent(scanOnTrade, debug, event) {
+    const ts = new Date().toLocaleTimeString();
+    console.log(
+      `${colors.dim}[${ts}]${colors.reset} ${colors.brightYellow}⚙️ LIQ CONFIG${
+        colors.reset
+      } | scanOnTrade=${scanOnTrade ? "ON" : "OFF"} | debug=${
+        debug ? "ON" : "OFF"
+      }`
+    );
+  }
+
   handleLiquidationSocializedLossAttemptEvent(trader, isLong, method, event) {
     const timestamp = new Date().toLocaleTimeString();
     console.log(
@@ -3302,6 +3435,18 @@ ${
 
     console.log(notification);
     process.stdout.write("\x07"); // Alert sound
+    try {
+      this.lastLiquidationSummary = this.lastLiquidationSummary || {};
+      this.lastLiquidationSummary.confiscations =
+        this.lastLiquidationSummary.confiscations || [];
+      this.lastLiquidationSummary.confiscations.push({
+        user,
+        seizedUSDC: formatWithAutoDecimalDetection(marginAmount, 6, 2),
+        tradingLossClosedUSDC: formatWithAutoDecimalDetection(totalLoss, 6, 2),
+        penaltyClosedUSDC: formatWithAutoDecimalDetection(penalty, 6, 4),
+        tx: event && event.transactionHash ? event.transactionHash : "",
+      });
+    } catch {}
   }
 
   handleGapLossDetectedEvent(
@@ -3504,6 +3649,18 @@ ${colors.brightRed}└───────────────────�
           : "INCREASED"
       }`
     );
+    try {
+      const newSz = Number(formatWithAutoDecimalDetection(newSize, 18));
+      this.lastLiquidationSummary = this.lastLiquidationSummary || {};
+      this.lastLiquidationSummary.lastPosition = {
+        user,
+        marketId,
+        oldSize: formatWithAutoDecimalDetection(Math.abs(oldSize), 18, 4),
+        newSize: Math.abs(newSz).toFixed(4),
+        entryPrice: formatWithAutoDecimalDetection(entryPrice, 6, 4),
+        marginLocked: formatWithAutoDecimalDetection(marginLocked, 6, 2),
+      };
+    } catch {}
     console.log(
       `${colors.brightCyan}   📊 Size Change %:${colors.reset} ${
         oldSize !== 0
@@ -3680,6 +3837,14 @@ ${
           colors.reset
         } ${event.effectiveGasPrice.toString()}`
       );
+    try {
+      this.lastLiquidationSummary = this.lastLiquidationSummary || {};
+      this.lastLiquidationSummary.socialized = formatWithAutoDecimalDetection(
+        lossAmount,
+        6,
+        2
+      );
+    } catch {}
 
     const notification = `
 ${colors.bgMagenta}${colors.white}${
@@ -5468,6 +5633,108 @@ ${colors.brightRed}└───────────────────�
         return `LIQ_DEBUG ${mode}`;
       }
 
+      case "LIQ_SHOW": {
+        const [scanOnTrade, debug] = await this.withRpcRetry(async () => {
+          const scan = await this.contracts.orderBook.liquidationScanOnTrade();
+          const dbg = await this.contracts.orderBook.liquidationDebug();
+          return [scan, dbg];
+        });
+        console.log(
+          colorText(
+            `⚙️ LIQ SETTINGS | scanOnTrade=${
+              scanOnTrade ? "ON" : "OFF"
+            } | debug=${debug ? "ON" : "OFF"}`,
+            colors.cyan
+          )
+        );
+        return "LIQ_SHOW";
+      }
+
+      case "LIQ_SNAP": {
+        // Snapshot liquidation math directly via view calls (no events required)
+        const ts = new Date().toLocaleTimeString();
+        const marketId = await this.withRpcRetry(() =>
+          this.contracts.orderBook.marketId()
+        );
+        const users = await this.withRpcRetry(() =>
+          this.contracts.vault.getUsersWithPositionsInMarket(marketId)
+        );
+        const mark = await this.withRpcRetry(() =>
+          this.contracts.orderBook.calculateMarkPrice()
+        );
+        console.log(
+          `${colors.dim}[${ts}]${colors.reset} ${colors.cyan}🔎 LIQ SNAP${
+            colors.reset
+          } | Users=${users.length} | Mark $${formatPrice(mark, 6, 4)}`
+        );
+        for (const u of users) {
+          try {
+            const [size, entryPrice, marginLocked] = await this.withRpcRetry(
+              () => this.contracts.vault.getPositionSummary(u, marketId)
+            );
+            const [liquidationPrice, hasPosition] = await this.withRpcRetry(
+              () => this.contracts.vault.getLiquidationPrice(u, marketId)
+            );
+            const [equity6, notional6 /*, hasPos2*/] = await this.withRpcRetry(
+              () => this.contracts.vault.getPositionEquity(u, marketId)
+            );
+            const [mmrBps /*, fillRatio, hasPos3*/] = await this.withRpcRetry(
+              () =>
+                this.contracts.vault.getEffectiveMaintenanceMarginBps(
+                  u,
+                  marketId
+                )
+            );
+            const maintenance6 = (BigInt(notional6) * BigInt(mmrBps)) / 10000n;
+            const side =
+              BigInt(size) >= 0n
+                ? `${colors.green}LONG${colors.reset}`
+                : `${colors.red}SHORT${colors.reset}`;
+            const tShort = u.slice(0, 8) + "..." + u.slice(-6);
+            console.log(
+              `${colors.dim}[${ts}]${colors.reset} ${colors.brightBlue}🧪 SNAP${
+                colors.reset
+              } | ${tShort} | ${side} ${formatAmount(
+                size,
+                18,
+                4
+              )} ALU @ $${formatPrice(entryPrice, 6, 4)} | ` +
+                `Liq $${formatPrice(liquidationPrice, 6, 4)} | Eq $${formatUSDC(
+                  equity6
+                )} vs MMR $${formatUSDC(maintenance6)} | Locked $${formatUSDC(
+                  marginLocked
+                )}`
+            );
+          } catch (e) {
+            console.log(
+              colorText(
+                `⚠️ SNAP error for ${u}: ${e?.message || e}`,
+                colors.yellow
+              )
+            );
+          }
+        }
+        return "LIQ_SNAP";
+      }
+
+      case "LIQ_VERIFY": {
+        const role = ethers.keccak256(ethers.toUtf8Bytes("ORDERBOOK_ROLE"));
+        const [obAddr, hasRole] = await this.withRpcRetry(async () => {
+          const addr = await this.contracts.orderBook.getAddress();
+          const ok = await this.contracts.vault.hasRole(role, addr);
+          return [addr, ok];
+        });
+        console.log(
+          colorText(
+            `🔎 ORDERBOOK_ROLE → OB=${obAddr} hasRole=${
+              hasRole ? "true" : "false"
+            }`,
+            colors.cyan
+          )
+        );
+        return "LIQ_VERIFY";
+      }
+
       default:
         throw new Error(`Unknown op: ${op}`);
     }
@@ -6794,6 +7061,76 @@ ${colors.brightRed}└───────────────────�
     }
   }
 
+  async viewLiquidationBreakdown() {
+    console.clear();
+    console.log(gradient("Partial Liquidation Breakdown"));
+    console.log(colorText("─".repeat(60), colors.dim));
+
+    const s = this.lastLiquidationSummary || {};
+    if (!s.confiscations || s.confiscations.length === 0) {
+      console.log(
+        colorText(
+          "No liquidation activity recorded in this session.",
+          colors.yellow
+        )
+      );
+      await this.pause(1500);
+      return;
+    }
+
+    const lastConf = s.confiscations[s.confiscations.length - 1];
+    console.log(colorText("Latest Confiscation", colors.brightCyan));
+    console.log(colorText("─".repeat(40), colors.dim));
+    console.log(colorText(`User: ${lastConf.user}`, colors.white));
+    console.log(colorText(`Seized: ${lastConf.seizedUSDC} USDC`, colors.white));
+    console.log(
+      colorText(
+        `Trading Loss (closed): ${lastConf.tradingLossClosedUSDC} USDC`,
+        colors.white
+      )
+    );
+    console.log(
+      colorText(
+        `Penalty (closed): ${lastConf.penaltyClosedUSDC} USDC`,
+        colors.white
+      )
+    );
+
+    if (s.lastPosition) {
+      const marketName = this.getMarketDisplayName(s.lastPosition.marketId);
+      console.log(colorText("\nPosition State After", colors.brightCyan));
+      console.log(colorText("─".repeat(40), colors.dim));
+      console.log(colorText(`Market: ${marketName}`, colors.white));
+      console.log(
+        colorText(`Remaining Size: ${s.lastPosition.newSize} ALU`, colors.white)
+      );
+      console.log(
+        colorText(`Entry Price: $${s.lastPosition.entryPrice}`, colors.white)
+      );
+      console.log(
+        colorText(
+          `MarginLocked: ${s.lastPosition.marginLocked} USDC`,
+          colors.white
+        )
+      );
+    }
+
+    if (s.socialized) {
+      console.log(colorText("\nSocialization", colors.brightCyan));
+      console.log(colorText("─".repeat(40), colors.dim));
+      console.log(
+        colorText(`Haircut Applied: ${s.socialized} USDC`, colors.red)
+      );
+    } else {
+      console.log(
+        colorText("\nSocialization: none on last event", colors.green)
+      );
+    }
+
+    console.log(colorText("\nPress any key to return...", colors.dim));
+    await this.askQuestion("");
+  }
+
   async displayHeader() {
     const userType =
       this.currentUserIndex === 0
@@ -7723,7 +8060,7 @@ ${colors.brightRed}└───────────────────�
         console.log(
           colorText("┌─────────────────────────────────────────┐", colors.cyan)
         );
-
+        let underLiqList = [];
         for (const position of positions) {
           try {
             const marketIdStr = (
@@ -7743,18 +8080,32 @@ ${colors.brightRed}└───────────────────�
               false // Don't show warnings in quick summary
             );
 
-            // Fetch liquidation price from vault (equity-aware, updates on top-up)
+            // Fetch liquidation state and liquidation price
             let liqStr = "N/A";
             let mmrBreakdown = "N/A";
             try {
+              const under =
+                await this.contracts.vault.isUnderLiquidationPosition(
+                  this.currentUser.address,
+                  position.marketId
+                );
               const [liqPrice, hasPos] =
                 await this.contracts.vault.getLiquidationPrice(
                   this.currentUser.address,
                   position.marketId
                 );
               if (hasPos) {
-                const liqBn = BigInt(liqPrice.toString());
-                liqStr = liqBn > 0n ? formatPrice(liqBn) : "0.0000";
+                if (under) {
+                  liqStr = "UNDER LIQ";
+                  underLiqList.push({
+                    marketId: position.marketId,
+                    size: absSize,
+                    side,
+                  });
+                } else {
+                  const liqBn = BigInt(liqPrice.toString());
+                  liqStr = liqBn > 0n ? formatPrice(liqBn) : "0.0000";
+                }
               }
             } catch (_) {}
 
@@ -7810,12 +8161,16 @@ ${colors.brightRed}└───────────────────�
               }
             } catch (_) {}
 
+            const liqLabel =
+              liqStr === "UNDER LIQ"
+                ? colorText("Under Liquidation", colors.brightRed)
+                : `$${liqStr}`;
             console.log(
               colorText(
                 `│ ${marketIdStr}: ${colorText(
                   side,
                   sideColor
-                )} ${size} ALU @ $${entryPrice}  Liq: $${liqStr} │`,
+                )} ${size} ALU @ $${entryPrice}  Liq: ${liqLabel} │`,
                 colors.white
               )
             );
@@ -7839,6 +8194,31 @@ ${colors.brightRed}└───────────────────�
         console.log(
           colorText("└─────────────────────────────────────────┘", colors.cyan)
         );
+
+        // Additional section: Under Liquidation positions
+        if (underLiqList.length > 0) {
+          console.log(
+            colorText("\n⛔ UNDER LIQUIDATION POSITIONS", colors.brightRed)
+          );
+          console.log(
+            colorText("┌─────────────────────────────────────────┐", colors.red)
+          );
+          for (const ul of underLiqList) {
+            const m = await safeDecodeMarketId(ul.marketId, this.contracts);
+            const sizeStr = formatAmount(ul.size, 18, 3);
+            console.log(
+              colorText(
+                `│ ${m.substring(0, 8)}: ${
+                  ul.side
+                } ${sizeStr} ALU                              │`,
+                colors.white
+              )
+            );
+          }
+          console.log(
+            colorText("└─────────────────────────────────────────┘", colors.red)
+          );
+        }
       }
     } catch (error) {
       // Silently ignore if can't fetch positions
@@ -7918,6 +8298,12 @@ ${colors.brightRed}└───────────────────�
       colorText("│ 0. 🚪 Exit                             │", colors.dim)
     );
     console.log(
+      colorText(
+        "│ L. 🔍 View Liquidation Breakdown        │",
+        colors.brightYellow
+      )
+    );
+    console.log(
       colorText("└─────────────────────────────────────────┘", colors.cyan)
     );
     console.log(
@@ -7977,6 +8363,9 @@ ${colors.brightRed}└───────────────────�
         break;
       case "16":
         await this.reducePositionMarginFlow();
+        break;
+      case "l":
+        await this.viewLiquidationBreakdown();
         break;
       case "r":
         // Refresh - just continue loop
