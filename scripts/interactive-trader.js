@@ -105,14 +105,8 @@ function formatWithAutoDecimalDetection(
       }
     }
 
-    // For smaller values, use expected decimals or treat as already formatted
-    if (expectedDecimals === 6 && absValue < 10n ** 6n) {
-      // Value might already be in USDC units (no decimals needed)
-      const directValue = Number(valueBigInt);
-      if (directValue >= 0.01 && directValue <= 1000000) {
-        return directValue.toFixed(displayDecimals);
-      }
-    }
+    // For smaller values, avoid assuming "already formatted" to prevent mis-scaling
+    // Always fall back to expectedDecimals formatting below
 
     // Default: use the expected decimals
     return parseFloat(
@@ -606,6 +600,71 @@ class InteractiveTrader {
         https.globalAgent.keepAlive = true;
         https.globalAgent.maxSockets = 128;
       } catch (__) {}
+    }
+  }
+
+  // Compute portfolio value for any address: collateral + realizedPnL + unrealizedPnL - socialized loss
+  async computePortfolioValueFor(address) {
+    try {
+      const [
+        unifiedTotalCollateral,
+        unifiedMarginUsedInPositions,
+        unifiedMarginReservedForOrders,
+        unifiedAvailableMargin,
+        unifiedRealizedPnL,
+        unifiedUnrealizedPnL,
+        unifiedTotalMarginCommitted,
+        unifiedIsMarginHealthy,
+      ] = await this.contracts.vault.getUnifiedMarginSummary(address);
+
+      // Strict unit handling to avoid mis-scaling: collateral=6d, realizedPnL=18d
+      const totalCollateralNum = parseFloat(
+        ethers.formatUnits(BigInt(unifiedTotalCollateral.toString()), 6)
+      );
+
+      const realizedPnLNum = parseFloat(
+        ethers.formatUnits(BigInt((unifiedRealizedPnL || 0).toString()), 18)
+      );
+
+      // Real-time unrealized P&L
+      const unrealizedPnLNum = await getTotalRealTimeUnrealizedPnL(
+        this.contracts,
+        address
+      );
+
+      // Avoid double-counting realized losses when user has no positions
+      let adjustedRealized = realizedPnLNum;
+      try {
+        const currentPositions = await this.contracts.vault.getUserPositions(
+          address
+        );
+        const hasActive = currentPositions.length > 0;
+        if (!hasActive && realizedPnLNum < 0) {
+          adjustedRealized = 0;
+        }
+      } catch (_) {}
+
+      // Subtract socialized loss
+      let haircutNum = 0;
+      try {
+        const haircut6 = await this.contracts.vault.userSocializedLoss(address);
+        haircutNum = parseFloat(formatUSDC(haircut6));
+      } catch (_) {}
+
+      const portfolioValue =
+        totalCollateralNum + adjustedRealized + unrealizedPnLNum - haircutNum;
+
+      return {
+        portfolioValue,
+        components: {
+          totalCollateral: totalCollateralNum,
+          realizedPnL: adjustedRealized,
+          unrealizedPnL: unrealizedPnLNum,
+          socializedLoss: haircutNum,
+        },
+      };
+    } catch (e) {
+      return { portfolioValue: 0, components: null };
     }
   }
 
@@ -4817,7 +4876,8 @@ ${colors.brightRed}└───────────────────�
     for (let i = 0; i < this.users.length; i++) {
       const user = this.users[i];
       const balance = await this.contracts.mockUSDC.balanceOf(user.address);
-      const collateral = await this.contracts.vault.userCollateral(
+      // Compute portfolio value instead of showing raw collateral
+      const { portfolioValue } = await this.computePortfolioValueFor(
         user.address
       );
 
@@ -4828,7 +4888,10 @@ ${colors.brightRed}└───────────────────�
         colorText(`   USDC Balance: ${formatUSDC(balance)} USDC`, colors.green)
       );
       console.log(
-        colorText(`   Collateral: ${formatUSDC(collateral)} USDC`, colors.blue)
+        colorText(
+          `   Portfolio Value: ${portfolioValue.toFixed(2)} USDC`,
+          colors.blue
+        )
       );
     }
 

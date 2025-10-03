@@ -58,6 +58,11 @@ async function main() {
   console.log("📋 Deployer:", deployer.address);
   console.log(`👥 Available signers: ${signers.length}/${NUM_USERS} users`);
 
+  // Treasury address to receive protocol fees (and to act as OrderBook admin)
+  // Defaults to deployer unless TREASURY_ADDRESS env var is provided
+  const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS || deployer.address;
+  console.log("🏦 Treasury:", TREASURY_ADDRESS);
+
   // Check deployer balance for gas
   const deployerBalance = await ethers.provider.getBalance(deployer.address);
   console.log(
@@ -142,6 +147,22 @@ async function main() {
       "     ✅ FuturesMarketFactory deployed at:",
       contracts.FUTURES_MARKET_FACTORY
     );
+
+    // Set conservative defaults: 100% margin, 0 bps trading fee (no fees)
+    try {
+      console.log(
+        "  🔧 Setting factory defaults: margin=10000 bps, fee=0 bps..."
+      );
+      await factory.updateDefaultParameters(10000, 0);
+      console.log(
+        "     ✅ Factory default parameters updated (100% margin, 0% fee)"
+      );
+    } catch (e) {
+      console.log(
+        "     ⚠️  Could not update factory default parameters:",
+        e?.message || e
+      );
+    }
 
     // Deploy TradingRouter
     console.log("  6️⃣ Deploying TradingRouter...");
@@ -263,6 +284,28 @@ async function main() {
       throw new Error("Failed to get OrderBook address from event");
     }
 
+    // Ensure the newly created OrderBook has 0 bps fee and the treasury as fee recipient
+    try {
+      const obForParams = await ethers.getContractAt(
+        "OrderBook",
+        contracts.ALUMINUM_ORDERBOOK
+      );
+      console.log(
+        "  🔧 Configuring OrderBook fees & recipient (0 bps, treasury)..."
+      );
+      await obForParams
+        .connect(deployer)
+        .updateTradingParameters(10000, 0, TREASURY_ADDRESS);
+      console.log(
+        "     ✅ OrderBook trading parameters set (100% margin, 0% fee, treasury recipient)"
+      );
+    } catch (e) {
+      console.log(
+        "     ⚠️  Could not set OrderBook trading parameters (margin/fee/recipient):",
+        e?.message || e
+      );
+    }
+
     // Set initial mark price for the market
     console.log("  📊 Setting initial mark price...");
     // SETTLEMENT_ROLE already declared above, grant it to deployer for mark price update
@@ -328,6 +371,20 @@ async function main() {
     console.log(
       "     ℹ️  Short positions: 150% margin (handled by trading logic)"
     );
+
+    // Update factory fee recipient to treasury for subsequent markets
+    try {
+      console.log(
+        "  🔧 Updating factory feeRecipient to treasury for future markets..."
+      );
+      await factory.updateFeeRecipient(TREASURY_ADDRESS);
+      console.log("     ✅ Factory feeRecipient set to:", TREASURY_ADDRESS);
+    } catch (e) {
+      console.log(
+        "     ⚠️  Could not update factory feeRecipient:",
+        e?.message || e
+      );
+    }
 
     // No VaultRouter – liquidation is integrated
 
@@ -985,7 +1042,16 @@ async function main() {
     console.log("  • Symbol: ALU-USD");
     console.log("  • Start Price: $2,500");
     console.log("  • Margin Requirement: 100% (1:1 ratio)");
-    console.log("  • Trading Fee: 0.1%");
+    try {
+      const defaults = await factory.getDefaultParameters();
+      const defaultFeeBps = Array.isArray(defaults)
+        ? defaults[1]
+        : defaults.fee;
+      const feePct = Number(defaultFeeBps) / 100;
+      console.log(`  • Trading Fee (default): ${feePct}%`);
+    } catch {
+      console.log("  • Trading Fee (default): 0% (assumed)");
+    }
     console.log("  • All authorizations configured ✅");
 
     console.log("\n🎯 READY TO TRADE!");

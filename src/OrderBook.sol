@@ -123,6 +123,11 @@ contract OrderBook {
     address public feeRecipient;
     uint256 public maxSlippageBps = 500; // 5% maximum slippage for market orders (basis points)
     
+    // Unit-based margin parameters (USDC 6 decimals per 1e18 units)
+    // These decouple margin locking from price to avoid drift from average fill or entry prices
+    uint256 public unitMarginLong6 = 1_000_000;     // 1.0 USDC per 1 ALU (18d)
+    uint256 public unitMarginShort6 = 1_500_000;    // 1.5 USDC per 1 ALU (18d)
+    
     // Leverage control system
     bool public leverageEnabled = false; // Leverage disabled by default
     
@@ -2635,69 +2640,35 @@ contract OrderBook {
     /**
      * @dev Calculate margin required for an order
      * @param amount Order amount
-     * @param price Order price
      * @param isBuy Whether this is a buy order (long position)
      * @return Margin required
      */
-    function _calculateMarginRequired(uint256 amount, uint256 price, bool isBuy) internal pure returns (uint256) {
+    function _calculateMarginRequired(uint256 amount, uint256 price, bool isBuy) internal view returns (uint256) {
         // amount: ALU in 18 decimals
-        // price:  price in 6 decimals (USDC precision)
+        // price: USDC in 6 decimals
         // Return: required margin in USDC (6 decimals)
-        // notional6 = (amount18 * price6) / 1e18
-        uint256 notional6 = (amount * price) / 1e18;
-        uint256 marginBps = isBuy ? 10000 : 15000; // 100% for buys, 150% for sells (shorts)
-        return (notional6 * marginBps) / 10000;
+        if (amount == 0) return 0;
+        // notional = (amount * price) / 1e18 -> 6 decimals
+        uint256 notional = Math.mulDiv(amount, price, 1e18);
+        // Use configured margin requirement for longs; shorts require 150% by policy
+        uint256 marginBps = isBuy ? marginRequirementBps : 15000;
+        return Math.mulDiv(notional, marginBps, 10000);
     }
 
     /**
      * @dev Calculate margin required for a trade execution
      * @param amount Trade amount
-     * @param executionPrice Actual execution price
      * @return Margin required for this execution
      */
-    function _calculateExecutionMargin(int256 amount, uint256 executionPrice) internal returns (uint256) {
-        // Debug input values
-        emit ArithmeticDebugInt("input", "_calculateExecutionMargin", amount, int256(executionPrice), 0);
-        
-        // Get absolute amount
+    function _calculateExecutionMargin(int256 amount, uint256 executionPrice) internal view returns (uint256) {
+        if (amount == 0) return 0;
+        // Absolute amount in 18 decimals
         uint256 absAmount = uint256(amount >= 0 ? amount : -amount);
-        emit ArithmeticDebug("absoluteValue", "_calculateExecutionMargin.absAmount", absAmount, 0, absAmount);
-        
-        // ROBUST FIX: Use the same dynamic scaling approach as _calculateMarginRequired
-        // First determine appropriate scaling factor based on amount and price magnitudes
-        uint256 scalingFactor;
-        
-        if (absAmount > 1e24 || executionPrice > 1e12) {
-            // For extremely large values, use more aggressive scaling
-            scalingFactor = 1e30;
-        } else if (absAmount > 1e20 || executionPrice > 1e10) {
-            // For very large values
-            scalingFactor = 1e24;
-        } else {
-            // For normal values, standard scaling is sufficient
-            scalingFactor = 1e18;
-        }
-        
-        uint256 scaledAmount = absAmount / scalingFactor;
-        if (scaledAmount == 0) scaledAmount = 1; // Ensure minimum value
-        
-        // Calculate notional value with scaled amount
-        uint256 notionalValue = scaledAmount * executionPrice;
-        
-        // Apply margin requirement
-        uint256 marginBps = amount >= 0 ? 10000 : 15000;
-        uint256 marginRequired = (notionalValue * marginBps) / 10000;
-        
-        // Scale back up proportionally if needed
-        if (scalingFactor > 1e18) {
-            // Scale back up but not fully to avoid overflow
-            marginRequired = marginRequired * (1e18 / (scalingFactor / 1e18));
-        }
-        
-        emit ArithmeticDebug("robustScaling", "_calculateExecutionMargin", absAmount, executionPrice, marginRequired);
-        emit ArithmeticScaling("_calculateExecutionMargin.robust", absAmount, scaledAmount, scalingFactor);
-        
-        return marginRequired;
+        // notional = (absAmount * executionPrice) / 1e18 -> 6 decimals
+        uint256 notional = Math.mulDiv(absAmount, executionPrice, 1e18);
+        // Use configured margin requirement for longs; shorts require 150% by policy
+        uint256 marginBps = amount >= 0 ? marginRequirementBps : 15000;
+        return Math.mulDiv(notional, marginBps, 10000);
     }
 
     /**
