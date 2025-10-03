@@ -7515,6 +7515,46 @@ ${colors.brightRed}└───────────────────�
           colors.white
         )
       );
+      // Aggregate liquidation penalties for current user (lifetime + last)
+      let totalPenalty6 = 0n;
+      let lastPenalty6 = 0n;
+      try {
+        const marginFilter = this.contracts.vault.filters.MarginConfiscated(
+          this.currentUser.address
+        );
+        const penaltyEvents = await this.contracts.vault.queryFilter(
+          marginFilter,
+          0
+        );
+        for (const ev of penaltyEvents) {
+          try {
+            const p = BigInt(ev.args.penalty.toString());
+            totalPenalty6 += p;
+            lastPenalty6 = p;
+          } catch (_) {}
+        }
+      } catch (_) {}
+      const totalPenaltyDisplay = formatUSDC(totalPenalty6);
+      const lastPenaltyDisplay = formatUSDC(lastPenalty6);
+
+      console.log(
+        colorText(
+          `│ Penalties (Lifetime): ${colorText(
+            totalPenaltyDisplay.padStart(12),
+            colors.red
+          )} USDC              │`,
+          colors.white
+        )
+      );
+      console.log(
+        colorText(
+          `│ Last Penalty:         ${colorText(
+            lastPenaltyDisplay.padStart(12),
+            colors.red
+          )} USDC              │`,
+          colors.white
+        )
+      );
 
       // Portfolio Value Section
       console.log(

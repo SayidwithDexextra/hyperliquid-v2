@@ -79,42 +79,6 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     
     // Market management
     mapping(bytes32 => address) public marketToOrderBook;
-    // Track positions that are currently under liquidation control
-    mapping(address => mapping(bytes32 => bool)) public isUnderLiquidationPosition;
-
-    // Anchor price and timestamp captured when a position first enters liquidation control.
-    // Used to clamp socialized loss so profitable users are not overcharged due to delays in liquidity.
-    mapping(address => mapping(bytes32 => uint256)) public liquidationAnchorPrice;
-    mapping(address => mapping(bytes32 => uint256)) public liquidationAnchorTimestamp;
-
-    /**
-     * @dev Set or clear under-liquidation control flag for a user's position
-     */
-    function setUnderLiquidation(
-        address user,
-        bytes32 marketId,
-        bool state
-    ) external onlyRole(ORDERBOOK_ROLE) {
-        bool prev = isUnderLiquidationPosition[user][marketId];
-        isUnderLiquidationPosition[user][marketId] = state;
-        if (state) {
-            // Capture anchor once when entering liquidation control
-            if (!prev && liquidationAnchorPrice[user][marketId] == 0) {
-                uint256 anchor = getMarkPrice(marketId);
-                if (anchor == 0) {
-                    anchor = marketMarkPrices[marketId];
-                }
-                liquidationAnchorPrice[user][marketId] = anchor;
-                liquidationAnchorTimestamp[user][marketId] = block.timestamp;
-            }
-        } else {
-            // Clearing liquidation control: clear anchor and recompute displayed liq price
-            liquidationAnchorPrice[user][marketId] = 0;
-            liquidationAnchorTimestamp[user][marketId] = 0;
-            // Optionally restore liquidation price on clear
-            _recomputeAndStoreLiquidationPrice(user, marketId);
-        }
-    }
     mapping(address => bool) public registeredOrderBooks;
     mapping(address => bytes32[]) public orderBookToMarkets;
     address[] public allOrderBooks;
@@ -167,20 +131,6 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     event HaircutApplied(address indexed user, bytes32 indexed marketId, uint256 debitAmount, uint256 collateralAfter);
     event BadDebtRecorded(bytes32 indexed marketId, uint256 amount, address indexed liquidatedUser);
     event BadDebtOffset(bytes32 indexed marketId, uint256 amount, uint256 remainingBadDebt);
-    // Debug: Detailed liquidation eligibility check
-    event DebugIsLiquidatable(
-        address indexed user,
-        bytes32 indexed marketId,
-        int256 positionSize,
-        uint256 markPrice,
-        uint256 trigger,
-        uint256 oneTick,
-        uint256 notional6,
-        int256 equity6,
-        uint256 maintenance6,
-        bool usedFallback,
-        bool result
-    );
     
     // ============ Administrative Position Closure Events ============
     event SocializationStarted(bytes32 indexed marketId, uint256 totalLossAmount, address indexed liquidatedUser, uint256 timestamp);
@@ -246,32 +196,25 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
 
     function withdrawCollateral(uint256 amount) external nonReentrant whenNotPaused {
         require(amount > 0, "!amount");
+        require(userCollateral[msg.sender] >= amount, "!balance");
         
-        // Use unified available collateral including realized PnL
-        uint256 available = getAvailableCollateral(msg.sender);
+        // Check available collateral through library
+        VaultAnalytics.Position[] memory positions = new VaultAnalytics.Position[](userPositions[msg.sender].length);
+        for (uint256 i = 0; i < userPositions[msg.sender].length; i++) {
+            positions[i] = VaultAnalytics.Position({
+                marketId: userPositions[msg.sender][i].marketId,
+                size: userPositions[msg.sender][i].size,
+                entryPrice: userPositions[msg.sender][i].entryPrice,
+                marginLocked: userPositions[msg.sender][i].marginLocked
+            });
+        }
+        uint256 available = VaultAnalytics.getAvailableCollateral(userCollateral[msg.sender], positions);
         require(available >= amount, "!available");
-
-        // Determine how much to withdraw from realized PnL (6 decimals) vs deposited collateral
-        int256 realizedPnL18 = userRealizedPnL[msg.sender];
-        uint256 realizedPnL6 = realizedPnL18 > 0 ? uint256(realizedPnL18 / int256(DECIMAL_SCALE)) : 0;
-        uint256 fromPnL = amount <= realizedPnL6 ? amount : realizedPnL6;
-        uint256 fromDeposit = amount - fromPnL;
-
-        // Apply withdrawal against realized PnL first (reduce realized PnL balance)
-        if (fromPnL > 0) {
-            // Convert back to 18 decimals to adjust realized PnL mapping
-            userRealizedPnL[msg.sender] -= int256(fromPnL * DECIMAL_SCALE);
-        }
-
-        // Withdraw the remainder from deposited collateral
-        if (fromDeposit > 0) {
-            require(userCollateral[msg.sender] >= fromDeposit, "!balance");
-            userCollateral[msg.sender] -= fromDeposit;
-            totalCollateralDeposited -= fromDeposit;
-        }
-
-        // Transfer total amount out
+        
+        userCollateral[msg.sender] -= amount;
+        totalCollateralDeposited -= amount;
         collateralToken.safeTransfer(msg.sender, amount);
+        
         emit CollateralWithdrawn(msg.sender, amount);
     }
 
@@ -364,185 +307,158 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         PositionManager.Position[] storage positions = userPositions[user];
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size != 0) {
-                // Compute partial-close liquidation on the actually closed quantity only
+                // Ensure this is actually closing the position (or a significant portion)
                 int256 oldSize = positions[i].size;
-                // Only handle liquidation when the delta reduces exposure (opposite direction)
-                bool closesExposure = (oldSize > 0 && sizeDelta < 0) || (oldSize < 0 && sizeDelta > 0);
-                if (!closesExposure) {
-                    // Fallback to normal netting if this is not a closing delta
-                    // Compute proper required margin for the candidate new size
-                    int256 candidateNewSize = oldSize + sizeDelta;
-                    uint256 basisForMargin = executionPrice;
-                    bool sameDirection = (oldSize > 0 && sizeDelta > 0) || (oldSize < 0 && sizeDelta < 0);
-                    if (!sameDirection && oldSize != 0) {
-                        // Opposite direction without closing: use entry price as stable basis
-                        basisForMargin = positions[i].entryPrice;
-                    }
-                    uint256 requiredForCandidate = _calculateExecutionMargin(candidateNewSize, basisForMargin);
-
-                    PositionManager.NettingResult memory nr = PositionManager.executePositionNetting(
+                int256 newSize = oldSize + sizeDelta;
+                
+                // Only proceed if this significantly reduces the position (at least 50% closure)
+                uint256 closurePercentage = uint256(sizeDelta > 0 ? sizeDelta : -sizeDelta) * 100 / uint256(oldSize > 0 ? oldSize : -oldSize);
+                if (closurePercentage < 50) {
+                    // Not a significant liquidation, treat as normal trade
+                    PositionManager.NettingResult memory partialResult = PositionManager.executePositionNetting(
                         positions,
                         user,
                         marketId,
                         sizeDelta,
                         executionPrice,
-                        requiredForCandidate
+                        0 // No additional margin required for liquidation
                     );
-                    if (nr.marginToLock > 0) totalMarginLocked += nr.marginToLock;
-                    if (nr.marginToRelease > 0) totalMarginLocked -= nr.marginToRelease;
-                    if (nr.realizedPnL != 0) userRealizedPnL[user] += nr.realizedPnL;
+                    
+                    // Handle margin changes normally
+                    if (partialResult.marginToLock > 0) {
+                        totalMarginLocked += partialResult.marginToLock;
+                    }
+                    if (partialResult.marginToRelease > 0) {
+                        totalMarginLocked -= partialResult.marginToRelease;
+                    }
+                    
+                    if (partialResult.realizedPnL != 0) {
+                        userRealizedPnL[user] += partialResult.realizedPnL;
+                    }
                     return;
                 }
-
-                uint256 absOld = uint256(oldSize > 0 ? oldSize : -oldSize);
-                uint256 absDelta = uint256(sizeDelta > 0 ? sizeDelta : -sizeDelta);
-                uint256 closeAbs = absDelta > absOld ? absOld : absDelta;
-
-                // Clamp new size to not flip
-                int256 newSize = oldSize + sizeDelta;
-                if ((oldSize > 0 && newSize < 0) || (oldSize < 0 && newSize > 0)) {
-                    newSize = 0;
-                }
-
+                
+                // This is a significant liquidation - confiscate margin
+                uint256 marginToConfiscate = positions[i].marginLocked;
                 uint256 entryPrice = positions[i].entryPrice;
-
-                // Compute trading loss ONLY on the closed portion (USDC 6 decimals)
-                uint256 tradingLossClosed = 0;
-                if (oldSize > 0 && executionPrice < entryPrice) {
-                    uint256 lossPerUnit = entryPrice - executionPrice;
-                    tradingLossClosed = (lossPerUnit * closeAbs) / (DECIMAL_SCALE * TICK_PRECISION);
-                } else if (oldSize < 0 && executionPrice > entryPrice) {
-                    uint256 lossPerUnit = executionPrice - entryPrice;
-                    tradingLossClosed = (lossPerUnit * closeAbs) / (DECIMAL_SCALE * TICK_PRECISION);
+                
+                // Calculate trading loss for liquidation (USDC amount for collateral deduction)
+                // Note: This differs from standard P&L (18 decimals) as it calculates actual USDC loss
+                uint256 tradingLoss = 0;
+                if ((oldSize > 0 && executionPrice < entryPrice) || (oldSize < 0 && executionPrice > entryPrice)) {
+                    // Position is at a loss - calculate USDC amount to confiscate
+                    uint256 lossPerUnit = oldSize > 0 ? (entryPrice - executionPrice) : (executionPrice - entryPrice);
+                    // Convert to USDC: (lossPerUnit_6dec * size_18dec) / (DECIMAL_SCALE_12dec * TICK_PRECISION_6dec) = 6 decimals
+                    tradingLoss = (lossPerUnit * uint256(oldSize > 0 ? oldSize : -oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
                 }
-
-                // Penalty ONLY on the closed portion
-                uint256 notional6Closed = (closeAbs * executionPrice) / (10**18);
-                uint256 penaltyClosed = (notional6Closed * LIQUIDATION_PENALTY_BPS) / 10000;
-                uint256 actualLossClosed = tradingLossClosed + penaltyClosed;
-
-                // Recalculate required margin for the remaining position and determine confiscation bucket
-                uint256 oldLocked = positions[i].marginLocked;
-                // For partial closes that only reduce exposure without flipping, use entry price as basis
-                // to avoid margin spikes; otherwise use execution price
-                uint256 basisPriceForMargin = executionPrice;
-                if (closesExposure && newSize != 0) {
-                    basisPriceForMargin = entryPrice;
-                }
-                uint256 newRequiredMargin = _calculateExecutionMargin(newSize, basisPriceForMargin);
-                uint256 confiscatable = oldLocked > newRequiredMargin ? (oldLocked - newRequiredMargin) : 0;
-
-                // Seizure policy:
-                // - Seize only from locked margin headroom (confiscatable)
-                // - Do NOT seize from user's free collateral; socialize any remaining trading loss
+                
+                // Apply liquidation penalty based on notional at execution price
+                uint256 absSizeExec = uint256(oldSize > 0 ? oldSize : -oldSize);
+                uint256 notional6Exec = (absSizeExec * executionPrice) / (10**18);
+                uint256 penalty = (notional6Exec * LIQUIDATION_PENALTY_BPS) / 10000;
+                uint256 actualLoss = tradingLoss + penalty;
+                
+                // POLICY: Only locked margin may be seized. Do not dip into available collateral.
+                // Additionally, bound by user's actual collateral to avoid underflow on subtraction.
+                uint256 seizableFromLocked = actualLoss > marginToConfiscate ? marginToConfiscate : actualLoss;
                 uint256 collateralAvailable_ = userCollateral[user];
-                uint256 seizableFromLocked = actualLossClosed > confiscatable ? confiscatable : actualLossClosed;
                 uint256 seized = seizableFromLocked > collateralAvailable_ ? collateralAvailable_ : seizableFromLocked;
-                // Remaining trading loss after applying locked margin headroom only
-                uint256 uncoveredLoss = tradingLossClosed > seized ? (tradingLossClosed - seized) : 0;
-
+                // Only socialize uncovered TRADING LOSS; penalties are not socialized
+                uint256 uncoveredLoss = tradingLoss > seized ? (tradingLoss - seized) : 0;
+                
+                // Confiscate the margin and apply losses
                 if (seized > 0) {
                     userCollateral[user] -= seized;
-                    // Credit maker reward from penalty remainder
-                    uint256 seizedForTradingLoss = tradingLossClosed > seized ? seized : tradingLossClosed;
+                    
+                    // Compute liquidation penalty remainder available for LPs and credit it to the market's OrderBook
+                    uint256 seizedForTradingLoss = tradingLoss > seized ? seized : tradingLoss;
                     uint256 seizedRemainder = seized - seizedForTradingLoss;
-                    uint256 makerRewardPool = penaltyClosed > seizedRemainder ? seizedRemainder : penaltyClosed;
+                    uint256 makerRewardPool = penalty > seizedRemainder ? seizedRemainder : penalty;
                     address ob = marketToOrderBook[marketId];
-                    if (makerRewardPool > 0 && ob != address(0)) {
+                if (makerRewardPool > 0) {
+                    if (ob != address(0)) {
                         userCollateral[ob] += makerRewardPool;
                     }
-                    emit MarginConfiscated(user, oldLocked, seized, penaltyClosed, liquidator);
                 }
-
-                // Update position size and keep entry price for the remaining leg on partial close
+                    
+                    // Emit event to track actual margin confiscation
+                    emit MarginConfiscated(user, marginToConfiscate, seized, penalty, liquidator);
+                }
+                
+                // CRITICAL FIX: Manually update position without releasing margin
+                // We need to update the position but NOT release the margin since it's been confiscated
+                
+                // Calculate realized P&L for the liquidation
+                int256 realizedPnL = 0;
+                if (oldSize != 0) {
+                    // Calculate P&L: (execution_price - entry_price) * original_position_size
+                    int256 priceDiff = int256(executionPrice) - int256(entryPrice);
+                    // FIX: Use oldSize (original position) to ensure correct sign for both long/short:
+                    // - Long liquidation: price falls → priceDiff negative, oldSize positive → negative loss ✓
+                    // - Short liquidation: price rises → priceDiff positive, oldSize negative → negative loss ✓
+                    realizedPnL = (priceDiff * oldSize) / int256(TICK_PRECISION);
+                }
+                
+                // Update position size directly without releasing margin
                 positions[i].size = newSize;
+                
+                // If position is fully closed, remove it entirely
                 if (newSize == 0) {
-                    // Remove the position entirely
+                    // Remove the position from the array (swap with last and pop)
                     if (i < positions.length - 1) {
                         positions[i] = positions[positions.length - 1];
                     }
                     positions.pop();
-                    // Adjust global locked tracker by the full previously locked amount
-                    if (oldLocked <= totalMarginLocked) {
-                        totalMarginLocked -= oldLocked;
-                    }
+                    
+                    // Remove market ID from user's list
                     PositionManager.removeMarketIdFromUser(userMarketIds[user], marketId);
-                    isUnderLiquidationPosition[user][marketId] = false;
-                    // Clear liquidation anchor on full close
-                    liquidationAnchorPrice[user][marketId] = 0;
-                    liquidationAnchorTimestamp[user][marketId] = 0;
+                    
+                    // CRITICAL: Reduce totalMarginLocked by the confiscated amount
+                    // This represents the margin that was locked but is now confiscated (not released to user)
+                    if (marginToConfiscate <= totalMarginLocked) {
+                        totalMarginLocked -= marginToConfiscate;
+                    }
                 } else {
-                    // Remaining leg is under liquidation control; clear displayed liq price
-                    isUnderLiquidationPosition[user][marketId] = true;
-                    positions[i].liquidationPrice = 0;
-                }
-
-                // Update marginLocked to match required margin for remaining exposure
-                if (newSize != 0) {
-                    uint256 newLocked = newRequiredMargin;
-                    // Apply reduction to totalMarginLocked by the amount we reduced locked margin
-                    uint256 lockedReduction = oldLocked > newLocked ? (oldLocked - newLocked) : 0;
-                    positions[i].marginLocked = newLocked;
-                    if (lockedReduction > 0 && lockedReduction <= totalMarginLocked) {
-                        totalMarginLocked -= lockedReduction;
+                    // Position partially closed - recalculate required margin for remaining position
+                    uint256 newRequiredMargin = _calculateExecutionMargin(newSize, executionPrice);
+                    uint256 marginDifference = 0;
+                    
+                    if (newRequiredMargin < positions[i].marginLocked) {
+                        // Less margin needed for smaller position
+                        marginDifference = positions[i].marginLocked - newRequiredMargin;
+                        positions[i].marginLocked = newRequiredMargin;
+                        
+                        // CRITICAL: Don't release this margin difference - it's confiscated
+                        // Reduce totalMarginLocked by the confiscated portion
+                        if (marginDifference <= totalMarginLocked) {
+                            totalMarginLocked -= marginDifference;
+                        }
+                    } else if (newRequiredMargin > positions[i].marginLocked) {
+                        // More margin needed (shouldn't happen in liquidation, but handle safely)
+                        uint256 additionalMargin = newRequiredMargin - positions[i].marginLocked;
+                        if (additionalMargin <= userCollateral[user]) {
+                            positions[i].marginLocked = newRequiredMargin;
+                            totalMarginLocked += additionalMargin;
+                        }
+                        // If user doesn't have enough collateral, keep current margin locked
                     }
                 }
-
-                // Realized P&L on the CLOSED portion only
-                int256 realizedPnL = 0;
-                if (closeAbs > 0) {
-                    int256 priceDiff = int256(executionPrice) - int256(entryPrice);
-                    int256 closingSizeSigned = oldSize > 0 ? int256(closeAbs) : -int256(closeAbs);
-                    realizedPnL = (priceDiff * closingSizeSigned) / int256(TICK_PRECISION);
-                }
+                
+                // Handle realized P&L (this includes the liquidation loss)
                 if (realizedPnL != 0) {
                     userRealizedPnL[user] += realizedPnL;
                 }
-
+                
+                // 🔧 CRITICAL FIX: Trigger ADL for uncovered losses
                 if (uncoveredLoss > 0) {
-                    // Clamp socialized loss using liquidation anchor to avoid time-based overcharging
-                    uint256 anchor = liquidationAnchorPrice[user][marketId];
-                    uint256 seizedAppliedToTrading = seized > 0 ? (tradingLossClosed > seized ? seized : tradingLossClosed) : 0;
-                    uint256 allowedUncovered = uncoveredLoss;
-                    if (anchor > 0) {
-                        uint256 anchorTradingLossClosed = 0;
-                        if (oldSize > 0) {
-                            // Long: loss when execution/anchor below entry; use max(execution, anchor) for clamp
-                            uint256 effPrice = executionPrice > anchor ? executionPrice : anchor;
-                            if (effPrice < entryPrice) {
-                                uint256 lossPerUnitA = entryPrice - effPrice;
-                                anchorTradingLossClosed = (lossPerUnitA * closeAbs) / (DECIMAL_SCALE * TICK_PRECISION);
-                            }
-                        } else if (oldSize < 0) {
-                            // Short: loss when execution/anchor above entry; use min(execution, anchor) for clamp
-                            uint256 effPrice = executionPrice < anchor ? executionPrice : anchor;
-                            if (effPrice > entryPrice) {
-                                uint256 lossPerUnitA = effPrice - entryPrice;
-                                anchorTradingLossClosed = (lossPerUnitA * closeAbs) / (DECIMAL_SCALE * TICK_PRECISION);
-                            }
-                        }
-                        if (anchorTradingLossClosed <= seizedAppliedToTrading) {
-                            allowedUncovered = 0;
-                        } else {
-                            allowedUncovered = anchorTradingLossClosed - seizedAppliedToTrading;
-                            if (allowedUncovered > uncoveredLoss) {
-                                allowedUncovered = uncoveredLoss;
-                            }
-                        }
-                    }
-                    if (allowedUncovered > 0) {
-                        _socializeLoss(marketId, allowedUncovered, user);
-                    }
-                    // Excess beyond anchor becomes market bad debt instead of burdening profitable users
-                    uint256 excess = uncoveredLoss > allowedUncovered ? (uncoveredLoss - allowedUncovered) : 0;
-                    if (excess > 0) {
-                        marketBadDebt[marketId] += excess;
-                        emit BadDebtRecorded(marketId, excess, user);
-                    }
+                    _socializeLoss(marketId, uncoveredLoss, user);
                 }
-
-                // Do not recompute liquidation price while under liquidation control; it will be restored after recovery
-
+                
+                // Recompute fixed liquidation trigger for surviving position
+                if (newSize != 0) {
+                    _recomputeAndStoreLiquidationPrice(user, marketId);
+                }
+                
                 emit LiquidationExecuted(user, marketId, liquidator, seized, userCollateral[user]);
                 emit PositionUpdated(user, marketId, oldSize, newSize, entryPrice, newSize == 0 ? 0 : positions[i].marginLocked);
                 return;
@@ -622,36 +538,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         }
         
         totalMarginCommitted = marginUsedInPositions + marginReservedForOrders;
-        // Include realized PnL (18d -> 6d) in available margin
-        {
-            // Guard against double-counting realized losses:
-            // - If user has no open positions, do not add negative realized PnL
-            // - If any position is currently under liquidation control, negative realized PnL
-            //   has already been reflected via collateral seizure; do not add it again.
-            bool hasOpenPositions = userPositions[user].length > 0;
-            bool anyUnderLiquidation = false;
-            if (hasOpenPositions) {
-                for (uint256 i = 0; i < userPositions[user].length; i++) {
-                    if (isUnderLiquidationPosition[user][userPositions[user][i].marketId]) {
-                        anyUnderLiquidation = true;
-                        break;
-                    }
-                }
-            }
-            int256 realizedPnLAdj = realizedPnL;
-            if (!hasOpenPositions && realizedPnLAdj < 0) {
-                realizedPnLAdj = 0;
-            }
-            if (anyUnderLiquidation && realizedPnLAdj < 0) {
-                realizedPnLAdj = 0;
-            }
-            int256 realizedPnL6 = realizedPnLAdj / int256(DECIMAL_SCALE);
-            int256 baseWithRealized = int256(totalCollateral) + realizedPnL6;
-            uint256 availableBeforeReserved = baseWithRealized > 0 ? uint256(baseWithRealized) : 0;
-            availableMargin = availableBeforeReserved > totalMarginCommitted
-                ? (availableBeforeReserved - totalMarginCommitted)
-                : 0;
-        }
+        availableMargin = totalCollateral > totalMarginCommitted ? 
+            totalCollateral - totalMarginCommitted : 0;
         
         // Simple health check: available margin should be positive
         isMarginHealthy = (int256(totalCollateral) + realizedPnL + unrealizedPnL) > int256(totalMarginCommitted);
@@ -695,27 +583,9 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             markPrices[i] = getMarkPrice(userPositions[user][i].marketId);
         }
         
-        // Align with unified summary: avoid double-counting negative realized PnL
-        // during liquidation partial closes (collateral already seized).
-        int256 realizedAdj = userRealizedPnL[user];
-        if (userPositions[user].length == 0 && realizedAdj < 0) {
-            realizedAdj = 0;
-        } else if (realizedAdj < 0) {
-            bool anyUnderLiquidation = false;
-            for (uint256 i = 0; i < userPositions[user].length; i++) {
-                if (isUnderLiquidationPosition[user][userPositions[user][i].marketId]) {
-                    anyUnderLiquidation = true;
-                    break;
-                }
-            }
-            if (anyUnderLiquidation) {
-                realizedAdj = 0;
-            }
-        }
-
         return VaultAnalytics.getMarginSummary(
             userCollateral[user],
-            realizedAdj,
+            userRealizedPnL[user],
             positions,
             userPendingOrders[user],
             markPrices
@@ -735,24 +605,13 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         }
         // Base available = collateral - margin locked in positions
         uint256 baseAvailable = VaultAnalytics.getAvailableCollateral(userCollateral[user], positions);
-        
-        // Add realized PnL converted to 6 decimals (PnL is tracked in 18 decimals)
-        int256 realizedPnL18 = userRealizedPnL[user];
-        // Guard: if no open positions and realizedPnL is negative, do not add it to available collateral
-        if (userPositions[user].length == 0 && realizedPnL18 < 0) {
-            realizedPnL18 = 0;
-        }
-        int256 realizedPnL6 = realizedPnL18 / int256(DECIMAL_SCALE);
-        int256 baseWithRealized = int256(baseAvailable) + realizedPnL6;
-        uint256 availableWithRealized = baseWithRealized > 0 ? uint256(baseWithRealized) : 0;
-
         // Subtract margin reserved for pending orders
         uint256 reserved = 0;
         VaultAnalytics.PendingOrder[] storage pending = userPendingOrders[user];
         for (uint256 i = 0; i < pending.length; i++) {
             reserved += pending[i].marginReserved;
         }
-        return availableWithRealized > reserved ? availableWithRealized - reserved : 0;
+        return baseAvailable > reserved ? baseAvailable - reserved : 0;
     }
 
     function getTotalMarginUsed(address user) public view returns (uint256) {
@@ -881,23 +740,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     // Backward-compatible helpers used by OrderBook and router flows
     function deductFees(address user, uint256 amount, address recipient) external {
         require(hasRole(FACTORY_ROLE, msg.sender) || hasRole(ORDERBOOK_ROLE, msg.sender), "unauthorized");
-        require(amount > 0, "!amount");
-
-        // Prefer consuming realized PnL (6 decimals) first, then deposited collateral
-        int256 realizedPnL18 = userRealizedPnL[user];
-        uint256 realizedPnL6 = realizedPnL18 > 0 ? uint256(realizedPnL18 / int256(DECIMAL_SCALE)) : 0;
-        uint256 fromPnL = amount <= realizedPnL6 ? amount : realizedPnL6;
-        uint256 fromDeposit = amount - fromPnL;
-
-        if (fromPnL > 0) {
-            userRealizedPnL[user] -= int256(fromPnL * DECIMAL_SCALE);
-        }
-
-        if (fromDeposit > 0) {
-            require(userCollateral[user] >= fromDeposit, "!balance");
-            userCollateral[user] -= fromDeposit;
-        }
-
+        require(userCollateral[user] >= amount, "!balance");
+        userCollateral[user] -= amount;
         userCollateral[recipient] += amount;
     }
 
@@ -1143,14 +987,10 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         address user,
         bytes32 marketId,
         uint256 markPrice
-    ) external returns (bool) {
+    ) external view returns (bool) {
         PositionManager.Position[] storage positions = userPositions[user];
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size != 0) {
-                // If this position is under liquidation control, force liquidatable until cleared
-                if (isUnderLiquidationPosition[user][marketId]) {
-                    return true;
-                }
                 uint256 trigger = positions[i].liquidationPrice;
                 if (trigger == 0) {
                     // Fallback: compute real-time health if trigger not yet initialized
@@ -1166,80 +1006,18 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                     int256 equity6 = int256(positions[i].marginLocked) + pnl6;
                     (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
                     uint256 maintenance6 = (notional6 * mmrBps) / 10000;
-                    // Include one-tick tolerance in fallback as well
-                    bool resFallback = equity6 <= (int256(maintenance6) + int256(1));
-                    return resFallback;
+                    return equity6 <= int256(maintenance6);
                 }
-                // Add 1-tick tolerance to account for rounding/quantization differences
-                // Prices are stored in 6 decimals. Treat near-equality within 1 unit (1e-6) as liquidatable.
-                uint256 oneTick = 1; // 1 unit at 6 decimals
                 if (positions[i].size > 0) {
-                    // Long: liquidatable if mark <= trigger (+ 1 tick tolerance)
-                    bool res = markPrice <= (trigger + oneTick);
-                    return res;
+                    // Long: liquidatable if mark <= trigger
+                    return markPrice <= trigger;
                 } else {
-                    // Short: liquidatable if mark >= trigger (- 1 tick tolerance)
-                    bool res2 = (markPrice + oneTick) >= trigger;
-                    return res2;
+                    // Short: liquidatable if mark >= trigger
+                    return markPrice >= trigger;
                 }
             }
         }
         return false;
-    }
-
-    /**
-     * @dev Debug helper to emit a DebugIsLiquidatable event using current stored data.
-     *      Restricted to ORDERBOOK_ROLE to avoid arbitrary spam.
-     */
-    function debugEmitIsLiquidatable(address user, bytes32 marketId, uint256 markPrice) external onlyRole(ORDERBOOK_ROLE) {
-        PositionManager.Position[] storage positions = userPositions[user];
-        for (uint256 i = 0; i < positions.length; i++) {
-            if (positions[i].marketId == marketId && positions[i].size != 0) {
-                uint256 trigger = positions[i].liquidationPrice;
-                uint256 oneTick = 1;
-                bool usedFallback = false;
-                uint256 notional6 = 0;
-                int256 equity6 = 0;
-                uint256 maintenance6 = 0;
-                bool result;
-                if (trigger == 0) {
-                    usedFallback = true;
-                    uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
-                    if (markPrice == 0 || absSize == 0) {
-                        emit DebugIsLiquidatable(user, marketId, positions[i].size, markPrice, 0, oneTick, 0, 0, 0, true, false);
-                        return;
-                    }
-                    notional6 = (absSize * markPrice) / (10**18);
-                    int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
-                    int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
-                    int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
-                    equity6 = int256(positions[i].marginLocked) + pnl6;
-                    (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
-                    maintenance6 = (notional6 * mmrBps) / 10000;
-                    result = equity6 <= int256(maintenance6);
-                } else if (positions[i].size > 0) {
-                    result = markPrice <= (trigger + oneTick);
-                } else {
-                    result = (markPrice + oneTick) >= trigger;
-                }
-                emit DebugIsLiquidatable(
-                    user,
-                    marketId,
-                    positions[i].size,
-                    markPrice,
-                    trigger,
-                    oneTick,
-                    notional6,
-                    equity6,
-                    maintenance6,
-                    usedFallback,
-                    result
-                );
-                return;
-            }
-        }
-        // No position; emit a minimal debug line
-        emit DebugIsLiquidatable(user, marketId, 0, markPrice, 0, 1, 0, 0, 0, false, false);
     }
 
     /**
@@ -1257,10 +1035,6 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         for (uint256 i = 0; i < positions.length; i++) {
             if (positions[i].marketId == marketId && positions[i].size != 0) {
                 hasPosition = true;
-                // If under liquidation, hide the liquidation price (display 0)
-                if (isUnderLiquidationPosition[user][marketId]) {
-                    return (0, true);
-                }
                 return (positions[i].liquidationPrice, true);
             }
         }
@@ -1521,54 +1295,6 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             uint256 seized = seizableFromLocked > collateralAvailable_ ? collateralAvailable_ : seizableFromLocked;
             // Only socialize uncovered TRADING LOSS; penalties are not socialized
             uint256 uncoveredLoss = tradingLoss > seized ? (tradingLoss - seized) : 0;
-            // Clamp socialized loss for full liquidation using liquidation anchor
-            if (uncoveredLoss > 0) {
-                uint256 anchor = liquidationAnchorPrice[user][marketId];
-                uint256 seizedAppliedToTrading = seized > 0 ? (tradingLoss > seized ? seized : tradingLoss) : 0;
-                uint256 anchorTradingLoss = tradingLoss;
-                if (anchor > 0) {
-                    // For long liquidations, lower price is worse; clamp using max(settlePrice, anchor)
-                    uint256 effPrice = settlePrice > anchor ? settlePrice : anchor;
-                    if (effPrice < entryPrice) {
-                        uint256 lossPerUnitA = entryPrice - effPrice;
-                        anchorTradingLoss = (lossPerUnitA * uint256(oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
-                    } else {
-                        anchorTradingLoss = 0;
-                    }
-                }
-                uint256 allowedUncovered = anchorTradingLoss > seizedAppliedToTrading ? (anchorTradingLoss - seizedAppliedToTrading) : 0;
-                if (allowedUncovered < uncoveredLoss) {
-                    // convert excess to market bad debt
-                    uint256 excess = uncoveredLoss - allowedUncovered;
-                    marketBadDebt[marketId] += excess;
-                    emit BadDebtRecorded(marketId, excess, user);
-                    uncoveredLoss = allowedUncovered;
-                }
-            }
-            // Clamp socialized loss for full liquidation using liquidation anchor
-            if (uncoveredLoss > 0) {
-                uint256 anchor = liquidationAnchorPrice[user][marketId];
-                uint256 seizedAppliedToTrading = seized > 0 ? (tradingLoss > seized ? seized : tradingLoss) : 0;
-                uint256 anchorTradingLoss = tradingLoss;
-                if (anchor > 0) {
-                    // For short liquidations, higher price is worse; clamp using min(settlePrice, anchor)
-                    uint256 effPrice = settlePrice < anchor ? settlePrice : anchor;
-                    if (effPrice > entryPrice) {
-                        uint256 lossPerUnitA = effPrice - entryPrice;
-                        anchorTradingLoss = (lossPerUnitA * uint256(-oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
-                    } else {
-                        anchorTradingLoss = 0;
-                    }
-                }
-                uint256 allowedUncovered = anchorTradingLoss > seizedAppliedToTrading ? (anchorTradingLoss - seizedAppliedToTrading) : 0;
-                if (allowedUncovered < uncoveredLoss) {
-                    // convert excess to market bad debt
-                    uint256 excess = uncoveredLoss - allowedUncovered;
-                    marketBadDebt[marketId] += excess;
-                    emit BadDebtRecorded(marketId, excess, user);
-                    uncoveredLoss = allowedUncovered;
-                }
-            }
             
             if (seized > 0) {
                 userCollateral[user] -= seized;
@@ -1602,9 +1328,6 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
 
                 // Remove market ID from user's market list
                 _removeMarketIdFromUser(user, marketId);
-                // Clear liquidation anchor on full close
-                liquidationAnchorPrice[user][marketId] = 0;
-                liquidationAnchorTimestamp[user][marketId] = 0;
 
                 // Notify OrderBook removed to avoid external calls here; OB syncs via events/trade flow
 
@@ -1662,8 +1385,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             uint256 seizableFromLocked = actualLoss > locked ? locked : actualLoss;
             uint256 collateralAvailable_ = userCollateral[user];
             uint256 seized = seizableFromLocked > collateralAvailable_ ? collateralAvailable_ : seizableFromLocked;
-            // Only socialize uncovered TRADING LOSS; penalties are not socialized
-            uint256 uncoveredLoss = tradingLoss > seized ? (tradingLoss - seized) : 0;
+            uint256 uncoveredLoss = actualLoss - seized;
             
             if (seized > 0) {
                 userCollateral[user] -= seized;

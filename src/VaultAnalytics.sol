@@ -133,7 +133,12 @@ library VaultAnalytics {
         uint256 baseAvailable = getAvailableCollateral(userCollateral, positions);
         
         // Include realized PnL (convert 18d -> 6d) in available collateral
-        int256 realizedPnL6 = realizedPnL / int256(DECIMAL_SCALE);
+        // Guard: if there are no open positions and realizedPnL is negative, do not add it
+        int256 realizedAdj = realizedPnL;
+        if (positions.length == 0 && realizedAdj < 0) {
+            realizedAdj = 0;
+        }
+        int256 realizedPnL6 = realizedAdj / int256(DECIMAL_SCALE);
         int256 baseWithRealized = int256(baseAvailable) + realizedPnL6;
         uint256 availableAfterRealized = baseWithRealized > 0 ? uint256(baseWithRealized) : 0;
         

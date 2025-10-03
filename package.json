@@ -15,7 +15,10 @@
     "trade:hyperliquid": "hardhat run scripts/interactive-trader.js --network hyperliquid",
     "viewer": "hardhat run scripts/live-orderbook-viewer.js --network localhost",
     "accounts": "hardhat accounts",
-    "accounts:hyperliquid": "hardhat accounts --network hyperliquid"
+    "accounts:hyperliquid": "hardhat accounts --network hyperliquid",
+    "launch:localhost": "node scripts/launch-macos.js --network localhost",
+    "launch:hyperliquid": "node scripts/launch-macos.js --network hyperliquid",
+    "launch:hyperliquid-testnet": "node scripts/launch-macos.js --network hyperliquid_testnet"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^4.0.0",

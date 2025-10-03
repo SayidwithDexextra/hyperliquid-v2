@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/utils/math/Math.sol";
 import "./PositionManager.sol";
 
 interface ICoreVault {
-    function isLiquidatable(address user, bytes32 marketId, uint256 markPrice) external returns (bool);
+    function isLiquidatable(address user, bytes32 marketId, uint256 markPrice) external view returns (bool);
     function getPositionSummary(address user, bytes32 marketId) external view returns (int256 size, uint256 entryPrice, uint256 marginLocked);
     function liquidateShort(address user, bytes32 marketId, address liquidator, uint256 executionPrice) external;
     function liquidateLong(address user, bytes32 marketId, address liquidator, uint256 executionPrice) external;
@@ -46,9 +46,6 @@ interface ICoreVault {
     // Position equity and maintenance
     function getPositionEquity(address user, bytes32 marketId) external view returns (int256 equity6, uint256 notional6, bool hasPosition);
     function getEffectiveMaintenanceMarginBps(address user, bytes32 marketId) external view returns (uint256 mmrBps, uint256 fillRatio1e18, bool hasPosition);
-    function debugEmitIsLiquidatable(address user, bytes32 marketId, uint256 markPrice) external;
-    // Under-liquidation control
-    function setUnderLiquidation(address user, bytes32 marketId, bool state) external;
 }
 
 /**
@@ -123,11 +120,6 @@ contract OrderBook {
     address public feeRecipient;
     uint256 public maxSlippageBps = 500; // 5% maximum slippage for market orders (basis points)
     
-    // Unit-based margin parameters (USDC 6 decimals per 1e18 units)
-    // These decouple margin locking from price to avoid drift from average fill or entry prices
-    uint256 public unitMarginLong6 = 1_000_000;     // 1.0 USDC per 1 ALU (18d)
-    uint256 public unitMarginShort6 = 1_500_000;    // 1.5 USDC per 1 ALU (18d)
-    
     // Leverage control system
     bool public leverageEnabled = false; // Leverage disabled by default
     
@@ -135,9 +127,6 @@ contract OrderBook {
     uint256 public constant MAX_POSITIONS_TO_CHECK = 5;     // Reduced to 5 positions per check for gas efficiency
     uint256 public constant MAX_LIQUIDATIONS_PER_CALL = 5;   // Cap liquidations per check to manage gas
     uint256 public constant LIQUIDATION_INTERVAL = 0; // No throttle between checks
-    // Gas-safe debug toggles
-    bool public liquidationScanOnTrade = false; // if false, scans only run via poke
-    bool public liquidationDebug = false; // if true, emit heavy per-trader debug events
     uint256 public lastLiquidationCheck;
     uint256 public lastCheckedIndex;
     uint256 public lastMarkPrice;
@@ -473,29 +462,18 @@ contract OrderBook {
         internal
         returns (bool didLiquidate, int256 positionSize, bool usedMarketOrder)
     {
-        if (liquidationDebug) {
-            // Emit current context from vault storage if available
-            int256 dbgSize; uint256 dbgEntry; uint256 dbgMargin;
-            try vault.getPositionSummary(trader, marketId) returns (int256 size, uint256 entryPrice, uint256 marginLocked) {
-                dbgSize = size; dbgEntry = entryPrice; dbgMargin = marginLocked;
-            } catch { dbgSize = 0; dbgEntry = 0; dbgMargin = 0; }
-            emit DebugLiquidationContext(trader, marketId, markPrice, 0, dbgSize, dbgEntry, dbgMargin);
-
-            // Ask vault to emit its own detailed eligibility snapshot (best-effort)
-            try vault.debugEmitIsLiquidatable(trader, marketId, markPrice) { } catch { }
+        // Liquidatable check
+        bool isLiquidatable = false;
+        try vault.isLiquidatable(trader, marketId, markPrice) returns (bool liquidatable) {
+            isLiquidatable = liquidatable;
+            emit LiquidationLiquidatableCheck(trader, isLiquidatable, markPrice);
+        } catch {
+            emit LiquidationLiquidatableCheck(trader, false, markPrice);
+            return (false, 0, false);
         }
-         // Liquidatable check
-         bool isLiquidatable = false;
-         try vault.isLiquidatable(trader, marketId, markPrice) returns (bool liquidatable) {
-             isLiquidatable = liquidatable;
-             emit LiquidationLiquidatableCheck(trader, isLiquidatable, markPrice);
-         } catch {
-             emit LiquidationLiquidatableCheck(trader, false, markPrice);
-             return (false, 0, false);
-         }
-         if (!isLiquidatable) {
-             return (false, 0, false);
-         }
+        if (!isLiquidatable) {
+            return (false, 0, false);
+        }
 
         // Fetch position
         try vault.getPositionSummary(trader, marketId) returns (int256 size, uint256 marginLocked, uint256 unrealizedPnL) {
@@ -509,37 +487,17 @@ contract OrderBook {
             LiquidationExecutionResult memory liquidationResult;
             bool marketOrderSuccess = false;
             if (size < 0) {
-                // For shorts, attempt up to available best-ask depth; fall back to partial amount if full size not available
-                uint256 requestAmount = uint256(-size);
-                emit LiquidationMarketOrderAttempt(trader, requestAmount, true, markPrice);
-                liquidationResult = _executeLiquidationMarketOrder(trader, requestAmount, true, markPrice);
-                if (!liquidationResult.success && liquidationResult.filledAmount == 0 && bestAsk > 0) {
-                    uint256 levelAmt = sellLevels[bestAsk].totalAmount;
-                    if (levelAmt > 0 && levelAmt < requestAmount) {
-                        // Retry with best-ask available size to consume incremental liquidity
-                        emit LiquidationMarketOrderAttempt(trader, levelAmt, true, markPrice);
-                        liquidationResult = _executeLiquidationMarketOrder(trader, levelAmt, true, markPrice);
-                    }
-                }
+                emit LiquidationMarketOrderAttempt(trader, uint256(-size), true, markPrice);
+                liquidationResult = _executeLiquidationMarketOrder(trader, uint256(-size), true, markPrice);
                 marketOrderSuccess = liquidationResult.success;
             } else {
-                uint256 requestAmount = uint256(size);
-                emit LiquidationMarketOrderAttempt(trader, requestAmount, false, markPrice);
-                liquidationResult = _executeLiquidationMarketOrder(trader, requestAmount, false, markPrice);
-                if (!liquidationResult.success && liquidationResult.filledAmount == 0 && bestBid > 0) {
-                    uint256 levelAmt = buyLevels[bestBid].totalAmount;
-                    if (levelAmt > 0 && levelAmt < requestAmount) {
-                        emit LiquidationMarketOrderAttempt(trader, levelAmt, false, markPrice);
-                        liquidationResult = _executeLiquidationMarketOrder(trader, levelAmt, false, markPrice);
-                    }
-                }
+                emit LiquidationMarketOrderAttempt(trader, uint256(size), false, markPrice);
+                liquidationResult = _executeLiquidationMarketOrder(trader, uint256(size), false, markPrice);
                 marketOrderSuccess = liquidationResult.success;
             }
             emit LiquidationMarketOrderResult(trader, marketOrderSuccess, marketOrderSuccess ? "Market order filled" : "No liquidity available");
 
             if (liquidationResult.filledAmount > 0) {
-                // Mark position under liquidation control to avoid full close paths
-                try vault.setUnderLiquidation(trader, marketId, true) {} catch {}
                 _processEnhancedLiquidationWithGapProtection(
                     trader,
                     size,
@@ -557,10 +515,27 @@ contract OrderBook {
                 return (true, size, true);
             }
 
-            // Remove fallback full liquidation: if no market liquidity, leave position under liquidation and retry later
+            // Fallback to vault liquidation
             if (!marketOrderSuccess) {
-                try vault.setUnderLiquidation(trader, marketId, true) {} catch {}
-                return (false, 0, false);
+                if (size > 0) {
+                    emit LiquidationSocializedLossAttempt(trader, true, "liquidateLong");
+                    try vault.liquidateLong(trader, marketId, msg.sender, markPrice) {
+                        emit LiquidationSocializedLossResult(trader, true, "liquidateLong");
+                        return (true, size, false);
+                    } catch {
+                        emit LiquidationSocializedLossResult(trader, false, "liquidateLong");
+                        return (false, 0, false);
+                    }
+                } else {
+                    emit LiquidationSocializedLossAttempt(trader, false, "liquidateShort");
+                    try vault.liquidateShort(trader, marketId, msg.sender, markPrice) {
+                        emit LiquidationSocializedLossResult(trader, true, "liquidateShort");
+                        return (true, size, false);
+                    } catch {
+                        emit LiquidationSocializedLossResult(trader, false, "liquidateShort");
+                        return (false, 0, false);
+                    }
+                }
             }
 
             // If we reach here with success=false but filledAmount==0, nothing done
@@ -754,12 +729,103 @@ contract OrderBook {
             }
         }
         
-        // Updated policy: Partial liquidation is already applied per fill via updatePositionWithLiquidation.
-        // Do not fully liquidate the remaining position here and do not socialize gap loss at the OB layer.
-        // Keep mark price synchronized for accurate margin/MMR checks.
-        uint256 syncedMark = _calculateMarkPrice();
-        vault.updateMarkPrice(marketId, syncedMark);
-        // Leave layer metrics as zero; per-fill confiscation and any socialization happen inside the vault per trade.
+        // Get user's position and collateral information
+        try vault.getUnifiedMarginSummary(trader) returns (
+            uint256 totalCollateral,
+            uint256 marginUsed,
+            uint256 /*marginReserved*/,
+            uint256 /*availableMargin*/,
+            int256 /*realizedPnL*/,
+            int256 /*unrealizedPnL*/,
+            uint256 /*totalMarginCommitted*/,
+            bool /*isMarginHealthy*/
+        ) {
+            // ============ CRITICAL FIX: ENSURE VAULT LIQUIDATION PROCESSING ============
+            // Layer 1: Process the actual liquidation through the vault first
+            // This ensures the position is properly closed and ADL is triggered if needed
+            
+            // STEP 1: Process the liquidation through vault's liquidation mechanism
+            // This will handle position closure, margin confiscation, and trigger ADL if user's collateral is insufficient
+            bool vaultLiquidationSuccess = false;
+            
+            if (positionSize > 0) {
+                // Long position liquidation
+                // 🔧 CRITICAL FIX: Ensure mark price is synchronized before ADL
+                uint256 currentMarkPrice = _calculateMarkPrice();
+                vault.updateMarkPrice(marketId, currentMarkPrice);
+                
+                try vault.liquidateLong(trader, marketId, msg.sender, executionResult.worstExecutionPrice) {
+                    vaultLiquidationSuccess = true;
+                    emit LiquidationPositionProcessed(trader, positionSize, executionResult.averageExecutionPrice);
+                } catch (bytes memory /*reason*/) {
+                    emit LiquidationProcessingFailed(trader, "LIQ_LONG_FAIL");
+                }
+            } else {
+                // Short position liquidation  
+                // 🔧 CRITICAL FIX: Ensure mark price is synchronized before ADL
+                uint256 currentMarkPrice = _calculateMarkPrice();
+                vault.updateMarkPrice(marketId, currentMarkPrice);
+                
+                // 🔍 DEBUG: About to call vault.liquidateShort
+                emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort");
+                try vault.liquidateShort(trader, marketId, msg.sender, executionResult.worstExecutionPrice) {
+                    vaultLiquidationSuccess = true;
+                    emit LiquidationPositionProcessed(trader, positionSize, executionResult.averageExecutionPrice);
+                    emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort_SUCCESS");
+                } catch (bytes memory /*reason*/) {
+                    emit LiquidationProcessingFailed(trader, "LIQ_SHORT_FAIL");
+                    emit DebugLiquidationCall(trader, marketId, positionSize, "liquidateShort_FAILED");
+                }
+            }
+            
+            // Get updated margin info after vault processing
+            if (vaultLiquidationSuccess) {
+                try vault.getPositionSummary(trader, marketId) returns (int256 /*newSize*/, uint256 /*newEntryPrice*/, uint256 newMarginLocked) {
+                    layer1LockedMargin = newMarginLocked; // This reflects what was actually confiscated
+                } catch {
+                    layer1LockedMargin = marginUsed; // Fallback to original estimate
+                }
+            } else {
+                // Vault liquidation failed - proceed with gap loss processing as fallback
+                layer1LockedMargin = marginUsed;
+            }
+            
+            // Layer 2: Disabled by policy — do not confiscate user's available collateral for gap loss
+            // Any remaining gapLoss must be socialized via ADL and not taken from free collateral
+            
+            // Layer 3: Socialize any remaining gap loss
+            if (gapLoss > 0) {
+                layer3SocializedLoss = gapLoss;
+                
+                emit LiquidationRequiresSocialization(
+                    trader,
+                    gapLoss,
+                    totalCollateral
+                );
+                
+                // Trigger socialized loss mechanism
+                try vault.socializeLoss(marketId, gapLoss, trader) {
+                    // Socialized loss applied successfully
+                } catch {
+                    // Socialized loss failed - system is in critical state
+                    // This should be extremely rare
+                }
+            }
+            
+        } catch {
+            // Failed to get user's margin summary - proceed with basic liquidation
+            // Gap loss will be entirely socialized
+            if (gapLoss > 0) {
+                layer3SocializedLoss = gapLoss;
+                emit LiquidationRequiresSocialization(trader, gapLoss, 0);
+                
+                try vault.socializeLoss(marketId, gapLoss, trader) {
+                    // Socialized loss applied
+                } catch {
+                    // Critical system failure
+                }
+            }
+        }
         
         // Emit comprehensive liquidation breakdown
         emit LiquidationLayerBreakdown(
@@ -920,6 +986,12 @@ contract OrderBook {
     uint256 public minVolumeForVWAP = 100 * AMOUNT_SCALE; // Minimum 100 units volume for valid VWAP
     bool public useVWAPForMarkPrice = true; // Enable/disable VWAP for mark price
 
+    // ============ Smoothed Last Trade (EMA) Settings ============
+    // Alpha in basis points (0-10000). 1000 = 10% weight to last trade
+    uint256 public lastTradeSmoothingAlphaBps = 1000;
+    // Toggle EMA smoothing when using last trade as fallback for mark price
+    bool public useSmoothedLastTrade = true;
+    
     // Trade events
     event TradeExecuted(
         uint256 indexed tradeId,
@@ -951,6 +1023,8 @@ contract OrderBook {
     // VWAP events
     event VWAPConfigUpdated(uint256 timeWindow, uint256 minVolume, bool useVWAP);
     event VWAPCalculated(uint256 vwap, uint256 volume, uint256 tradeCount, uint256 timeWindow);
+    // Mark price smoothing events
+    event MarkSmoothingUpdated(uint256 alphaBps, bool enabled);
     
     // DEBUG EVENTS for _executeTrade function
     event TradeExecutionStarted(address indexed buyer, address indexed seller, uint256 price, uint256 amount, bool buyerMargin, bool sellerMargin);
@@ -987,16 +1061,6 @@ contract OrderBook {
     event LiquidationRecursionGuardSet(bool inProgress);
     event LiquidationTraderBeingChecked(address indexed trader, uint256 index, uint256 totalTraders);
     event LiquidationLiquidatableCheck(address indexed trader, bool isLiquidatable, uint256 markPrice);
-    // Detailed context right before calling vault.isLiquidatable and right after
-    event DebugLiquidationContext(
-        address indexed trader,
-        bytes32 indexed marketId,
-        uint256 markPrice,
-        uint256 storedVaultTrigger,
-        int256 positionSize,
-        uint256 entryPrice,
-        uint256 marginLocked
-    );
     event LiquidationPositionRetrieved(address indexed trader, int256 size, uint256 marginLocked, uint256 unrealizedPnL);
     event LiquidationMarketOrderAttempt(address indexed trader, uint256 amount, bool isBuy, uint256 markPrice);
     event LiquidationMarketOrderResult(address indexed trader, bool success, string reason);
@@ -1288,12 +1352,6 @@ contract OrderBook {
         // If there's remaining amount, add to order book
         if (remainingAmount > 0) {
             newOrder.amount = remainingAmount;
-            // Recompute reserved margin to reflect only remaining units
-            if (isMarginOrder) {
-                uint256 adjustedReserved = _calculateMarginRequired(remainingAmount, price, isBuy);
-                newOrder.marginRequired = adjustedReserved;
-                vault.releaseExcessMargin(msg.sender, bytes32(orderId), adjustedReserved);
-            }
             orders[orderId] = newOrder;
             userOrders[msg.sender].push(orderId);
             
@@ -1631,12 +1689,6 @@ contract OrderBook {
                     delete orders[currentOrderId];
                 } else {
                     emit OrderPartiallyFilled(currentOrderId, matchAmount, sellOrder.amount);
-                    // Reduce reserved margin proportionally for partially filled margin orders
-                    if (sellOrder.isMarginOrder) {
-                        uint256 newReserved = _calculateMarginRequired(sellOrder.amount, sellOrder.price, sellOrder.isBuy);
-                        vault.releaseExcessMargin(sellOrder.trader, bytes32(currentOrderId), newReserved);
-                        orders[currentOrderId].marginRequired = newReserved;
-                    }
                 }
                 
                 currentOrderId = nextSellOrderId;
@@ -1760,12 +1812,6 @@ contract OrderBook {
                     delete orders[currentOrderId];
                 } else {
                     emit OrderPartiallyFilled(currentOrderId, matchAmount, buyOrder.amount);
-                    // Reduce reserved margin proportionally for partially filled margin orders
-                    if (buyOrder.isMarginOrder) {
-                        uint256 newReserved = _calculateMarginRequired(buyOrder.amount, buyOrder.price, buyOrder.isBuy);
-                        vault.releaseExcessMargin(buyOrder.trader, bytes32(currentOrderId), newReserved);
-                        orders[currentOrderId].marginRequired = newReserved;
-                    }
                 }
                 
                 currentOrderId = nextBuyOrderId;
@@ -1882,12 +1928,6 @@ contract OrderBook {
                     delete orders[currentOrderId];
                 } else {
                     emit OrderPartiallyFilled(currentOrderId, matchAmount, sellOrder.amount);
-                    // Reduce reserved margin proportionally for partially filled resting margin orders
-                    if (sellOrder.isMarginOrder) {
-                        uint256 newReserved = _calculateMarginRequired(sellOrder.amount, sellOrder.price, sellOrder.isBuy);
-                        vault.releaseExcessMargin(sellOrder.trader, bytes32(currentOrderId), newReserved);
-                        orders[currentOrderId].marginRequired = newReserved;
-                    }
                 }
                 
                 currentOrderId = nextSellOrderId;
@@ -1976,12 +2016,6 @@ contract OrderBook {
                     delete orders[currentOrderId];
                 } else {
                     emit OrderPartiallyFilled(currentOrderId, matchAmount, buyOrder.amount);
-                    // Reduce reserved margin proportionally for partially filled resting margin orders
-                    if (buyOrder.isMarginOrder) {
-                        uint256 newReserved = _calculateMarginRequired(buyOrder.amount, buyOrder.price, buyOrder.isBuy);
-                        vault.releaseExcessMargin(buyOrder.trader, bytes32(currentOrderId), newReserved);
-                        orders[currentOrderId].marginRequired = newReserved;
-                    }
                 }
                 
                 currentOrderId = nextBuyOrderId;
@@ -2022,8 +2056,6 @@ contract OrderBook {
             orders[level.lastOrderId].nextOrderId = orderId;
             level.lastOrderId = orderId;
             level.totalAmount += amount;
-            // New liquidity at existing price may enable partial liquidations; trigger scan
-            _onOrderBookLiquidityChanged();
         }
         
         // Update best bid
@@ -2055,8 +2087,6 @@ contract OrderBook {
             orders[level.lastOrderId].nextOrderId = orderId;
             level.lastOrderId = orderId;
             level.totalAmount += amount;
-            // New liquidity at existing price may enable partial liquidations; trigger scan
-            _onOrderBookLiquidityChanged();
         }
         
         // Update best ask
@@ -2064,19 +2094,6 @@ contract OrderBook {
             bestAsk = price;
             _onMarkPricePotentiallyChanged();
         }
-    }
-
-    // Internal hook: trigger liquidation scan when order book depth increases (even if mark unchanged)
-    function _onOrderBookLiquidityChanged() private {
-        if (liquidationInProgress) {
-            emit LiquidationRecursionGuardSet(true);
-            return;
-        }
-        uint256 currentMark = _calculateMarkPrice();
-        vault.updateMarkPrice(marketId, currentMark);
-        emit LiquidationCheckTriggered(currentMark, lastMarkPrice);
-        _checkPositionsForLiquidation(currentMark);
-        lastMarkPrice = currentMark;
     }
 
     /**
@@ -2355,41 +2372,17 @@ contract OrderBook {
             // CRITICAL FIX: Check for integer overflow in position calculation
             int256 newNet;
             
-            // Always read the latest net position from the vault to avoid drift across multi-level matches
-            int256 currentNet;
-            try vault.getPositionSummary(user, marketId) returns (int256 size, uint256 /*entryPrice*/, uint256 /*marginLocked*/) {
-                currentNet = size;
-            } catch {
-                currentNet = oldPosition; // fallback to provided oldPosition
-            }
-            
-            // Use unchecked for addition to handle potential overflow safely
+            // Use unchecked for oldPosition + amount to handle potential overflow safely
             unchecked {
-                newNet = currentNet + amount;
+                newNet = oldPosition + amount;
             }
             
             if (newNet == 0) {
                 marginRequired = 0;
             } else {
                 // Required margin should reflect the new net exposure
-                // If this trade only reduces exposure (without flipping side), use entry price as basis
-                // to avoid margin spikes; if it flips side (e.g., long -> short), use execution price
-                // so the new short correctly locks 150% at the actual trade price.
-                uint256 basisPrice = price;
-                // Use the latest on-chain position (currentNet) for side/reduction checks to handle
-                // sequential partial closes within the same matching cycle.
-                bool reducesExposure = (currentNet > 0 && amount < 0) || (currentNet < 0 && amount > 0);
-                bool flipsSide = (currentNet > 0 && newNet < 0) || (currentNet < 0 && newNet > 0);
-                if (reducesExposure && !flipsSide) {
-                    // Try to fetch current entry price to use as a stable basis on partial close
-                    try vault.getPositionSummary(user, marketId) returns (int256 /*size*/, uint256 entryPrice, uint256 /*marginLocked*/) {
-                        if (entryPrice > 0) {
-                            basisPrice = entryPrice;
-                        }
-                    } catch {}
-                }
                 // Use safe calculation from _calculateExecutionMargin
-                marginRequired = _calculateExecutionMargin(newNet, basisPrice);
+                marginRequired = _calculateExecutionMargin(newNet, price);
             }
         }
         
@@ -2626,7 +2619,7 @@ contract OrderBook {
         emit PriceUpdated(lastTradePrice, currentMark);
         
         // Trigger liquidation scan on any mark change or on interval, guarded against recursion
-        if (!skipLiquidationCheck && liquidationScanOnTrade && !liquidationInProgress &&
+        if (!skipLiquidationCheck && !liquidationInProgress &&
             (lastLiquidationCheck == 0 ||
              LIQUIDATION_INTERVAL == 0 ||
              block.timestamp >= lastLiquidationCheck + LIQUIDATION_INTERVAL ||
@@ -2646,35 +2639,69 @@ contract OrderBook {
     /**
      * @dev Calculate margin required for an order
      * @param amount Order amount
+     * @param price Order price
      * @param isBuy Whether this is a buy order (long position)
      * @return Margin required
      */
-    function _calculateMarginRequired(uint256 amount, uint256 price, bool isBuy) internal view returns (uint256) {
+    function _calculateMarginRequired(uint256 amount, uint256 price, bool isBuy) internal pure returns (uint256) {
         // amount: ALU in 18 decimals
-        // price: USDC in 6 decimals
+        // price:  price in 6 decimals (USDC precision)
         // Return: required margin in USDC (6 decimals)
-        if (amount == 0) return 0;
-        // notional = (amount * price) / 1e18 -> 6 decimals
-        uint256 notional = Math.mulDiv(amount, price, 1e18);
-        // Use configured margin requirement for longs; shorts require 150% by policy
-        uint256 marginBps = isBuy ? marginRequirementBps : 15000;
-        return Math.mulDiv(notional, marginBps, 10000);
+        // notional6 = (amount18 * price6) / 1e18
+        uint256 notional6 = (amount * price) / 1e18;
+        uint256 marginBps = isBuy ? 10000 : 15000; // 100% for buys, 150% for sells (shorts)
+        return (notional6 * marginBps) / 10000;
     }
 
     /**
      * @dev Calculate margin required for a trade execution
      * @param amount Trade amount
+     * @param executionPrice Actual execution price
      * @return Margin required for this execution
      */
-    function _calculateExecutionMargin(int256 amount, uint256 executionPrice) internal view returns (uint256) {
-        if (amount == 0) return 0;
-        // Absolute amount in 18 decimals
+    function _calculateExecutionMargin(int256 amount, uint256 executionPrice) internal returns (uint256) {
+        // Debug input values
+        emit ArithmeticDebugInt("input", "_calculateExecutionMargin", amount, int256(executionPrice), 0);
+        
+        // Get absolute amount
         uint256 absAmount = uint256(amount >= 0 ? amount : -amount);
-        // notional = (absAmount * executionPrice) / 1e18 -> 6 decimals
-        uint256 notional = Math.mulDiv(absAmount, executionPrice, 1e18);
-        // Use configured margin requirement for longs; shorts require 150% by policy
-        uint256 marginBps = amount >= 0 ? marginRequirementBps : 15000;
-        return Math.mulDiv(notional, marginBps, 10000);
+        emit ArithmeticDebug("absoluteValue", "_calculateExecutionMargin.absAmount", absAmount, 0, absAmount);
+        
+        // ROBUST FIX: Use the same dynamic scaling approach as _calculateMarginRequired
+        // First determine appropriate scaling factor based on amount and price magnitudes
+        uint256 scalingFactor;
+        
+        if (absAmount > 1e24 || executionPrice > 1e12) {
+            // For extremely large values, use more aggressive scaling
+            scalingFactor = 1e30;
+        } else if (absAmount > 1e20 || executionPrice > 1e10) {
+            // For very large values
+            scalingFactor = 1e24;
+        } else {
+            // For normal values, standard scaling is sufficient
+            scalingFactor = 1e18;
+        }
+        
+        uint256 scaledAmount = absAmount / scalingFactor;
+        if (scaledAmount == 0) scaledAmount = 1; // Ensure minimum value
+        
+        // Calculate notional value with scaled amount
+        uint256 notionalValue = scaledAmount * executionPrice;
+        
+        // Apply margin requirement
+        uint256 marginBps = amount >= 0 ? 10000 : 15000;
+        uint256 marginRequired = (notionalValue * marginBps) / 10000;
+        
+        // Scale back up proportionally if needed
+        if (scalingFactor > 1e18) {
+            // Scale back up but not fully to avoid overflow
+            marginRequired = marginRequired * (1e18 / (scalingFactor / 1e18));
+        }
+        
+        emit ArithmeticDebug("robustScaling", "_calculateExecutionMargin", absAmount, executionPrice, marginRequired);
+        emit ArithmeticScaling("_calculateExecutionMargin.robust", absAmount, scaledAmount, scalingFactor);
+        
+        return marginRequired;
     }
 
     /**
@@ -3038,7 +3065,17 @@ contract OrderBook {
         emit TradingParametersUpdated(_marginRequirementBps, _tradingFee, _feeRecipient);
     }
 
-    
+    /**
+     * @dev Update mark price smoothing configuration
+     * @param _alphaBps Alpha in basis points (0-10000)
+     * @param _enabled Whether smoothing is enabled
+     */
+    function updateMarkSmoothing(uint256 _alphaBps, bool _enabled) external onlyAdmin {
+        require(_alphaBps <= 10000, "OrderBook: alpha too high");
+        lastTradeSmoothingAlphaBps = _alphaBps;
+        useSmoothedLastTrade = _enabled;
+        emit MarkSmoothingUpdated(_alphaBps, _enabled);
+    }
 
     /**
      * @dev Update maximum slippage tolerance for market orders
@@ -3342,13 +3379,20 @@ contract OrderBook {
             // Use mid-price if both sides exist
             return (bestBid / 2) + (bestAsk / 2) + ((bestBid % 2 + bestAsk % 2) / 2);
         } else if (lastTradePrice > 0) {
-            // New fallback: use average of last two trade prices when available
-            if (totalTradeCount >= 2) {
-                uint256 p1 = trades[totalTradeCount].price;
-                uint256 p2 = trades[totalTradeCount - 1].price;
-                return (p1 / 2) + (p2 / 2) + ((p1 % 2 + p2 % 2) / 2);
+            // Use smoothed last trade price if enabled and we have a previous mark
+            if (useSmoothedLastTrade && lastMarkPrice > 0) {
+                // EMA: mark = alpha*lastTrade + (1-alpha)*prevMark
+                // alpha in bps
+                uint256 alpha = lastTradeSmoothingAlphaBps;
+                if (alpha > 10000) {
+                    alpha = 10000;
+                }
+                uint256 weightedLast = (lastTradePrice * alpha) / 10000;
+                uint256 weightedPrev = (lastMarkPrice * (10000 - alpha)) / 10000;
+                uint256 ema = weightedLast + weightedPrev;
+                return ema;
             }
-            // Only one trade recorded: use that last traded price
+            // Otherwise use last trade price as-is
             return lastTradePrice;
         } else if (bestBid > 0) {
             // If only bid exists, use bid as proxy
@@ -3509,17 +3553,5 @@ contract OrderBook {
         }
     }
 
-    event LiquidationConfigUpdated(bool scanOnTrade, bool debug);
-
-    function setConfigLiquidationScanOnTrade(bool enabled) external {
-        require(msg.sender == leverageController || msg.sender == feeRecipient, "Unauthorized");
-        liquidationScanOnTrade = enabled;
-        emit LiquidationConfigUpdated(liquidationScanOnTrade, liquidationDebug);
-    }
-
-    function setConfigLiquidationDebug(bool enabled) external {
-        require(msg.sender == leverageController || msg.sender == feeRecipient, "Unauthorized");
-        liquidationDebug = enabled;
-        emit LiquidationConfigUpdated(liquidationScanOnTrade, liquidationDebug);
-    }
+    
 }
