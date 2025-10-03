@@ -25,10 +25,10 @@ const path = require("path");
 
 // Configuration
 const USDC_PER_USER = "10000"; // 10,000 USDC per user
-const COLLATERAL_PER_USER = "75"; // 1,000 USDC collateral per user (default)
-const USER1_COLLATERAL = "75"; // 5,000 USDC collateral for User 1 (for $2.50 buy orders)
-const USER2_COLLATERAL = "75"; // 5,000 USDC collateral for User 2 (for $2.50 sell orders)
-const USER3_COLLATERAL = "75"; // 15 USDC collateral for User 3
+const COLLATERAL_PER_USER = "1000"; // 1,000 USDC collateral per user (default)
+const USER1_COLLATERAL = "1000"; // 5,000 USDC collateral for User 1 (for $2.50 buy orders)
+const USER2_COLLATERAL = "1000"; // 5,000 USDC collateral for User 2 (for $2.50 sell orders)
+const USER3_COLLATERAL = "1000"; // 15 USDC collateral for User 3
 const NUM_USERS = 5; // Setup 5 trading accounts
 // Toggle: enable/disable placing initial orders and trades during deployment
 const ENABLE_INITIAL_TRADES = false; // set to true to place initial orders/trades

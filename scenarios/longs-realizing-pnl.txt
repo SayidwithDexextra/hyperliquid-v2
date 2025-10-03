@@ -1,0 +1,21 @@
+U3 LS 1.00 1 40
+U3 LS 1.00 1 40
+
+U2 MB 2 60 200
+
+# U2 opens a ~$60 long near $1.00
+U2 MB 2 60 200
+
+# Lift price with a moderate market buy to move mark upward
+U1 MB 2 20 200
+ 
+# Seed bid-side liquidity at higher prices so U2 can sell profitably
+U4 LB 1.06 1 40
+U5 LB 1.04 1 40
+
+U2 MS 2 60 200
+
+# Check U2 portfolio for realized P&L
+U2 PF
+
+

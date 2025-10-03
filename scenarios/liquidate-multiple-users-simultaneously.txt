@@ -1,0 +1,16 @@
+# Seed asks to open two longs: U4 sells ~$18 and U5 sells ~$18 at $1.00
+U4 LS 1.00 2 18
+U5 LS 1.00 2 18
+
+# U2 and U3 each open ~$18 longs
+U2 MB 2 18 200
+U3 MB 2 18 200
+
+# One market sell attempts to liquidate both simultaneously
+U1 MS 2 20 200
+
+# Check U2 and U3 portfolios after liquidation
+U2 PF
+U3 PF
+
+

@@ -5007,12 +5007,20 @@ ${colors.brightRed}└───────────────────�
     let user = this.currentUser;
     let userIndex = this.currentUserIndex;
     let cursor = 0;
-    if (/^u\d+$/i.test(parts[0])) {
-      const idx = parseInt(parts[0].slice(1), 10);
-      if (Number.isNaN(idx) || idx < 1 || idx > this.users.length) {
-        throw new Error(`Invalid user: ${parts[0]}`);
+    // Support special deployer symbol and remap U1 -> first non-deployer (users[1])
+    if (/^(deployer|@dep|@)$/i.test(parts[0])) {
+      userIndex = 0;
+      user = this.users[userIndex];
+      cursor++;
+    } else if (/^u\d+$/i.test(parts[0])) {
+      const n = parseInt(parts[0].slice(1), 10);
+      // U1 is the first non-deployer signer (array index 1)
+      if (Number.isNaN(n) || n < 1 || n >= this.users.length) {
+        throw new Error(
+          `Invalid user: ${parts[0]} (use DEP for deployer, U1 for first non-deployer)`
+        );
       }
-      userIndex = idx - 1;
+      userIndex = n;
       user = this.users[userIndex];
       cursor++;
     }
@@ -5052,7 +5060,7 @@ ${colors.brightRed}└───────────────────�
           try {
             console.log(
               colorText(
-                "ℹ️ No user selected; defaulting to Deployer (U1)",
+                "ℹ️ No user selected; defaulting to Deployer (@)",
                 colors.dim
               )
             );
@@ -5639,19 +5647,23 @@ ${colors.brightRed}└───────────────────�
 
       case "SU": {
         const idxStr = parts[cursor++];
-        if (!idxStr) throw new Error("SU usage: SU userIndex");
-        const idx = Number(idxStr) - 1;
-        if (isNaN(idx) || idx < 0 || idx >= this.users.length)
-          throw new Error("Invalid user index");
+        if (!idxStr) throw new Error("SU usage: SU DEPLOYER|@|userIndex");
+        let idx;
+        let label;
+        if (/^(deployer|@)$/i.test(idxStr)) {
+          idx = 0;
+          label = "Deployer";
+        } else {
+          const n = Number(idxStr);
+          if (isNaN(n) || n < 1 || n >= this.users.length)
+            throw new Error("Invalid user index");
+          idx = n; // U1 -> users[1]
+          label = `User ${n}`;
+        }
         this.currentUser = this.users[idx];
         this.currentUserIndex = idx;
-        console.log(
-          colorText(
-            `✅ Switched to ${idx === 0 ? "Deployer" : `User ${idx}`}`,
-            colors.brightCyan
-          )
-        );
-        return `SU ${idx + 1}`;
+        console.log(colorText(`✅ Switched to ${label}`, colors.brightCyan));
+        return `SU ${/^(deployer|@)$/i.test(idxStr) ? "DEPLOYER" : idx}`;
       }
 
       case "POKE_LIQ": {
@@ -5838,7 +5850,7 @@ ${colors.brightRed}└───────────────────�
     );
     console.log(
       colorText(
-        "│ Prefix: U{n} targets user (e.g., U2)                      │",
+        "│ Prefix: @ targets Deployer; U{n} targets users (U1=first non-deployer) │",
         colors.white
       )
     );
@@ -5886,7 +5898,7 @@ ${colors.brightRed}└───────────────────�
     );
     console.log(
       colorText(
-        "│ Misc:   SU n (switch user) | SLT (slippage test)           │",
+        "│ Misc:   SU @|n (switch user) | SLT (slippage test)         │",
         colors.white
       )
     );

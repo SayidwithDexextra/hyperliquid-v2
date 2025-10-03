@@ -1,0 +1,14 @@
+# Provide minimal opposite liquidity: U3 sells ~$18 at $1.00
+U3 LS 1.00 2 18
+
+# U2 opens a ~$18 long near $1.00
+U2 MB 2 18 200
+
+# Small market sell pushes price below entry to trigger liquidation
+U1 MS 2 6 200
+
+# Check U2 post-liquidation: correct remaining collateral and no open positions
+U2 PF
+U2 POS
+
+

@@ -1,0 +1,22 @@
+# Set stacked bids: U4 posts $0.98 for ~$15 notional (to be consumed on liquidation)
+U4 LB 0.98 2 15
+# U5 posts deeper liquidity at $0.96 for ~$15 notional
+U5 LB 0.96 2 15
+# U4 adds another deeper layer at $0.94 for ~$10 notional
+U4 LB 0.94 2 10
+
+# U3 offers to sell ~$25 at $1.00 to open a long against
+U3 LS 1.00 2 25
+
+# U2 opens a ~$25 long at market near $1.00
+U2 MB 2 25 200
+
+# U1 nudges price down with a small market sell to trigger liquidation checks
+U1 MS 2 5 200
+
+# Inspect U2 (position should be liquidated by consuming stacked bids)
+U2 POS
+# View U2 portfolio after liquidation (remaining collateral and haircuts if any)
+U2 PF
+
+

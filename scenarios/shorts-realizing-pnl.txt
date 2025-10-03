@@ -1,0 +1,17 @@
+# Seed bids around $1.00 and $0.95 for short entry and profit-taking lower
+U3 LB 1.00 2 15
+U3 LB 0.95 2 15
+
+# U2 opens a ~$15 short by selling into $1.00 bids
+U2 MS 2 15 200
+
+# Nudge price lower to improve cover price
+U1 MS 2 8 200
+
+# U2 buys back to close the short into lower liquidity, realizing P&L
+U2 MB 2 15 200
+
+# Check U2 portfolio for realized P&L
+U2 PF
+
+
