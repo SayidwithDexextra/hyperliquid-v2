@@ -33,3 +33,4 @@ coverage.json
 
 # Gas reports
 gas-report.txt
+config/contracts.js
