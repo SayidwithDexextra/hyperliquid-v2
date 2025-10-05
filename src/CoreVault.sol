@@ -651,6 +651,19 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             availableMargin = availableBeforeReserved > totalMarginCommitted
                 ? (availableBeforeReserved - totalMarginCommitted)
                 : 0;
+
+            // Subtract outstanding socialized loss accrued on open positions (6 decimals)
+            if (availableMargin > 0) {
+                uint256 outstandingHaircut6 = 0;
+                for (uint256 i = 0; i < userPositions[user].length; i++) {
+                    outstandingHaircut6 += userPositions[user][i].socializedLossAccrued6;
+                }
+                if (outstandingHaircut6 > 0) {
+                    availableMargin = availableMargin > outstandingHaircut6
+                        ? (availableMargin - outstandingHaircut6)
+                        : 0;
+                }
+            }
         }
         
         // Simple health check: available margin should be positive
@@ -713,13 +726,28 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             }
         }
 
-        return VaultAnalytics.getMarginSummary(
+        VaultAnalytics.MarginSummary memory summary = VaultAnalytics.getMarginSummary(
             userCollateral[user],
             realizedAdj,
             positions,
             userPendingOrders[user],
             markPrices
         );
+
+        // Subtract outstanding per-position socialized haircuts from availableCollateral
+        if (summary.availableCollateral > 0) {
+            uint256 outstandingHaircut6 = 0;
+            for (uint256 i = 0; i < userPositions[user].length; i++) {
+                outstandingHaircut6 += userPositions[user][i].socializedLossAccrued6;
+            }
+            if (outstandingHaircut6 > 0) {
+                summary.availableCollateral = summary.availableCollateral > outstandingHaircut6
+                    ? (summary.availableCollateral - outstandingHaircut6)
+                    : 0;
+            }
+        }
+
+        return summary;
     }
 
     function getAvailableCollateral(address user) public view returns (uint256) {
@@ -745,6 +773,19 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         int256 realizedPnL6 = realizedPnL18 / int256(DECIMAL_SCALE);
         int256 baseWithRealized = int256(baseAvailable) + realizedPnL6;
         uint256 availableWithRealized = baseWithRealized > 0 ? uint256(baseWithRealized) : 0;
+
+        // Subtract outstanding per-position socialized loss (6 decimals)
+        if (availableWithRealized > 0) {
+            uint256 outstandingHaircut6 = 0;
+            for (uint256 i = 0; i < userPositions[user].length; i++) {
+                outstandingHaircut6 += userPositions[user][i].socializedLossAccrued6;
+            }
+            if (outstandingHaircut6 > 0) {
+                availableWithRealized = availableWithRealized > outstandingHaircut6
+                    ? (availableWithRealized - outstandingHaircut6)
+                    : 0;
+            }
+        }
 
         // Subtract margin reserved for pending orders
         uint256 reserved = 0;
