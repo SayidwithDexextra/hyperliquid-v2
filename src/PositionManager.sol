@@ -24,6 +24,7 @@ library PositionManager {
         uint256 entryPrice;
         uint256 marginLocked;
         uint256 socializedLossAccrued6; // USDC (6 decimals) haircut accrued against this position's payout
+        uint256 haircutUnits18; // Units (18 decimals) tagged at socialization time
         uint256 liquidationPrice; // Fixed trigger price (6 decimals)
     }
 
@@ -73,6 +74,7 @@ library PositionManager {
             result.oldEntryPrice = position.entryPrice;
             result.oldMargin = position.marginLocked;
             uint256 oldHaircut6 = position.socializedLossAccrued6;
+            uint256 oldHaircutUnits18 = position.haircutUnits18;
             
             // Calculate new position
             result.newSize = position.size + sizeDelta;
@@ -139,17 +141,22 @@ library PositionManager {
                     uint256 absDelta = uint256(sizeDelta > 0 ? sizeDelta : -sizeDelta);
                     uint256 posAbs = uint256(position.size > 0 ? position.size : -position.size);
                     if (absDelta < posAbs) {
-                        // Partial close only: keep original entry price for the remaining position
-                        result.newEntryPrice = position.entryPrice;
-                        // Realize proportional haircut for the closed fraction
-                        uint256 haircutClosed6 = oldHaircut6 == 0 ? 0 : (oldHaircut6 * absDelta) / posAbs;
-                        if (haircutClosed6 > 0) {
-                            if (haircutClosed6 > position.socializedLossAccrued6) {
-                                haircutClosed6 = position.socializedLossAccrued6;
-                            }
-                            position.socializedLossAccrued6 = position.socializedLossAccrued6 - haircutClosed6;
-                            result.haircutToConfiscate6 = haircutClosed6;
+                    // Partial close only: keep original entry price for the remaining position
+                    result.newEntryPrice = position.entryPrice;
+                    // Realize haircut only on the originally socialized units, not on newly added units
+                    uint256 unitsToRelease18 = oldHaircutUnits18 == 0 ? 0 : (absDelta > oldHaircutUnits18 ? oldHaircutUnits18 : absDelta);
+                    uint256 haircutClosed6 = (oldHaircut6 == 0 || oldHaircutUnits18 == 0) ? 0 : (oldHaircut6 * unitsToRelease18) / oldHaircutUnits18;
+                    if (haircutClosed6 > 0) {
+                        if (haircutClosed6 > position.socializedLossAccrued6) {
+                            haircutClosed6 = position.socializedLossAccrued6;
                         }
+                        position.socializedLossAccrued6 = position.socializedLossAccrued6 - haircutClosed6;
+                        // Reduce the tagged units by the portion actually closed
+                        if (unitsToRelease18 > 0) {
+                            position.haircutUnits18 = position.haircutUnits18 - unitsToRelease18;
+                        }
+                        result.haircutToConfiscate6 = haircutClosed6;
+                    }
                     } else {
                         // Flip: entire old position closed and new opened at execution price
                         result.newEntryPrice = executionPrice;
@@ -195,6 +202,7 @@ library PositionManager {
                 entryPrice: executionPrice,
                 marginLocked: requiredMargin,
                 socializedLossAccrued6: 0,
+                haircutUnits18: 0,
                 liquidationPrice: 0
             }));
         }
@@ -279,6 +287,7 @@ library PositionManager {
                 entryPrice: newEntryPrice,
                 marginLocked: newMargin,
                 socializedLossAccrued6: 0,
+                haircutUnits18: 0,
                 liquidationPrice: 0
             }));
             // Margin now tracked exclusively in Position struct

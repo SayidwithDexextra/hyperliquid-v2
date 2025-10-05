@@ -1,7 +1,7 @@
-U3 LS 1.00 1 40
-U3 LS 1.00 1 40
+@ LS 1.00 1 10
+U1 LB 1.00 1 10
+U3 LB 5 1 20
 
-U2 MB 2 60 200
 
 # U2 opens a ~$60 long near $1.00
 U2 MB 2 60 200

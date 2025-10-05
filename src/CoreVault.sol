@@ -301,31 +301,35 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             totalMarginLocked -= result.marginToRelease;
         }
         
-        // Realize any per-position haircut tied to this trade: first from margin release, remainder persists or becomes bad debt if closed
+        // Realize any per-position haircut tied to this trade against realized PnL from the closed units
         if (result.haircutToConfiscate6 > 0) {
-            // Realize haircut from the payout components of this trade only.
-            // We do not debit userCollateral directly; we net from the margin release portion.
-            uint256 realizedFromRelease = result.haircutToConfiscate6 <= result.marginToRelease ? result.haircutToConfiscate6 : result.marginToRelease;
-            if (realizedFromRelease > 0) {
-                // Reduce margin release by the realized haircut (implicitly retained by the system)
-                // No userCollateral change here; the release simply does not credit out.
-                emit HaircutApplied(user, marketId, realizedFromRelease, userCollateral[user]);
+            // Available realized profit to offset haircut (convert realized PnL 18d -> 6d)
+            uint256 realizedProfit6 = 0;
+            if (result.realizedPnL > 0) {
+                realizedProfit6 = uint256(result.realizedPnL) / DECIMAL_SCALE;
             }
-            uint256 remainderHaircut = result.haircutToConfiscate6 - realizedFromRelease;
-            if (remainderHaircut > 0) {
-                if (result.positionClosed) {
-                    // Any unpaid haircut at full close becomes bad debt
-                    marketBadDebt[marketId] += remainderHaircut;
-                    emit BadDebtRecorded(marketId, remainderHaircut, user);
-                } else {
-                    // Carry forward on the still-open position
-                    for (uint256 i = 0; i < userPositions[user].length; i++) {
-                        if (userPositions[user][i].marketId == marketId && userPositions[user][i].size != 0) {
-                            userPositions[user][i].socializedLossAccrued6 += remainderHaircut;
-                            break;
-                        }
-                    }
+            uint256 appliedFromProfit6 = result.haircutToConfiscate6 <= realizedProfit6 ? result.haircutToConfiscate6 : realizedProfit6;
+            if (appliedFromProfit6 > 0) {
+                // Reduce realized profit credited to the user
+                int256 applied18 = int256(appliedFromProfit6) * int256(DECIMAL_SCALE);
+                // Clamp: do not underflow below zero
+                if (result.realizedPnL > 0 && applied18 <= result.realizedPnL) {
+                    result.realizedPnL = result.realizedPnL - applied18;
+                } else if (result.realizedPnL > 0) {
+                    result.realizedPnL = 0;
                 }
+                // Decrement the cumulative UI ledger
+                uint256 ledger = userSocializedLoss[user];
+                if (ledger > 0) {
+                    userSocializedLoss[user] = appliedFromProfit6 >= ledger ? 0 : (ledger - appliedFromProfit6);
+                }
+                emit HaircutApplied(user, marketId, appliedFromProfit6, userCollateral[user]);
+            }
+            // Any remainder beyond realized profit becomes bad debt tied to this liquidation of units
+            uint256 remainderHaircut6 = result.haircutToConfiscate6 - appliedFromProfit6;
+            if (remainderHaircut6 > 0) {
+                marketBadDebt[marketId] += remainderHaircut6;
+                emit BadDebtRecorded(marketId, remainderHaircut6, user);
             }
         }
 
@@ -1889,6 +1893,20 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                     uint256 assign = targetAssign[i] <= cap6 ? targetAssign[i] : cap6;
                     if (assign > 0) {
                         positions[j].socializedLossAccrued6 += assign;
+                        // Tag the quantity of units that this haircut applies to, so future
+                        // increases in position size do not expand haircut to new units
+                        uint256 absSizeUnits18 = absSize; // already in 18 decimals
+                        if (markPrice > 0) {
+                            uint256 unitsTagged18 = (assign * (10**18)) / markPrice; // map USDC->units
+                            uint256 currentTagged18 = positions[j].haircutUnits18;
+                            uint256 untaggedCapacity18 = absSizeUnits18 > currentTagged18 ? (absSizeUnits18 - currentTagged18) : 0;
+                            if (unitsTagged18 > untaggedCapacity18) {
+                                unitsTagged18 = untaggedCapacity18;
+                            }
+                            if (unitsTagged18 > 0) {
+                                positions[j].haircutUnits18 = currentTagged18 + unitsTagged18;
+                            }
+                        }
                         userSocializedLoss[u] += assign; // aggregate for analytics/UI
                         allocated += assign;
                         emit HaircutApplied(u, marketId, assign, userCollateral[u]);
@@ -1911,6 +1929,19 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                         uint256 addl = remaining <= remainingCap[i] ? remaining : remainingCap[i];
                         if (addl > 0) {
                             positions[j].socializedLossAccrued6 += addl;
+                            // Tag additional units for remainder haircut up to current size
+                            uint256 absSizeUnits18 = uint256(positions[j].size >= 0 ? positions[j].size : -positions[j].size);
+                            if (markPrice > 0) {
+                                uint256 unitsTagged18 = (addl * (10**18)) / markPrice;
+                                uint256 currentTagged18 = positions[j].haircutUnits18;
+                                uint256 untaggedCapacity18 = absSizeUnits18 > currentTagged18 ? (absSizeUnits18 - currentTagged18) : 0;
+                                if (unitsTagged18 > untaggedCapacity18) {
+                                    unitsTagged18 = untaggedCapacity18;
+                                }
+                                if (unitsTagged18 > 0) {
+                                    positions[j].haircutUnits18 = currentTagged18 + unitsTagged18;
+                                }
+                            }
                             userSocializedLoss[u] += addl;
                             remaining -= addl;
                             allocated += addl;
