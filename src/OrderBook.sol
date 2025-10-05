@@ -154,6 +154,8 @@ contract OrderBook {
     bool private liquidationInProgress;
     // Indicates we are executing a liquidation market matching flow
     bool private liquidationMode;
+    // Flag to defer a liquidation rescan if new liquidity arrives during an active liquidation
+    bool private pendingLiquidationRescan;
     // Target user whose position is being force-closed during liquidation market order
     address private liquidationTarget;
     // True when liquidation market order is a BUY to close a short; false when SELL to close a long
@@ -457,6 +459,16 @@ contract OrderBook {
         // Clear recursion guard
         liquidationInProgress = false;
         
+        // If a rescan was requested while guard was active, process it immediately
+        if (pendingLiquidationRescan) {
+            pendingLiquidationRescan = false;
+            uint256 currentMark2 = _calculateMarkPrice();
+            vault.updateMarkPrice(marketId, currentMark2);
+            emit LiquidationCheckTriggered(currentMark2, lastMarkPrice);
+            _checkPositionsForLiquidation(currentMark2);
+            lastMarkPrice = currentMark2;
+        }
+        
         // DEBUG: PAST - Liquidation check completed, recursion guard cleared
         // This section finalizes the liquidation check and reports results
         emit LiquidationCheckFinished(tradersChecked, liquidationsTriggered, lastCheckedIndex);
@@ -535,7 +547,24 @@ contract OrderBook {
                 }
                 marketOrderSuccess = liquidationResult.success;
             }
-            emit LiquidationMarketOrderResult(trader, marketOrderSuccess, marketOrderSuccess ? "Market order filled" : "No liquidity available");
+            // Emit clearer result based on actual fill rather than the success threshold
+            {
+                uint256 requestedAbs = size < 0 ? uint256(-size) : uint256(size);
+                bool eventSuccess = liquidationResult.filledAmount > 0;
+                string memory reason;
+                if (eventSuccess) {
+                    reason = (liquidationResult.filledAmount >= requestedAbs)
+                        ? "Market order filled"
+                        : "Partial fill";
+                } else {
+                    // Differentiate true absence of book liquidity from insufficient depth/slippage
+                    bool noOpposingLiquidity = (size < 0 && bestAsk == 0) || (size > 0 && bestBid == 0);
+                    reason = noOpposingLiquidity
+                        ? "No opposing liquidity"
+                        : "Insufficient liquidity for requested size or slippage";
+                }
+                emit LiquidationMarketOrderResult(trader, eventSuccess, reason);
+            }
 
             if (liquidationResult.filledAmount > 0) {
                 // Mark position under liquidation control to avoid full close paths
@@ -585,6 +614,8 @@ contract OrderBook {
         bool isBuy,
         uint256 markPrice
     ) internal returns (LiquidationExecutionResult memory result) {
+        // Defensive: ensure best bid/ask pointers reflect current book state
+        _resyncBestPrices();
         // Initialize result
         result.success = false;
         result.filledAmount = 0;
@@ -598,12 +629,28 @@ contract OrderBook {
             return result;
         }
         
-        // Check if there's any liquidity available
+        // Check if there's any liquidity available and emit liquidation-specific checks
         if (isBuy && bestAsk == 0) {
-            return result; // No asks available for buy order
+            // Attempt to recompute bestAsk in case it was not synchronized yet
+            uint256 recomputedAsk = _findNewBestAsk();
+            if (recomputedAsk != 0) {
+                bestAsk = recomputedAsk;
+            }
+            emit LiquidationLiquidityCheck(true, bestAsk, bestAsk != 0);
+            if (bestAsk == 0) {
+                return result; // No asks available for buy order
+            }
         }
         if (!isBuy && bestBid == 0) {
-            return result; // No bids available for sell order
+            // Attempt to recompute bestBid in case it was not synchronized yet
+            uint256 recomputedBid = _findNewBestBid();
+            if (recomputedBid != 0) {
+                bestBid = recomputedBid;
+            }
+            emit LiquidationLiquidityCheck(false, bestBid, bestBid != 0);
+            if (bestBid == 0) {
+                return result; // No bids available for sell order
+            }
         }
         
         // Calculate maximum acceptable slippage (15% from mark price for liquidations)
@@ -620,6 +667,7 @@ contract OrderBook {
                 (markPrice > liquidationSlippageBps * markPrice / 10000) ? 
                     (markPrice * (10000 - liquidationSlippageBps)) / 10000 : 0;
         }
+        emit LiquidationPriceBounds(maxPrice, minPrice);
         
         // Initialize execution tracking
         liquidationExecutionTotalVolume = 0;
@@ -664,10 +712,26 @@ contract OrderBook {
 
         // If no fill due to slippage window but book has liquidity, widen bounds for liquidation safety
         if (remainingAmount == amount) {
+            // Re-sync before forced crossing, in case pointers changed mid-flow
+            _resyncBestPrices();
+            emit LiquidationResync(bestBid, bestAsk);
+            if (isBuy && bestAsk == 0) {
+                // Late-sync best ask if a level was just added
+                uint256 recomputedAsk2 = _findNewBestAsk();
+                if (recomputedAsk2 != 0) {
+                    bestAsk = recomputedAsk2;
+                }
+            }
             if (isBuy && bestAsk != 0) {
                 // Allow crossing all available asks to force-close the short
                 uint256 maxPriceForce = type(uint256).max;
                 remainingAmount = _matchBuyOrderWithSlippage(liquidationOrder, remainingAmount, maxPriceForce);
+            } else if (!isBuy && bestBid == 0) {
+                // Late-sync best bid if a level was just added
+                uint256 recomputedBid2 = _findNewBestBid();
+                if (recomputedBid2 != 0) {
+                    bestBid = recomputedBid2;
+                }
             } else if (!isBuy && bestBid != 0) {
                 // Allow crossing all available bids to force-close the long
                 uint256 minPriceForce = 0;
@@ -1020,6 +1084,10 @@ contract OrderBook {
     event MarketOrderMarginEstimation(uint256 worstCasePrice, uint256 estimatedMargin, uint256 availableCollateral);
     event MarketOrderCreated(uint256 orderId, address indexed user, uint256 limitPrice, uint256 amount, bool isBuy);
     event MarketOrderCompleted(uint256 filledAmount, uint256 remainingAmount);
+    // Liquidation-specific market order debug events
+    event LiquidationLiquidityCheck(bool isBuy, uint256 bestOppositePrice, bool hasLiquidity);
+    event LiquidationPriceBounds(uint256 maxPrice, uint256 minPrice);
+    event LiquidationResync(uint256 bestBidPrice, uint256 bestAskPrice);
     
     // ============ Enhanced Three-Layer Liquidation Events ============
     
@@ -2016,6 +2084,8 @@ contract OrderBook {
                 buyPrices.push(price);
                 buyPriceExists[price] = true;
             }
+            // New liquidity at a new price level: trigger liquidation scan even if mark doesn't change
+            _onOrderBookLiquidityChanged();
         } else {
             // Add to end of linked list (FIFO)
             PriceLevel storage level = buyLevels[price];
@@ -2049,6 +2119,8 @@ contract OrderBook {
                 sellPrices.push(price);
                 sellPriceExists[price] = true;
             }
+            // New liquidity at a new price level: trigger liquidation scan even if mark doesn't change
+            _onOrderBookLiquidityChanged();
         } else {
             // Add to end of linked list (FIFO)
             PriceLevel storage level = sellLevels[price];
@@ -2069,6 +2141,8 @@ contract OrderBook {
     // Internal hook: trigger liquidation scan when order book depth increases (even if mark unchanged)
     function _onOrderBookLiquidityChanged() private {
         if (liquidationInProgress) {
+            // Defer a rescan once liquidation finishes
+            pendingLiquidationRescan = true;
             emit LiquidationRecursionGuardSet(true);
             return;
         }
@@ -2169,6 +2243,22 @@ contract OrderBook {
             }
         }
         return newBestAsk; // 0 if none exist
+    }
+
+    // Defensive helper: resynchronize best bid/ask pointers from level maps
+    function _resyncBestPrices() private {
+        if (bestBid == 0 || (bestBid != 0 && !buyLevels[bestBid].exists)) {
+            uint256 nb = _findNewBestBid();
+            if (nb != bestBid) {
+                bestBid = nb;
+            }
+        }
+        if (bestAsk == 0 || (bestAsk != 0 && !sellLevels[bestAsk].exists)) {
+            uint256 na = _findNewBestAsk();
+            if (na != bestAsk) {
+                bestAsk = na;
+            }
+        }
     }
 
     /**
@@ -3322,6 +3412,8 @@ contract OrderBook {
      */
     function pokeLiquidations() external {
         if (liquidationInProgress) {
+            // Defer a rescan once liquidation finishes
+            pendingLiquidationRescan = true;
             emit LiquidationRecursionGuardSet(true);
             return;
         }

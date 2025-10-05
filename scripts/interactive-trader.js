@@ -572,6 +572,7 @@ class InteractiveTrader {
     this.currentUserIndex = 0;
     this.isRunning = true;
     this.hackHistory = [];
+    this._mainMenuRenderInProgress = false;
 
     // Concurrency limiter for RPC calls (tunable via env)
     const defaultConcurrency = 3;
@@ -1161,6 +1162,164 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       );
 
       */
+      // Market order deep debug (enabled)
+      this.contracts.orderBook.on(
+        "MarketOrderAttempt",
+        (user, isBuy, amount, referencePrice, slippageBps) => {
+          const ts = new Date().toLocaleTimeString();
+          const amt = formatWithAutoDecimalDetection(amount, 18, 4);
+          const ref = formatWithAutoDecimalDetection(referencePrice, 6, 4);
+          console.log(
+            `${colors.dim}[${ts}]${colors.reset} ${colors.cyan}🛠️ MARKET ORDER ATTEMPT${colors.reset} | ` +
+              `user=${user.slice(0, 8)}...${user.slice(-6)} side=${
+                isBuy ? "BUY" : "SELL"
+              } amt=${amt} ref=$${ref} slip=${String(slippageBps)}bps`
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "MarketOrderLiquidityCheck",
+        (isBuy, bestOppositePrice, hasLiquidity) => {
+          const ts = new Date().toLocaleTimeString();
+          const bestOpp = formatWithAutoDecimalDetection(
+            bestOppositePrice,
+            6,
+            4
+          );
+          console.log(
+            `${colors.dim}[${ts}]${colors.reset} ${colors.cyan}🧪 MARKET ORDER LIQ CHECK${colors.reset} | ` +
+              `side=${isBuy ? "BUY" : "SELL"} bestOpp=$${bestOpp} hasLiq=${
+                hasLiquidity ? "true" : "false"
+              }`
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "MarketOrderPriceBounds",
+        (maxPrice, minPrice) => {
+          const ts = new Date().toLocaleTimeString();
+          const maxP = formatWithAutoDecimalDetection(maxPrice, 6, 4);
+          const minP = formatWithAutoDecimalDetection(minPrice, 6, 4);
+          console.log(
+            `${colors.dim}[${ts}]${colors.reset} ${colors.cyan}📐 MARKET ORDER BOUNDS${colors.reset} | ` +
+              `max=$${maxP} min=$${minP}`
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "MarketOrderMarginEstimation",
+        (worstCasePrice, estimatedMargin, availableCollateral) => {
+          const ts = new Date().toLocaleTimeString();
+          const worst = formatWithAutoDecimalDetection(worstCasePrice, 6, 4);
+          const est = formatWithAutoDecimalDetection(estimatedMargin, 6, 2);
+          const avail = formatWithAutoDecimalDetection(
+            availableCollateral,
+            6,
+            2
+          );
+          console.log(
+            `${colors.dim}[${ts}]${colors.reset} ${colors.cyan}🧮 MARKET ORDER MARGIN EST${colors.reset} | ` +
+              `worst=$${worst} est=$${est} avail=$${avail}`
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "MarketOrderCreated",
+        (orderId, user, limitPrice, amount, isBuy) => {
+          const ts = new Date().toLocaleTimeString();
+          const amt = formatWithAutoDecimalDetection(amount, 18, 4);
+          const lim = formatWithAutoDecimalDetection(limitPrice, 6, 4);
+          console.log(
+            `${colors.dim}[${ts}]${colors.reset} ${colors.cyan}🧩 MARKET ORDER CREATED${colors.reset} | ` +
+              `id=${String(orderId)} user=${user.slice(0, 8)}...${user.slice(
+                -6
+              )} ` +
+              `side=${isBuy ? "BUY" : "SELL"} limit=$${lim} amt=${amt}`
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "MarketOrderCompleted",
+        (filledAmount, remainingAmount) => {
+          const ts = new Date().toLocaleTimeString();
+          const filled = formatWithAutoDecimalDetection(filledAmount, 18, 4);
+          const remain = formatWithAutoDecimalDetection(remainingAmount, 18, 4);
+          console.log(
+            `${colors.dim}[${ts}]${colors.reset} ${colors.cyan}✅ MARKET ORDER COMPLETED${colors.reset} | ` +
+              `filled=${filled} remain=${remain}`
+          );
+        }
+      );
+
+      // Matching engine debug (enabled)
+      this.contracts.orderBook.on(
+        "MatchingStarted",
+        (buyer, remainingAmount, maxPrice, startingPrice, event) => {
+          this.handleMatchingStartedEvent(
+            buyer,
+            remainingAmount,
+            maxPrice,
+            startingPrice,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "PriceLevelEntered",
+        (currentPrice, levelExists, totalAmountAtLevel, event) => {
+          this.handlePriceLevelEnteredEvent(
+            currentPrice,
+            levelExists,
+            totalAmountAtLevel,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "OrderMatchAttempt",
+        (orderId, seller, sellOrderAmount, matchAmount, event) => {
+          this.handleOrderMatchAttemptEvent(
+            orderId,
+            seller,
+            sellOrderAmount,
+            matchAmount,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "SlippageProtectionTriggered",
+        (currentPrice, maxPrice, remainingAmount, event) => {
+          this.handleSlippageProtectionTriggeredEvent(
+            currentPrice,
+            maxPrice,
+            remainingAmount,
+            event
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "MatchingCompleted",
+        (buyer, originalAmount, filledAmount, remainingAmount, event) => {
+          this.handleMatchingCompletedEvent(
+            buyer,
+            originalAmount,
+            filledAmount,
+            remainingAmount,
+            event
+          );
+        }
+      );
+
       // UNCOMMENTED: Old liquidation debugging events
       this.contracts.orderBook.on(
         "LiquidationTradeDetected",
@@ -1420,6 +1579,48 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           );
         }
       );
+
+      // Liquidation-specific market order debug
+      this.contracts.orderBook.on(
+        "LiquidationLiquidityCheck",
+        (isBuy, bestOppositePrice, hasLiquidity) => {
+          const ts = new Date().toLocaleTimeString();
+          const bestOpp = formatWithAutoDecimalDetection(
+            bestOppositePrice,
+            6,
+            4
+          );
+          console.log(
+            `${colors.dim}[${ts}]${colors.reset} ${colors.brightMagenta}🧪 LIQ LIQUIDITY CHECK${colors.reset} | ` +
+              `side=${isBuy ? "BUY" : "SELL"} bestOpp=$${bestOpp} hasLiq=${
+                hasLiquidity ? "true" : "false"
+              }`
+          );
+        }
+      );
+
+      this.contracts.orderBook.on(
+        "LiquidationPriceBounds",
+        (maxPrice, minPrice) => {
+          const ts = new Date().toLocaleTimeString();
+          const maxP = formatWithAutoDecimalDetection(maxPrice, 6, 4);
+          const minP = formatWithAutoDecimalDetection(minPrice, 6, 4);
+          console.log(
+            `${colors.dim}[${ts}]${colors.reset} ${colors.brightMagenta}📐 LIQ PRICE BOUNDS${colors.reset} | ` +
+              `max=$${maxP} min=$${minP}`
+          );
+        }
+      );
+
+      this.contracts.orderBook.on("LiquidationResync", (bestBid, bestAsk) => {
+        const ts = new Date().toLocaleTimeString();
+        const bid = formatWithAutoDecimalDetection(bestBid, 6, 4);
+        const ask = formatWithAutoDecimalDetection(bestAsk, 6, 4);
+        console.log(
+          `${colors.dim}[${ts}]${colors.reset} ${colors.brightMagenta}🔄 LIQ RESYNC${colors.reset} | ` +
+            `bestBid=$${bid} bestAsk=$${ask}`
+        );
+      });
 
       this.contracts.orderBook.on(
         "LiquidationMarketOrderResult",
@@ -4948,14 +5149,63 @@ ${colors.brightRed}└───────────────────�
     console.clear();
     await this.renderHackHeader();
     this.printHackLegend();
+    // Enable ESC-to-exit handling for Hack Mode
+    const input = this.rl && this.rl.input;
+    let escListener = null;
+    let rawModeEnabled = false;
+    const detachEsc = () => {
+      if (input && escListener) {
+        try {
+          input.off("data", escListener);
+        } catch (_) {}
+        escListener = null;
+      }
+      if (input && rawModeEnabled && typeof input.setRawMode === "function") {
+        try {
+          input.setRawMode(false);
+        } catch (_) {}
+        rawModeEnabled = false;
+      }
+    };
+    if (input && typeof input.on === "function") {
+      try {
+        if (typeof input.setRawMode === "function") {
+          input.setRawMode(true);
+          rawModeEnabled = true;
+        }
+      } catch (_) {}
+      escListener = (chunk) => {
+        try {
+          const buf = Buffer.isBuffer(chunk)
+            ? chunk
+            : Buffer.from(String(chunk));
+          if (buf.length === 1 && buf[0] === 0x1b) {
+            this._hackEscPressed = true;
+            try {
+              this.rl.write(null, { name: "return" });
+            } catch (_) {}
+          }
+        } catch (_) {}
+      };
+      try {
+        input.on("data", escListener);
+      } catch (_) {}
+    }
 
     while (true) {
       const line = await this.askQuestion(
         colorText("\nhack> ", colors.brightMagenta)
       );
       const raw = String(line || "").trim();
+      if (this._hackEscPressed) {
+        this._hackEscPressed = false;
+        detachEsc();
+        await this.selectUser();
+        return;
+      }
       if (!raw) continue;
       if (raw.toLowerCase() === "back" || raw.toLowerCase() === "exit") {
+        detachEsc();
         await this.selectUser();
         return;
       }
@@ -5921,7 +6171,7 @@ ${colors.brightRed}└───────────────────�
       )
     );
     console.log(
-      colorText("Type 'help' for this legend, 'back' to return.", colors.dim)
+      colorText("Press ESC to return. Type 'help' for this legend.", colors.dim)
     );
   }
 
@@ -7121,17 +7371,107 @@ ${colors.brightRed}└───────────────────�
   }
 
   async showMainMenu() {
-    while (this.isRunning) {
-      console.clear();
-      await this.displayHeader();
-      await this.displayPortfolio();
-      await this.displayOrderBook();
-      await this.displayMenu();
+    // Attach left/right arrow listener to switch users while on main menu
+    const input = this.rl && this.rl.input;
+    let rawModeEnabled = false;
+    let keyListener = null;
 
-      const choice = await this.askQuestion(
-        colorText("\n🎯 Choose action: ", colors.brightMagenta)
-      );
-      await this.handleMenuChoice(choice);
+    const detachKeyListener = () => {
+      if (input && keyListener) {
+        try {
+          input.off("data", keyListener);
+        } catch (_) {}
+        keyListener = null;
+      }
+      if (input && rawModeEnabled && typeof input.setRawMode === "function") {
+        try {
+          input.setRawMode(false);
+        } catch (_) {}
+        rawModeEnabled = false;
+      }
+    };
+
+    if (input && typeof input.on === "function") {
+      try {
+        if (typeof input.setRawMode === "function") {
+          input.setRawMode(true);
+          rawModeEnabled = true;
+        }
+      } catch (_) {}
+      keyListener = async (chunk) => {
+        try {
+          const buf = Buffer.isBuffer(chunk)
+            ? chunk
+            : Buffer.from(String(chunk));
+          // Arrow keys come as ESC [ C/D (right/left)
+          const isEscSeq =
+            buf.length >= 3 && buf[0] === 0x1b && buf[1] === 0x5b;
+          if (!isEscSeq) return;
+          const code = buf[2];
+          if (code === 0x43) {
+            // Right arrow: next user
+            const next = (this.currentUserIndex + 1) % this.users.length;
+            this.currentUserIndex = next;
+            this.currentUser = this.users[next];
+            if (this._mainMenuRenderInProgress) return;
+            this._mainMenuRenderInProgress = true;
+            try {
+              console.clear();
+              await this.displayHeader();
+              await this.displayPortfolio();
+              await this.displayOrderBook();
+              await this.displayMenu();
+              process.stdout.write(
+                colorText("\n🎯 Choose action: ", colors.brightMagenta)
+              );
+            } finally {
+              this._mainMenuRenderInProgress = false;
+            }
+          } else if (code === 0x44) {
+            // Left arrow: previous user
+            const prev =
+              (this.currentUserIndex - 1 + this.users.length) %
+              this.users.length;
+            this.currentUserIndex = prev;
+            this.currentUser = this.users[prev];
+            if (this._mainMenuRenderInProgress) return;
+            this._mainMenuRenderInProgress = true;
+            try {
+              console.clear();
+              await this.displayHeader();
+              await this.displayPortfolio();
+              await this.displayOrderBook();
+              await this.displayMenu();
+              process.stdout.write(
+                colorText("\n🎯 Choose action: ", colors.brightMagenta)
+              );
+            } finally {
+              this._mainMenuRenderInProgress = false;
+            }
+          }
+        } catch (_) {}
+      };
+      try {
+        input.on("data", keyListener);
+      } catch (_) {}
+    }
+
+    try {
+      while (this.isRunning) {
+        console.clear();
+        await this.displayHeader();
+        await this.displayPortfolio();
+        await this.displayOrderBook();
+        await this.displayMenu();
+
+        const choice = await this.askQuestion(
+          colorText("\n🎯 Choose action: ", colors.brightMagenta)
+        );
+        await this.handleMenuChoice(choice);
+      }
+    } finally {
+      // Always detach listener when leaving main menu loop
+      detachKeyListener();
     }
   }
 
@@ -7221,6 +7561,13 @@ ${colors.brightRed}└───────────────────�
       colorText(
         `🎯 Event Listeners: ${colors.brightGreen}ACTIVE${colors.reset} ${colors.dim}(Trading, MatchingEngine, TradeExecution, Liquidation Debug)${colors.reset}`,
         colors.dim
+      )
+    );
+    // Quick hint about arrow navigation between users
+    console.log(
+      colorText(
+        `⌨️  Tip: Use ←/→ arrow keys to switch users without leaving this page`,
+        colors.yellow
       )
     );
     console.log(gradient("═".repeat(80)));
@@ -7644,8 +7991,15 @@ ${colors.brightRed}└───────────────────�
       );
 
       // Key Insights Box with Comprehensive Margin Data
+      const insightsUserLabel =
+        this.currentUserIndex === 0
+          ? "Deployer"
+          : `User ${this.currentUserIndex}`;
       console.log(
-        colorText("\n🔍 KEY INSIGHTS & MARGIN BREAKDOWN:", colors.brightCyan)
+        colorText(
+          `\n🔍 KEY INSIGHTS & MARGIN BREAKDOWN (${insightsUserLabel}):`,
+          colors.brightCyan
+        )
       );
       console.log(
         colorText(
@@ -8011,24 +8365,50 @@ ${colors.brightRed}└───────────────────�
       try {
         // Get comprehensive market data from OrderBook
         const marketData = await this.contracts.orderBook.getMarketPriceData();
+        // Always display mark price if available, even when isValid is false
+        try {
+          if (marketData && marketData.markPrice && marketData.markPrice > 0) {
+            markPriceDisplay = colorText(
+              "$" +
+                formatPriceWithValidation(marketData.markPrice, 6, 4, false),
+              colors.brightCyan
+            );
+          }
+        } catch (_) {}
 
-        if (marketData.isValid) {
-          markPriceDisplay = colorText(
-            "$" + formatPriceWithValidation(marketData.markPrice, 6, 4, false),
-            colors.brightCyan
-          );
-          midPriceDisplay = colorText(
-            "$" + formatPriceWithValidation(marketData.midPrice, 6, 4, false),
-            colors.yellow
-          );
+        // Prefer mid price if provided; otherwise fall back to mark
+        try {
+          if (marketData && marketData.midPrice && marketData.midPrice > 0) {
+            midPriceDisplay = colorText(
+              "$" + formatPriceWithValidation(marketData.midPrice, 6, 4, false),
+              colors.yellow
+            );
+          } else if (
+            marketData &&
+            marketData.markPrice &&
+            marketData.markPrice > 0
+          ) {
+            midPriceDisplay = colorText(
+              "$" +
+                formatPriceWithValidation(marketData.markPrice, 6, 4, false),
+              colors.yellow
+            );
+          }
+        } catch (_) {}
 
-          if (marketData.spreadBps > 0) {
+        // Spread if provided and positive
+        try {
+          if (
+            marketData &&
+            marketData.spreadBps &&
+            Number(marketData.spreadBps) > 0
+          ) {
             const spreadPercent = (Number(marketData.spreadBps) / 100).toFixed(
               2
             );
             spreadDisplay = colorText(`${spreadPercent}%`, colors.magenta);
           }
-        }
+        } catch (_) {}
       } catch (error) {
         // Fallback: calculate mark price manually
         if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
@@ -8368,7 +8748,16 @@ ${colors.brightRed}└───────────────────�
       // Silently ignore if can't fetch positions
     }
 
-    console.log(colorText("\n🎮 TRADING ACTIONS", colors.brightYellow));
+    const actionsUserLabel =
+      this.currentUserIndex === 0
+        ? "Deployer"
+        : `User ${this.currentUserIndex}`;
+    console.log(
+      colorText(
+        `\n🎮 TRADING ACTIONS (${actionsUserLabel})`,
+        colors.brightYellow
+      )
+    );
     console.log(
       colorText("┌─────────────────────────────────────────┐", colors.cyan)
     );
@@ -12108,8 +12497,15 @@ ${colors.brightRed}└───────────────────�
 
       // Display unified margin summary
       const unified = comprehensiveMarginData.sources.unifiedMargin;
+      const activeUser =
+        this.currentUserIndex === 0
+          ? "Deployer"
+          : `User ${this.currentUserIndex}`;
       console.log(
-        colorText("\n📊 KEY INSIGHTS & MARGIN BREAKDOWN", colors.brightYellow)
+        colorText(
+          `\n📊 KEY INSIGHTS & MARGIN BREAKDOWN (${activeUser})`,
+          colors.brightYellow
+        )
       );
       console.log(colorText("─".repeat(60), colors.dim));
 

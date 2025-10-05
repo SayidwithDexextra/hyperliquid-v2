@@ -4,7 +4,7 @@ Use this guide to interact with the trading terminal’s Hack Mode. It provides 
 
 ### Activation
 - On the `Select Your Trading Account` screen, press `H` to open Hack Mode.
-- Type `back` or `exit` to return to account selection at any time.
+- Press `ESC` to return to account selection at any time.
 - Type `help` or `?` to print this legend in Hack Mode.
 
 ### Input Model
@@ -73,8 +73,8 @@ Use this guide to interact with the trading terminal’s Hack Mode. It provides 
 ### Miscellaneous
 - Switch User: `SU <userIndex>` (e.g., `SU 2` to switch to `User 2`)
 - Print Legend: `help` or `?`
-- Return: `back` or `exit`
- - Batch: `RUN <path>` (execute a file containing commands)
+- Return: press `ESC` (typing `back` or `exit` also works)
+- Batch: `RUN <path>` (execute a file containing commands)
 
 ### Examples
 - Place multiple limit orders from different users:
