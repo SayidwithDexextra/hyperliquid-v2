@@ -3426,32 +3426,80 @@ contract OrderBook {
     }
     
     /**
+     * @dev Compute a short-window VWAP using the last two trades only.
+     *      Applies staleness and minimum volume guards. Returns (vwap, ok).
+     */
+    function _lastTwoTradeVWAP() internal view returns (uint256 vwap, bool ok) {
+        if (totalTradeCount < 2) {
+            return (0, false);
+        }
+
+        Trade storage t1 = trades[totalTradeCount];
+        Trade storage t2 = trades[totalTradeCount - 1];
+
+        // Staleness guard based on configured window (seconds)
+        if (vwapTimeWindow > 0) {
+            uint256 cutoff = block.timestamp - vwapTimeWindow;
+            if (t1.timestamp < cutoff || t2.timestamp < cutoff) {
+                return (0, false);
+            }
+        }
+
+        // Volume threshold disabled: always allow two-trade VWAP when trades exist
+
+        // Stable two-point weighted average to avoid overflow:
+        // vwap = p2 + (p1 - p2) * (q1 / (q1 + q2))
+        // price: 6d, amounts: 18d ⇒ result: 6d
+        uint256 amountSum = t1.amount + t2.amount;
+        if (amountSum == 0) {
+            return (0, false);
+        }
+
+        if (t1.price >= t2.price) {
+            uint256 priceDelta = t1.price - t2.price;
+            uint256 weighted = Math.mulDiv(priceDelta, t1.amount, amountSum);
+            return (t2.price + weighted, true);
+        } else {
+            uint256 priceDelta = t2.price - t1.price;
+            uint256 weighted = Math.mulDiv(priceDelta, t1.amount, amountSum);
+            // t2.price > t1.price, subtract weighted delta
+            return (t2.price - weighted, true);
+        }
+    }
+
+    /**
      * @dev Internal function to calculate mark price
      */
     function _calculateMarkPrice() internal view returns (uint256) {
-        // Simplified mark price calculation with guards for empty sides
+        // Mid when both sides exist
         if (bestBid > 0 && bestAsk > 0) {
-            // Use mid-price if both sides exist
             return (bestBid / 2) + (bestAsk / 2) + ((bestBid % 2 + bestAsk % 2) / 2);
-        } else if (lastTradePrice > 0) {
-            // New fallback: use average of last two trade prices when available
+        }
+
+        // Try 2-trade VWAP when book is one-sided/empty
+        if (useVWAPForMarkPrice) {
+            (uint256 vwap2, bool ok) = _lastTwoTradeVWAP();
+            if (ok && vwap2 > 0) {
+                return vwap2;
+            }
+        }
+
+        // Legacy fallbacks
+        if (lastTradePrice > 0) {
             if (totalTradeCount >= 2) {
                 uint256 p1 = trades[totalTradeCount].price;
                 uint256 p2 = trades[totalTradeCount - 1].price;
                 return (p1 / 2) + (p2 / 2) + ((p1 % 2 + p2 % 2) / 2);
             }
-            // Only one trade recorded: use that last traded price
             return lastTradePrice;
-        } else if (bestBid > 0) {
-            // If only bid exists, use bid as proxy
-            return bestBid;
-        } else if (bestAsk > 0) {
-            // If only ask exists, use ask as proxy
-            return bestAsk;
-        } else {
-            // Default to 1 USDC
-            return 1000000;
         }
+        if (bestBid > 0) {
+            return bestBid;
+        }
+        if (bestAsk > 0) {
+            return bestAsk;
+        }
+        return 1000000; // 1 USDC default
     }
 
     /**
