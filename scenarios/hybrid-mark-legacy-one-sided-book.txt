@@ -1,0 +1,16 @@
+# One-sided book or empty book -> legacy VWAP2/lastTrade/bid/ask/default order preserved
+STRICT ON
+
+# Seed only bids (no asks) with enough depth to absorb sells
+U1 LB 1.00 1 100
+
+# Execute two trades via market sell into bids, to enable VWAP2 path
+U2 MS 2 20 200
+U2 MS 2 20 200
+
+OB
+DMA
+TH
+
+# Expected Mark: 1.000000 (legacy path on one-sided book → vwap2 == lastTrade == 1.000000)
+

@@ -1,0 +1,19 @@
+# One recent trade -> mark = 20% VWAP_1 + 80% mid
+STRICT ON
+
+# Seed book both sides with sufficient depth
+U1 LB 1.00 1 10
+U2 LS 1.04 1 120
+
+# Execute a single trade near ask to move last price
+U3 MB 1 10 200
+
+OB
+DMA
+PF
+TH
+
+# This scenario is for inspection; hybrid mixes last up to 4 trades (1 here)
+
+# Expected Mark: 1.024000 (mid 1.020000, vwap_1 1.040000, w=20%)
+

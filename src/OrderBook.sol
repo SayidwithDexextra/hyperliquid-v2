@@ -3543,18 +3543,100 @@ contract OrderBook {
     }
 
     /**
+     * @dev Compute VWAP using the last up to 4 trades. Returns (vwap, tradesUsed, ok).
+     *      - Requires total volume > 0 to be valid
+     *      - Uses a numerically stable incremental weighted-average to avoid overflow
+     *      - Result has 6 decimals (USDC)
+     */
+    function _lastUpToFourTradeVWAP() internal view returns (uint256 vwap, uint256 tradesUsed, bool ok) {
+        if (totalTradeCount == 0) {
+            return (0, 0, false);
+        }
+
+        uint256 maxToUse = totalTradeCount < 4 ? totalTradeCount : 4;
+        uint256 amountSum = 0;
+        uint256 running = 0; // running vwap in 6 decimals
+        uint256 used = 0;
+
+        // Iterate newest to oldest up to 4 trades
+        for (uint256 i = totalTradeCount; i >= 1 && used < maxToUse; i--) {
+            Trade storage t = trades[i];
+            // Skip zero-amount trades defensively
+            if (t.amount == 0) {
+                continue;
+            }
+
+            if (amountSum == 0) {
+                running = t.price;
+                amountSum = t.amount;
+                used++;
+            } else {
+                uint256 newDenom = amountSum + t.amount;
+                if (t.price >= running) {
+                    uint256 delta = t.price - running;
+                    uint256 weighted = Math.mulDiv(delta, t.amount, newDenom);
+                    running = running + weighted;
+                } else {
+                    uint256 delta = running - t.price;
+                    uint256 weighted = Math.mulDiv(delta, t.amount, newDenom);
+                    running = running - weighted;
+                }
+                amountSum = newDenom;
+                used++;
+            }
+
+            if (i == 1) { // prevent underflow in the for-loop condition
+                break;
+            }
+        }
+
+        if (amountSum == 0 || used == 0) {
+            return (0, 0, false);
+        }
+        return (running, used, true);
+    }
+
+    /**
+     * @dev Hybrid weight schedule in basis points based on number of recent trades used.
+     *      0 -> 0, 1 -> 2000, 2 -> 3000, 3 -> 4000, 4+ -> 5000 (capped at 50%).
+     */
+    function _hybridWeightBps(uint256 tradesUsed) internal pure returns (uint256) {
+        if (tradesUsed == 0) return 0;
+        if (tradesUsed == 1) return 2000;
+        if (tradesUsed == 2) return 3000;
+        if (tradesUsed == 3) return 4000;
+        return 5000; // cap at 50%
+    }
+
+    /**
      * @dev Internal function to calculate mark price
      */
     function _calculateMarkPrice() internal view returns (uint256) {
-        // Mid when both sides exist
+        // If both sides exist, compute hybrid mark: w * VWAP_4 + (1 - w) * Mid
         if (bestBid > 0 && bestAsk > 0) {
-            return (bestBid / 2) + (bestAsk / 2) + ((bestBid % 2 + bestAsk % 2) / 2);
+            // Original integer mid logic with preserved rounding
+            uint256 mid = (bestBid / 2) + (bestAsk / 2) + ((bestBid % 2 + bestAsk % 2) / 2);
+
+            if (useVWAPForMarkPrice) {
+                (uint256 vwap4, uint256 tradesUsed, bool ok) = _lastUpToFourTradeVWAP();
+                if (ok && vwap4 > 0 && tradesUsed > 0) {
+                    uint256 wBps = _hybridWeightBps(tradesUsed);
+                    if (wBps > 0) {
+                        // blended = mid * (1 - w) + vwap * w, computed in basis points
+                        uint256 left = Math.mulDiv(mid, 10000 - wBps, 10000);
+                        uint256 right = Math.mulDiv(vwap4, wBps, 10000);
+                        return left + right;
+                    }
+                }
+            }
+            // No valid VWAP (or disabled) -> legacy mid
+            return mid;
         }
 
-        // Try 2-trade VWAP when book is one-sided/empty
+        // One-sided/empty book: preserve legacy VWAP-first hierarchy and fallbacks
         if (useVWAPForMarkPrice) {
-            (uint256 vwap2, bool ok) = _lastTwoTradeVWAP();
-            if (ok && vwap2 > 0) {
+            (uint256 vwap2, bool ok2) = _lastTwoTradeVWAP();
+            if (ok2 && vwap2 > 0) {
                 return vwap2;
             }
         }

@@ -1,0 +1,16 @@
+# Two recent trades -> mark = 30% VWAP_2 + 70% mid
+STRICT ON
+
+U1 LB 1.00 1 60
+U2 LS 1.04 1 60
+
+# Two trades
+U3 MB 2 50 200
+U4 MS 2 50 200
+
+OB
+DMA
+TH
+
+# Expected Mark: 1.019882 (mid 1.020000, vwap_2 1.019608, w=30%)
+

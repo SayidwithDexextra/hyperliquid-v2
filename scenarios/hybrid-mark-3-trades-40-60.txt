@@ -1,0 +1,24 @@
+# Three recent trades -> mark = 40% VWAP_3 + 60% mid
+STRICT ON
+
+U1 LB 1.00 1 120
+U2 LS 1.20 1 120
+
+U3 MB 1 40 200
+U3 MB 1 20 200
+U3 MB 1 40 200
+
+OB
+DMA
+TH
+
+# Expected Mark: 1.140000
+# Math Breakdown:
+# - Best bid/ask: 1.000000 / 1.200000 ⇒ mid = (1.000000 + 1.200000)/2 = 1.100000 (integer mid logic)
+# - Last 3 trades: prices all 1.200000 with amounts 40, 20, 40 ⇒ vwap_3 = 1.200000
+# - Weight for 3 trades: w = 40% ⇒ (1 - w) = 60%
+# - Blend (bps arithmetic):
+#   left = mid * 60% = 1.100000 × 0.60 = 0.660000
+#   right = vwap_3 * 40% = 1.200000 × 0.40 = 0.480000
+#   mark = left + right = 0.660000 + 0.480000 = 1.140000
+

@@ -1,0 +1,20 @@
+# Bid and ask exist, no trades yet -> mark uses mid only (legacy)
+STRICT ON
+
+# Seed book: both sides with sufficient depth
+U1 LB 1.00 1 100
+U2 LS 1.02 1 100
+
+OB
+DMA
+PF
+POS
+TH
+
+# Assert: With no trades, hybrid weight is 0% -> mark == mid
+ASSERT BID == 1.00
+ASSERT ASK == 1.02
+
+# Expected Mark: 1.010000 (mid only, no trades → w=0%)
+
+
