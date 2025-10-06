@@ -126,39 +126,34 @@ library VaultAnalytics {
         PendingOrder[] memory pendingOrders,
         uint256[] memory markPrices
     ) external pure returns (MarginSummary memory) {
-        uint256 marginUsed = getTotalMarginUsed(positions);
-        uint256 marginReserved = getTotalMarginReserved(pendingOrders);
-        
-        // Base available = collateral - margin used
-        uint256 baseAvailable = getAvailableCollateral(userCollateral, positions);
-        
-        // Include realized PnL (convert 18d -> 6d) in available collateral
-        // Guard: if there are no open positions and realizedPnL is negative, do not add it
-        int256 realizedAdj = realizedPnL;
-        if (positions.length == 0 && realizedAdj < 0) {
-            realizedAdj = 0;
-        }
-        int256 realizedPnL6 = realizedAdj / int256(DECIMAL_SCALE);
-        int256 baseWithRealized = int256(baseAvailable) + realizedPnL6;
-        uint256 availableAfterRealized = baseWithRealized > 0 ? uint256(baseWithRealized) : 0;
-        
+        MarginSummary memory summary;
+        summary.totalCollateral = userCollateral;
+        summary.marginUsed = getTotalMarginUsed(positions);
+        summary.marginReserved = getTotalMarginReserved(pendingOrders);
+
+        // Available collateral: collateral - margin used
+        uint256 available = getAvailableCollateral(userCollateral, positions);
+
+        // Apply realized PnL (18d -> 6d). If no positions and realizedPnL is negative, ignore it
+        int256 tempInt = (positions.length == 0 && realizedPnL < 0)
+            ? int256(0)
+            : (realizedPnL / int256(DECIMAL_SCALE));
+        tempInt = int256(available) + tempInt;
+        uint256 adjustedAvailable = tempInt > 0 ? uint256(tempInt) : 0;
+
         // Subtract reserved margin for pending orders
-        uint256 availableCollateral = availableAfterRealized > marginReserved ? (availableAfterRealized - marginReserved) : 0;
-        
-        int256 unrealizedPnL = getUnrealizedPnL(positions, markPrices);
-        
-        // Calculate portfolio value inline
-        int256 portfolioValue = int256(userCollateral) + realizedPnL + unrealizedPnL;
-        
-        return MarginSummary({
-            totalCollateral: userCollateral,
-            marginUsed: marginUsed,
-            marginReserved: marginReserved,
-            availableCollateral: availableCollateral,
-            realizedPnL: realizedPnL,
-            unrealizedPnL: unrealizedPnL,
-            portfolioValue: portfolioValue > 0 ? uint256(portfolioValue) : 0
-        });
+        adjustedAvailable = adjustedAvailable > summary.marginReserved
+            ? (adjustedAvailable - summary.marginReserved)
+            : 0;
+        summary.availableCollateral = adjustedAvailable;
+
+        summary.realizedPnL = realizedPnL;
+        summary.unrealizedPnL = getUnrealizedPnL(positions, markPrices);
+
+        tempInt = int256(userCollateral) + realizedPnL + summary.unrealizedPnL;
+        summary.portfolioValue = tempInt > 0 ? uint256(tempInt) : 0;
+
+        return summary;
     }
 
     function getUserProtectionLevel(uint256 totalMargin, uint256 availableCollateral) 

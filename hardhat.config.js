@@ -8,23 +8,9 @@ const config = {
     settings: {
       optimizer: {
         enabled: true,
-        runs: 1, // Optimize purely for deployment size
-        details: {
-          yul: true,
-          yulDetails: {
-            stackAllocation: true,
-            optimizerSteps: "dhfoDgvulfnTUtnIf",
-          },
-          peephole: true,
-          inliner: true,
-          jumpdestRemover: true,
-          orderLiterals: true,
-          deduplicate: true,
-          cse: true,
-          constantOptimizer: true,
-        },
+        runs: 200,
       },
-      viaIR: true, // Enable Intermediate Representation for better optimization
+      viaIR: true,
     },
   },
   networks: {

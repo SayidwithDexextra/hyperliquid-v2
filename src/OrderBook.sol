@@ -2616,8 +2616,8 @@ contract OrderBook {
         emit TradeRecorded(tradeId);
         
         // Get current positions from CoreVault (single source of truth)
-        (int256 oldBuyerPosition,,) = vault.getPositionSummary(buyer, marketId);
-        (int256 oldSellerPosition,,) = vault.getPositionSummary(seller, marketId);
+        (int256 oldBuyerPosition, uint256 buyerEntryPrice, uint256 buyerMarginLocked) = vault.getPositionSummary(buyer, marketId);
+        (int256 oldSellerPosition, uint256 sellerEntryPrice, uint256 sellerMarginLocked) = vault.getPositionSummary(seller, marketId);
         
         // DEBUG: Positions retrieved
         emit PositionsRetrieved(buyer, oldBuyerPosition, seller, oldSellerPosition);
@@ -2681,6 +2681,24 @@ contract OrderBook {
                     }
                 }
             } else {
+                // Pre-Trade Solvency Checks: block trades that would realize losses exceeding margin + free collateral
+                // Buyer closes short when they buy against existing negative position; Seller closes long when they sell against existing positive position
+                _assertPreTradeSolvency(
+                    buyer,
+                    oldBuyerPosition,
+                    buyerEntryPrice,
+                    buyerMarginLocked,
+                    int256(amount),
+                    price
+                );
+                _assertPreTradeSolvency(
+                    seller,
+                    oldSellerPosition,
+                    sellerEntryPrice,
+                    sellerMarginLocked,
+                    -int256(amount),
+                    price
+                );
                 _handleLiquidationMarginUpdate(buyer, oldBuyerPosition, int256(amount), price, buyerMargin, isLiquidationTrade);
                 _handleLiquidationMarginUpdate(seller, oldSellerPosition, -int256(amount), price, sellerMargin, isLiquidationTrade);
             }
@@ -2765,6 +2783,63 @@ contract OrderBook {
         // Use configured margin requirement for longs; shorts require 150% by policy
         uint256 marginBps = amount >= 0 ? marginRequirementBps : 15000;
         return Math.mulDiv(notional, marginBps, 10000);
+    }
+
+    /**
+     * @dev Pre-trade solvency guard. For closing trades, ensure realized loss on the closed units
+     *      is fully covered by the position's margin headroom (locked - required_after_close).
+     *      This prevents realizing a loss larger than the user's margin on that position.
+     */
+    function _assertPreTradeSolvency(
+        address user,
+        int256 currentNet,
+        uint256 entryPrice,
+        uint256 marginLocked,
+        int256 delta,
+        uint256 executionPrice
+    ) internal view {
+        if (user == address(0) || user == address(this)) return;
+        if (delta == 0 || currentNet == 0) return;
+
+        bool closesExposure = (currentNet > 0 && delta < 0) || (currentNet < 0 && delta > 0);
+        if (!closesExposure) return;
+
+        uint256 absDelta = uint256(delta > 0 ? delta : -delta);
+        uint256 posAbs = uint256(currentNet > 0 ? currentNet : -currentNet);
+        uint256 closeAbs = absDelta > posAbs ? posAbs : absDelta;
+        if (closeAbs == 0) return;
+
+        // Compute realized trading loss on the portion being closed (USDC, 6 decimals)
+        uint256 tradingLossClosed6 = 0;
+        if (currentNet > 0) {
+            // Long closing: loss if execution < entry
+            if (executionPrice < entryPrice) {
+                uint256 diff = entryPrice - executionPrice;
+                tradingLossClosed6 = Math.mulDiv(closeAbs, diff, 1e18);
+            }
+        } else {
+            // Short closing: loss if execution > entry
+            if (executionPrice > entryPrice) {
+                uint256 diff = executionPrice - entryPrice;
+                tradingLossClosed6 = Math.mulDiv(closeAbs, diff, 1e18);
+            }
+        }
+        if (tradingLossClosed6 == 0) return;
+
+        // Simulate remaining size after this partial close; do not allow flip in the simulation
+        int256 newSizeRaw;
+        unchecked { newSizeRaw = currentNet + delta; }
+        int256 newSize = newSizeRaw;
+        if ((currentNet > 0 && newSizeRaw < 0) || (currentNet < 0 && newSizeRaw > 0)) {
+            newSize = 0;
+        }
+
+        // Use entry price as basis for margin on pure reductions to avoid spikes; otherwise execution
+        uint256 basisPriceForMargin = newSize != 0 ? entryPrice : executionPrice;
+        uint256 newRequiredMargin = _calculateExecutionMargin(newSize, basisPriceForMargin);
+        uint256 confiscatableHeadroom = marginLocked > newRequiredMargin ? (marginLocked - newRequiredMargin) : 0;
+
+        require(tradingLossClosed6 <= confiscatableHeadroom, "OrderBook: closing loss exceeds position margin");
     }
 
     /**

@@ -346,6 +346,7 @@ library PositionManager {
     ) {
         newSize = existingPosition.size + sizeDelta;
         positionWillClose = (newSize == 0);
+        newMarginRequired = 0;
         
         if (positionWillClose) {
             newEntryPrice = 0;
@@ -355,32 +356,36 @@ library PositionManager {
             int256 priceDiff = int256(executionPrice) - int256(existingPosition.entryPrice);
             realizedPnL = (priceDiff * existingPosition.size) / int256(TICK_PRECISION);
         } else {
-            // Calculate weighted entry price
-            bool sameDirection = (existingPosition.size > 0 && sizeDelta > 0) || 
-                                (existingPosition.size < 0 && sizeDelta < 0);
-            
+            // Calculate weighted entry price for same-direction adds, otherwise flip
+            bool sameDirection = (existingPosition.size > 0 && sizeDelta > 0) ||
+                                 (existingPosition.size < 0 && sizeDelta < 0);
+
             if (sameDirection && existingPosition.size != 0) {
-                uint256 existingNotional = uint256(existingPosition.size >= 0 ? existingPosition.size : -existingPosition.size) * existingPosition.entryPrice;
-                uint256 newNotional = uint256(sizeDelta >= 0 ? sizeDelta : -sizeDelta) * executionPrice;
-                uint256 totalNotional = existingNotional + newNotional;
-                uint256 totalSize = uint256(newSize >= 0 ? newSize : -newSize);
-                newEntryPrice = totalNotional / totalSize;
-                
-                // Proportional realized P&L for partial close: use closed quantity signed like original position
-                if ((existingPosition.size > 0 && sizeDelta < 0) || (existingPosition.size < 0 && sizeDelta > 0)) {
+                // Compute weighted average entry with minimal intermediates
+                uint256 existingAbs = uint256(existingPosition.size >= 0 ? existingPosition.size : -existingPosition.size);
+                uint256 deltaAbs = uint256(sizeDelta >= 0 ? sizeDelta : -sizeDelta);
+                uint256 totalAbs = uint256(newSize >= 0 ? newSize : -newSize);
+                uint256 totalNotional = existingAbs * existingPosition.entryPrice + deltaAbs * executionPrice;
+                newEntryPrice = totalNotional / totalAbs;
+            } else {
+                // Opposite direction: flip price to execution and realize PnL on old size
+                newEntryPrice = executionPrice;
+                int256 priceDiffFlip = int256(executionPrice) - int256(existingPosition.entryPrice);
+                realizedPnL = (priceDiffFlip * existingPosition.size) / int256(TICK_PRECISION);
+            }
+
+            // If this trade closes part of the position (opposite direction), realize proportional PnL
+            if ((existingPosition.size > 0 && sizeDelta < 0) || (existingPosition.size < 0 && sizeDelta > 0)) {
+                uint256 closedAbs;
+                {
                     uint256 absDelta = uint256(sizeDelta > 0 ? sizeDelta : -sizeDelta);
                     uint256 posAbs = uint256(existingPosition.size > 0 ? existingPosition.size : -existingPosition.size);
-                    uint256 closedAbs = absDelta > posAbs ? posAbs : absDelta;
-                    int256 closingSizeSigned = existingPosition.size > 0 ? int256(closedAbs) : -int256(closedAbs);
-                    int256 priceDiff = int256(executionPrice) - int256(existingPosition.entryPrice);
-                    realizedPnL = (priceDiff * closingSizeSigned) / int256(TICK_PRECISION);
+                    closedAbs = absDelta > posAbs ? posAbs : absDelta;
                 }
-            } else {
-                newEntryPrice = executionPrice;
-                
-                // Full close of existing + new opposite direction
+                int256 closingSizeSigned = existingPosition.size > 0 ? int256(closedAbs) : -int256(closedAbs);
                 int256 priceDiff = int256(executionPrice) - int256(existingPosition.entryPrice);
-                realizedPnL = (priceDiff * existingPosition.size) / int256(TICK_PRECISION);
+                int256 realizedPartial = (priceDiff * closingSizeSigned) / int256(TICK_PRECISION);
+                realizedPnL += realizedPartial;
             }
         }
     }
