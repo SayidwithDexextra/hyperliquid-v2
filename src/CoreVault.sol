@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "./VaultAnalytics.sol";
 import "./PositionManager.sol";
@@ -34,11 +35,33 @@ interface IOrderBook {
  */
 contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
+    using Address for address;
 
     // ============ Access Control Roles ============
     bytes32 public constant ORDERBOOK_ROLE = keccak256("ORDERBOOK_ROLE");
     bytes32 public constant SETTLEMENT_ROLE = keccak256("SETTLEMENT_ROLE");
     bytes32 public constant FACTORY_ROLE = keccak256("FACTORY_ROLE");
+
+    // LiquidationManager implementation to which heavy liquidation logic is delegated
+    address public liquidationManager;
+
+
+    /**
+     * @dev Admin setter for liquidation manager implementation
+     */
+    function setLiquidationManager(address _impl) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_impl != address(0), "invalid impl");
+        liquidationManager = _impl;
+    }
+
+    /**
+     * @dev Internal helper to delegatecall into LiquidationManager with proper error bubbling
+     */
+    function _delegateLiq(bytes memory data) internal returns (bytes memory) {
+        address impl = liquidationManager;
+        require(impl != address(0), "liq impl not set");
+        return impl.functionDelegateCall(data);
+    }
 
     // ============ Constants ============
     uint256 public constant LIQUIDATION_PENALTY_BPS = 1000; // 10%
@@ -364,197 +387,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         uint256 executionPrice,
         address liquidator
     ) external onlyRole(ORDERBOOK_ROLE) nonReentrant {
-        // Find the position being liquidated
-        PositionManager.Position[] storage positions = userPositions[user];
-        for (uint256 i = 0; i < positions.length; i++) {
-            if (positions[i].marketId == marketId && positions[i].size != 0) {
-                // Compute partial-close liquidation on the actually closed quantity only
-                int256 oldSize = positions[i].size;
-                // Only handle liquidation when the delta reduces exposure (opposite direction)
-                bool closesExposure = (oldSize > 0 && sizeDelta < 0) || (oldSize < 0 && sizeDelta > 0);
-                if (!closesExposure) {
-                    // Fallback to normal netting if this is not a closing delta
-                    // Compute proper required margin for the candidate new size
-                    int256 candidateNewSize = oldSize + sizeDelta;
-                    uint256 basisForMargin = executionPrice;
-                    bool sameDirection = (oldSize > 0 && sizeDelta > 0) || (oldSize < 0 && sizeDelta < 0);
-                    if (!sameDirection && oldSize != 0) {
-                        // Opposite direction without closing: use entry price as stable basis
-                        basisForMargin = positions[i].entryPrice;
-                    }
-                    uint256 requiredForCandidate = _calculateExecutionMargin(candidateNewSize, basisForMargin);
-
-                    PositionManager.NettingResult memory nr = PositionManager.executePositionNetting(
-                        positions,
-                        user,
-                        marketId,
-                        sizeDelta,
-                        executionPrice,
-                        requiredForCandidate
-                    );
-                    if (nr.marginToLock > 0) totalMarginLocked += nr.marginToLock;
-                    if (nr.marginToRelease > 0) totalMarginLocked -= nr.marginToRelease;
-                    if (nr.realizedPnL != 0) userRealizedPnL[user] += nr.realizedPnL;
-                    return;
-                }
-
-                uint256 absOld = uint256(oldSize > 0 ? oldSize : -oldSize);
-                uint256 absDelta = uint256(sizeDelta > 0 ? sizeDelta : -sizeDelta);
-                uint256 closeAbs = absDelta > absOld ? absOld : absDelta;
-
-                // Clamp new size to not flip
-                int256 newSize = oldSize + sizeDelta;
-                if ((oldSize > 0 && newSize < 0) || (oldSize < 0 && newSize > 0)) {
-                    newSize = 0;
-                }
-
-                uint256 entryPrice = positions[i].entryPrice;
-
-                // Compute trading loss ONLY on the closed portion (USDC 6 decimals)
-                uint256 tradingLossClosed = 0;
-                if (oldSize > 0 && executionPrice < entryPrice) {
-                    uint256 lossPerUnit = entryPrice - executionPrice;
-                    tradingLossClosed = (lossPerUnit * closeAbs) / (DECIMAL_SCALE * TICK_PRECISION);
-                } else if (oldSize < 0 && executionPrice > entryPrice) {
-                    uint256 lossPerUnit = executionPrice - entryPrice;
-                    tradingLossClosed = (lossPerUnit * closeAbs) / (DECIMAL_SCALE * TICK_PRECISION);
-                }
-
-                // Penalty ONLY on the closed portion
-                uint256 notional6Closed = (closeAbs * executionPrice) / (10**18);
-                uint256 penaltyClosed = (notional6Closed * LIQUIDATION_PENALTY_BPS) / 10000;
-                uint256 actualLossClosed = tradingLossClosed + penaltyClosed;
-
-                // Recalculate required margin for the remaining position and determine confiscation bucket
-                uint256 oldLocked = positions[i].marginLocked;
-                // For partial closes that only reduce exposure without flipping, use entry price as basis
-                // to avoid margin spikes; otherwise use execution price
-                uint256 basisPriceForMargin = executionPrice;
-                if (closesExposure && newSize != 0) {
-                    basisPriceForMargin = entryPrice;
-                }
-                uint256 newRequiredMargin = _calculateExecutionMargin(newSize, basisPriceForMargin);
-                uint256 confiscatable = oldLocked > newRequiredMargin ? (oldLocked - newRequiredMargin) : 0;
-
-                // Seizure policy:
-                // - Seize only from locked margin headroom (confiscatable)
-                // - Do NOT seize from user's free collateral; socialize any remaining trading loss
-                uint256 collateralAvailable_ = userCollateral[user];
-                uint256 seizableFromLocked = actualLossClosed > confiscatable ? confiscatable : actualLossClosed;
-                uint256 seized = seizableFromLocked > collateralAvailable_ ? collateralAvailable_ : seizableFromLocked;
-                // Remaining trading loss after applying locked margin headroom only
-                uint256 uncoveredLoss = tradingLossClosed > seized ? (tradingLossClosed - seized) : 0;
-
-                if (seized > 0) {
-                    userCollateral[user] -= seized;
-                    // Credit maker reward from penalty remainder
-                    uint256 seizedForTradingLoss = tradingLossClosed > seized ? seized : tradingLossClosed;
-                    uint256 seizedRemainder = seized - seizedForTradingLoss;
-                    uint256 makerRewardPool = penaltyClosed > seizedRemainder ? seizedRemainder : penaltyClosed;
-                    address ob = marketToOrderBook[marketId];
-                    if (makerRewardPool > 0 && ob != address(0)) {
-                        userCollateral[ob] += makerRewardPool;
-                    }
-                    emit MarginConfiscated(user, oldLocked, seized, penaltyClosed, liquidator);
-                }
-
-                // Update position size and keep entry price for the remaining leg on partial close
-                positions[i].size = newSize;
-                if (newSize == 0) {
-                    // Remove the position entirely
-                    if (i < positions.length - 1) {
-                        positions[i] = positions[positions.length - 1];
-                    }
-                    positions.pop();
-                    // Adjust global locked tracker by the full previously locked amount
-                    if (oldLocked <= totalMarginLocked) {
-                        totalMarginLocked -= oldLocked;
-                    }
-                    PositionManager.removeMarketIdFromUser(userMarketIds[user], marketId);
-                    isUnderLiquidationPosition[user][marketId] = false;
-                    // Clear liquidation anchor on full close
-                    liquidationAnchorPrice[user][marketId] = 0;
-                    liquidationAnchorTimestamp[user][marketId] = 0;
-                } else {
-                    // Remaining leg is under liquidation control; clear displayed liq price
-                    isUnderLiquidationPosition[user][marketId] = true;
-                    positions[i].liquidationPrice = 0;
-                }
-
-                // Update marginLocked to match required margin for remaining exposure
-                if (newSize != 0) {
-                    uint256 newLocked = newRequiredMargin;
-                    // Apply reduction to totalMarginLocked by the amount we reduced locked margin
-                    uint256 lockedReduction = oldLocked > newLocked ? (oldLocked - newLocked) : 0;
-                    positions[i].marginLocked = newLocked;
-                    if (lockedReduction > 0 && lockedReduction <= totalMarginLocked) {
-                        totalMarginLocked -= lockedReduction;
-                    }
-                }
-
-                // Realized P&L on the CLOSED portion only
-                int256 realizedPnL = 0;
-                if (closeAbs > 0) {
-                    int256 priceDiff = int256(executionPrice) - int256(entryPrice);
-                    int256 closingSizeSigned = oldSize > 0 ? int256(closeAbs) : -int256(closeAbs);
-                    realizedPnL = (priceDiff * closingSizeSigned) / int256(TICK_PRECISION);
-                }
-                if (realizedPnL != 0) {
-                    userRealizedPnL[user] += realizedPnL;
-                }
-
-                if (uncoveredLoss > 0) {
-                    // Clamp socialized loss using liquidation anchor to avoid time-based overcharging
-                    uint256 anchor = liquidationAnchorPrice[user][marketId];
-                    uint256 seizedAppliedToTrading = seized > 0 ? (tradingLossClosed > seized ? seized : tradingLossClosed) : 0;
-                    uint256 allowedUncovered = uncoveredLoss;
-                    if (anchor > 0) {
-                        uint256 anchorTradingLossClosed = 0;
-                        if (oldSize > 0) {
-                            // Long: loss when execution/anchor below entry; use max(execution, anchor) for clamp
-                            uint256 effPrice = executionPrice > anchor ? executionPrice : anchor;
-                            if (effPrice < entryPrice) {
-                                uint256 lossPerUnitA = entryPrice - effPrice;
-                                anchorTradingLossClosed = (lossPerUnitA * closeAbs) / (DECIMAL_SCALE * TICK_PRECISION);
-                            }
-                        } else if (oldSize < 0) {
-                            // Short: loss when execution/anchor above entry; use min(execution, anchor) for clamp
-                            uint256 effPrice = executionPrice < anchor ? executionPrice : anchor;
-                            if (effPrice > entryPrice) {
-                                uint256 lossPerUnitA = effPrice - entryPrice;
-                                anchorTradingLossClosed = (lossPerUnitA * closeAbs) / (DECIMAL_SCALE * TICK_PRECISION);
-                            }
-                        }
-                        if (anchorTradingLossClosed <= seizedAppliedToTrading) {
-                            allowedUncovered = 0;
-                        } else {
-                            allowedUncovered = anchorTradingLossClosed - seizedAppliedToTrading;
-                            if (allowedUncovered > uncoveredLoss) {
-                                allowedUncovered = uncoveredLoss;
-                            }
-                        }
-                    }
-                    if (allowedUncovered > 0) {
-                        _socializeLoss(marketId, allowedUncovered, user);
-                    }
-                    // Excess beyond anchor becomes market bad debt instead of burdening profitable users
-                    uint256 excess = uncoveredLoss > allowedUncovered ? (uncoveredLoss - allowedUncovered) : 0;
-                    if (excess > 0) {
-                        marketBadDebt[marketId] += excess;
-                        emit BadDebtRecorded(marketId, excess, user);
-                    }
-                }
-
-                // Do not recompute liquidation price while under liquidation control; it will be restored after recovery
-
-                emit LiquidationExecuted(user, marketId, liquidator, seized, userCollateral[user]);
-                emit PositionUpdated(user, marketId, oldSize, newSize, entryPrice, newSize == 0 ? 0 : positions[i].marginLocked);
-                return;
-            }
-        }
-        
-        // No position found - this shouldn't happen in liquidation, but handle gracefully
-        revert("No position found for liquidation");
+        bytes memory data = abi.encodeWithSelector(this.updatePositionWithLiquidation.selector, user, marketId, sizeDelta, executionPrice, liquidator);
+        _delegateLiq(data);
     }
 
     /**
@@ -1189,47 +1023,9 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         bytes32 marketId,
         uint256 markPrice
     ) external returns (bool) {
-        PositionManager.Position[] storage positions = userPositions[user];
-        for (uint256 i = 0; i < positions.length; i++) {
-            if (positions[i].marketId == marketId && positions[i].size != 0) {
-                // If this position is under liquidation control, force liquidatable until cleared
-                if (isUnderLiquidationPosition[user][marketId]) {
-                    return true;
-                }
-                uint256 trigger = positions[i].liquidationPrice;
-                if (trigger == 0) {
-                    // Fallback: compute real-time health if trigger not yet initialized
-                    // equity6 = marginLocked + pnl6(mark), notional6 = |Q| * markPrice / 1e18
-                    uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
-                    if (markPrice == 0 || absSize == 0) {
-                        return false;
-                    }
-                    uint256 notional6 = (absSize * markPrice) / (10**18);
-                    int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
-                    int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
-                    int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
-                    int256 equity6 = int256(positions[i].marginLocked) + pnl6;
-                    (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
-                    uint256 maintenance6 = (notional6 * mmrBps) / 10000;
-                    // Include one-tick tolerance in fallback as well
-                    bool resFallback = equity6 <= (int256(maintenance6) + int256(1));
-                    return resFallback;
-                }
-                // Add 1-tick tolerance to account for rounding/quantization differences
-                // Prices are stored in 6 decimals. Treat near-equality within 1 unit (1e-6) as liquidatable.
-                uint256 oneTick = 1; // 1 unit at 6 decimals
-                if (positions[i].size > 0) {
-                    // Long: liquidatable if mark <= trigger (+ 1 tick tolerance)
-                    bool res = markPrice <= (trigger + oneTick);
-                    return res;
-                } else {
-                    // Short: liquidatable if mark >= trigger (- 1 tick tolerance)
-                    bool res2 = (markPrice + oneTick) >= trigger;
-                    return res2;
-                }
-            }
-        }
-        return false;
+        bytes memory data = abi.encodeWithSelector(this.isLiquidatable.selector, user, marketId, markPrice);
+        bytes memory ret = _delegateLiq(data);
+        return abi.decode(ret, (bool));
     }
 
     /**
@@ -1237,54 +1033,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
      *      Restricted to ORDERBOOK_ROLE to avoid arbitrary spam.
      */
     function debugEmitIsLiquidatable(address user, bytes32 marketId, uint256 markPrice) external onlyRole(ORDERBOOK_ROLE) {
-        PositionManager.Position[] storage positions = userPositions[user];
-        for (uint256 i = 0; i < positions.length; i++) {
-            if (positions[i].marketId == marketId && positions[i].size != 0) {
-                uint256 trigger = positions[i].liquidationPrice;
-                uint256 oneTick = 1;
-                bool usedFallback = false;
-                uint256 notional6 = 0;
-                int256 equity6 = 0;
-                uint256 maintenance6 = 0;
-                bool result;
-                if (trigger == 0) {
-                    usedFallback = true;
-                    uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
-                    if (markPrice == 0 || absSize == 0) {
-                        emit DebugIsLiquidatable(user, marketId, positions[i].size, markPrice, 0, oneTick, 0, 0, 0, true, false);
-                        return;
-                    }
-                    notional6 = (absSize * markPrice) / (10**18);
-                    int256 priceDiff = int256(markPrice) - int256(positions[i].entryPrice);
-                    int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
-                    int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
-                    equity6 = int256(positions[i].marginLocked) + pnl6;
-                    (uint256 mmrBps, ) = _computeEffectiveMMRBps(user, marketId, positions[i].size);
-                    maintenance6 = (notional6 * mmrBps) / 10000;
-                    result = equity6 <= int256(maintenance6);
-                } else if (positions[i].size > 0) {
-                    result = markPrice <= (trigger + oneTick);
-                } else {
-                    result = (markPrice + oneTick) >= trigger;
-                }
-                emit DebugIsLiquidatable(
-                    user,
-                    marketId,
-                    positions[i].size,
-                    markPrice,
-                    trigger,
-                    oneTick,
-                    notional6,
-                    equity6,
-                    maintenance6,
-                    usedFallback,
-                    result
-                );
-                return;
-            }
-        }
-        // No position; emit a minimal debug line
-        emit DebugIsLiquidatable(user, marketId, 0, markPrice, 0, 1, 0, 0, 0, false, false);
+        bytes memory data = abi.encodeWithSelector(this.debugEmitIsLiquidatable.selector, user, marketId, markPrice);
+        _delegateLiq(data);
     }
 
     /**
@@ -1535,141 +1285,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         address liquidator,
         uint256 executionPrice
     ) external onlyRole(ORDERBOOK_ROLE) nonReentrant {
-        PositionManager.Position[] storage positions = userPositions[user];
-        for (uint256 i = 0; i < positions.length; i++) {
-            if (positions[i].marketId == marketId && positions[i].size < 0) {
-                int256 oldSize = positions[i].size;
-                uint256 locked = positions[i].marginLocked;
-                uint256 entryPrice = positions[i].entryPrice;
-                uint256 markPrice = getMarkPrice(marketId);
-                uint256 settlePrice = executionPrice > 0 ? executionPrice : markPrice;
-
-                // Calculate trading loss for short liquidation (USDC amount for collateral deduction)
-                // Note: This differs from standard P&L tracking (18 decimals) as it calculates actual USDC loss
-                uint256 tradingLoss = 0;
-                if (settlePrice > entryPrice) {
-                    // Short position loss: (current price - entry price) * position size
-                    uint256 lossPerUnit = settlePrice - entryPrice;
-                // Convert to USDC: (lossPerUnit_6dec * size_18dec) / (DECIMAL_SCALE_12dec * TICK_PRECISION_6dec) = 6 decimals
-                tradingLoss = (lossPerUnit * uint256(-oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
-            }
-            
-            // Apply liquidation penalty (notional-based at current mark)
-            uint256 absSizeMark = uint256(-oldSize);
-            uint256 notional6 = (absSizeMark * settlePrice) / (10**18);
-            uint256 penalty = (notional6 * LIQUIDATION_PENALTY_BPS) / 10000;
-            uint256 actualLoss = tradingLoss + penalty;
-            
-            // POLICY: Only seized from locked margin (not total collateral)
-            uint256 seizableFromLocked = actualLoss > locked ? locked : actualLoss;
-            uint256 collateralAvailable_ = userCollateral[user];
-            uint256 seized = seizableFromLocked > collateralAvailable_ ? collateralAvailable_ : seizableFromLocked;
-            // Only socialize uncovered TRADING LOSS; penalties are not socialized
-            uint256 uncoveredLoss = tradingLoss > seized ? (tradingLoss - seized) : 0;
-            // Clamp socialized loss for full liquidation using liquidation anchor
-            if (uncoveredLoss > 0) {
-                uint256 anchor = liquidationAnchorPrice[user][marketId];
-                uint256 seizedAppliedToTrading = seized > 0 ? (tradingLoss > seized ? seized : tradingLoss) : 0;
-                uint256 anchorTradingLoss = tradingLoss;
-                if (anchor > 0) {
-                    // For long liquidations, lower price is worse; clamp using max(settlePrice, anchor)
-                    uint256 effPrice = settlePrice > anchor ? settlePrice : anchor;
-                    if (effPrice < entryPrice) {
-                        uint256 lossPerUnitA = entryPrice - effPrice;
-                        anchorTradingLoss = (lossPerUnitA * uint256(oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
-                    } else {
-                        anchorTradingLoss = 0;
-                    }
-                }
-                uint256 allowedUncovered = anchorTradingLoss > seizedAppliedToTrading ? (anchorTradingLoss - seizedAppliedToTrading) : 0;
-                if (allowedUncovered < uncoveredLoss) {
-                    // convert excess to market bad debt
-                    uint256 excess = uncoveredLoss - allowedUncovered;
-                    marketBadDebt[marketId] += excess;
-                    emit BadDebtRecorded(marketId, excess, user);
-                    uncoveredLoss = allowedUncovered;
-                }
-            }
-            // Clamp socialized loss for full liquidation using liquidation anchor
-            if (uncoveredLoss > 0) {
-                uint256 anchor = liquidationAnchorPrice[user][marketId];
-                uint256 seizedAppliedToTrading = seized > 0 ? (tradingLoss > seized ? seized : tradingLoss) : 0;
-                uint256 anchorTradingLoss = tradingLoss;
-                if (anchor > 0) {
-                    // For short liquidations, higher price is worse; clamp using min(settlePrice, anchor)
-                    uint256 effPrice = settlePrice < anchor ? settlePrice : anchor;
-                    if (effPrice > entryPrice) {
-                        uint256 lossPerUnitA = effPrice - entryPrice;
-                        anchorTradingLoss = (lossPerUnitA * uint256(-oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
-                    } else {
-                        anchorTradingLoss = 0;
-                    }
-                }
-                uint256 allowedUncovered = anchorTradingLoss > seizedAppliedToTrading ? (anchorTradingLoss - seizedAppliedToTrading) : 0;
-                if (allowedUncovered < uncoveredLoss) {
-                    // convert excess to market bad debt
-                    uint256 excess = uncoveredLoss - allowedUncovered;
-                    marketBadDebt[marketId] += excess;
-                    emit BadDebtRecorded(marketId, excess, user);
-                    uncoveredLoss = allowedUncovered;
-                }
-            }
-            
-            if (seized > 0) {
-                userCollateral[user] -= seized;
-                // Credit penalty remainder: split between liquidator bounty and makers pool
-                uint256 seizedForTradingLoss = tradingLoss > seized ? seized : tradingLoss;
-                uint256 seizedRemainder = seized - seizedForTradingLoss;
-                uint256 makerRewardPool = penalty > seizedRemainder ? seizedRemainder : penalty;
-                address ob2 = marketToOrderBook[marketId];
-                if (makerRewardPool > 0 && ob2 != address(0)) {
-                    userCollateral[ob2] += makerRewardPool;
-                }
-            }
-
-                // Compute realized P&L for full liquidation using original signed size
-                int256 realizedPnL = 0;
-                {
-                    int256 priceDiff = int256(settlePrice) - int256(entryPrice);
-                    realizedPnL = (priceDiff * oldSize) / int256(TICK_PRECISION);
-                }
-
-                // Release all locked margin and remove position
-                // No need to update separate margin tracking - position removal handles this
-                if (locked <= totalMarginLocked) {
-                    totalMarginLocked -= locked;
-                }
-                // remove position by swap-pop
-                if (i < positions.length - 1) {
-                    positions[i] = positions[positions.length - 1];
-                }
-                positions.pop();
-
-                // Remove market ID from user's market list
-                _removeMarketIdFromUser(user, marketId);
-                // Clear liquidation anchor on full close
-                liquidationAnchorPrice[user][marketId] = 0;
-                liquidationAnchorTimestamp[user][marketId] = 0;
-
-                // Notify OrderBook removed to avoid external calls here; OB syncs via events/trade flow
-
-                // Record realized P&L from liquidation
-                if (realizedPnL != 0) {
-                    userRealizedPnL[user] += realizedPnL;
-                }
-
-                // If there's uncovered loss, trigger ADL system
-                if (uncoveredLoss > 0) {
-                    _socializeLoss(marketId, uncoveredLoss, user);
-                }
-
-                emit LiquidationExecuted(user, marketId, liquidator, seized, userCollateral[user]);
-                emit PositionUpdated(user, marketId, oldSize, 0, entryPrice, 0);
-                // No surviving position, nothing to recompute
-                return;
-            }
-        }
-        // no short position found; ignore
+        bytes memory data = abi.encodeWithSelector(this.liquidateShort.selector, user, marketId, liquidator, executionPrice);
+        _delegateLiq(data);
     }
 
     function liquidateLong(
@@ -1678,88 +1295,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         address liquidator,
         uint256 executionPrice
     ) external onlyRole(ORDERBOOK_ROLE) nonReentrant {
-        PositionManager.Position[] storage positions = userPositions[user];
-        for (uint256 i = 0; i < positions.length; i++) {
-            if (positions[i].marketId == marketId && positions[i].size > 0) {
-                int256 oldSize = positions[i].size;
-                uint256 locked = positions[i].marginLocked;
-                uint256 entryPrice = positions[i].entryPrice;
-                uint256 markPrice = getMarkPrice(marketId);
-                uint256 settlePrice = executionPrice > 0 ? executionPrice : markPrice;
-
-                // Calculate trading loss for long liquidation (USDC amount for collateral deduction)
-                // Note: This differs from standard P&L tracking (18 decimals) as it calculates actual USDC loss
-                uint256 tradingLoss = 0;
-                if (settlePrice < entryPrice) {
-                    // Long position loss: (entry price - current price) * position size
-                    uint256 lossPerUnit = entryPrice - settlePrice;
-                // Convert to USDC: (lossPerUnit_6dec * size_18dec) / (DECIMAL_SCALE_12dec * TICK_PRECISION_6dec) = 6 decimals
-                tradingLoss = (lossPerUnit * uint256(oldSize)) / (DECIMAL_SCALE * TICK_PRECISION);
-            }
-            
-            // Apply liquidation penalty (notional-based at current mark)
-            uint256 absSizeMark = uint256(oldSize);
-            uint256 notional6 = (absSizeMark * settlePrice) / (10**18);
-            uint256 penalty = (notional6 * LIQUIDATION_PENALTY_BPS) / 10000;
-            uint256 actualLoss = tradingLoss + penalty;
-            
-            // POLICY: Only seized from locked margin (not total collateral)
-            uint256 seizableFromLocked = actualLoss > locked ? locked : actualLoss;
-            uint256 collateralAvailable_ = userCollateral[user];
-            uint256 seized = seizableFromLocked > collateralAvailable_ ? collateralAvailable_ : seizableFromLocked;
-            // Only socialize uncovered TRADING LOSS; penalties are not socialized
-            uint256 uncoveredLoss = tradingLoss > seized ? (tradingLoss - seized) : 0;
-            
-            if (seized > 0) {
-                userCollateral[user] -= seized;
-                // Credit penalty remainder: split between liquidator bounty and makers pool
-                uint256 seizedForTradingLoss = tradingLoss > seized ? seized : tradingLoss;
-                uint256 seizedRemainder = seized - seizedForTradingLoss;
-                uint256 makerRewardPool = penalty > seizedRemainder ? seizedRemainder : penalty;
-                address ob3 = marketToOrderBook[marketId];
-                if (makerRewardPool > 0 && ob3 != address(0)) {
-                    userCollateral[ob3] += makerRewardPool;
-                }
-            }
-
-            // Compute realized P&L for full liquidation using original signed size
-            int256 realizedPnL = 0;
-            {
-                int256 priceDiff = int256(settlePrice) - int256(entryPrice);
-                realizedPnL = (priceDiff * oldSize) / int256(TICK_PRECISION);
-            }
-
-                // Release all locked margin and remove position
-                // No need to update separate margin tracking - position removal handles this
-                if (locked <= totalMarginLocked) {
-                    totalMarginLocked -= locked;
-                }
-                if (i < positions.length - 1) {
-                    positions[i] = positions[positions.length - 1];
-                }
-                positions.pop();
-
-                // Remove market ID from user's market list
-                _removeMarketIdFromUser(user, marketId);
-
-                // Notify OrderBook removed to avoid external calls here; OB syncs via events/trade flow
-
-            // Record realized P&L from liquidation
-            if (realizedPnL != 0) {
-                userRealizedPnL[user] += realizedPnL;
-            }
-
-            // If there's uncovered loss, trigger ADL system
-                if (uncoveredLoss > 0) {
-                    _socializeLoss(marketId, uncoveredLoss, user);
-                }
-
-                emit LiquidationExecuted(user, marketId, liquidator, seized, userCollateral[user]);
-                emit PositionUpdated(user, marketId, oldSize, 0, entryPrice, 0);
-                return;
-            }
-        }
-        // no long position found; ignore
+        bytes memory data = abi.encodeWithSelector(this.liquidateLong.selector, user, marketId, liquidator, executionPrice);
+        _delegateLiq(data);
     }
 
 
@@ -1774,16 +1311,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         address user, 
         uint256 gapLossAmount
     ) external onlyRole(ORDERBOOK_ROLE) {
-        require(gapLossAmount > 0, "Gap loss amount must be positive");
-        
-        uint256 availableCollateral = getAvailableCollateral(user);
-        require(availableCollateral >= gapLossAmount, "Insufficient available collateral for gap coverage");
-        
-        // Deduct from user's collateral
-        userCollateral[user] -= gapLossAmount;
-        
-        // Emit event for transparency
-        emit AvailableCollateralConfiscated(user, gapLossAmount, availableCollateral - gapLossAmount);
+        bytes memory data = abi.encodeWithSelector(this.confiscateAvailableCollateralForGapLoss.selector, user, gapLossAmount);
+        _delegateLiq(data);
     }
     
     /**
@@ -1797,7 +1326,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         uint256 lossAmount,
         address liquidatedUser
     ) external onlyRole(ORDERBOOK_ROLE) {
-        _socializeLoss(marketId, lossAmount, liquidatedUser);
+        bytes memory data = abi.encodeWithSelector(this.socializeLoss.selector, marketId, lossAmount, liquidatedUser);
+        _delegateLiq(data);
     }
     
     /**
@@ -1806,164 +1336,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
      * @param lossAmount Amount to socialize across users
      * @param liquidatedUser The user who was liquidated (for event tracking)
      */
-    function _socializeLoss(
-        bytes32 marketId,
-        uint256 lossAmount,
-        address liquidatedUser
-    ) internal {
-        require(lossAmount > 0, "Loss amount must be positive");
-        
-        if (adlDebug) {
-            emit SocializationStarted(marketId, lossAmount, liquidatedUser, block.timestamp);
-        }
-        
-        // Identify profitable side candidates (bounded by adlMaxCandidates for gas safety)
-        ProfitablePosition[] memory profitablePositions = _findProfitablePositions(marketId, liquidatedUser);
-        if (profitablePositions.length == 0) {
-            // No candidates; record bad debt entirely
-            marketBadDebt[marketId] += lossAmount;
-            emit SocializationFailed(marketId, lossAmount, "No profitable positions found", liquidatedUser);
-            emit BadDebtRecorded(marketId, lossAmount, liquidatedUser);
-            emit SocializedLossApplied(marketId, 0, liquidatedUser);
-            return;
-        }
-
-        // Optional top-K cap to avoid large loops
-        if (profitablePositions.length > adlMaxCandidates) {
-            ProfitablePosition[] memory topK = _selectTopKByProfitScore(profitablePositions, adlMaxCandidates);
-            profitablePositions = topK;
-        }
-
-        uint256 markPrice = getMarkPrice(marketId);
-        if (markPrice == 0) {
-            // If mark price unavailable, consider entire loss as bad debt
-            marketBadDebt[marketId] += lossAmount;
-            emit SocializationFailed(marketId, lossAmount, "Zero mark price", liquidatedUser);
-            emit BadDebtRecorded(marketId, lossAmount, liquidatedUser);
-            emit SocializedLossApplied(marketId, 0, liquidatedUser);
-            return;
-        }
-
-        uint256 n = profitablePositions.length;
-        uint256[] memory notionals6 = new uint256[](n);
-        uint256 totalNotional6 = 0;
-        for (uint256 i = 0; i < n; i++) {
-            uint256 absSize = uint256(profitablePositions[i].positionSize >= 0 ? profitablePositions[i].positionSize : -profitablePositions[i].positionSize);
-            uint256 notional6 = (absSize * markPrice) / 1e18;
-            notionals6[i] = notional6;
-            totalNotional6 += notional6;
-        }
-        if (totalNotional6 == 0) {
-            marketBadDebt[marketId] += lossAmount;
-            emit SocializationFailed(marketId, lossAmount, "Zero total notional", liquidatedUser);
-            emit BadDebtRecorded(marketId, lossAmount, liquidatedUser);
-            emit SocializedLossApplied(marketId, 0, liquidatedUser);
-            return;
-        }
-
-        // Compute target assignments based on notional
-        uint256[] memory targetAssign = new uint256[](n);
-        for (uint256 i = 0; i < n; i++) {
-            targetAssign[i] = (lossAmount * notionals6[i]) / totalNotional6;
-        }
-
-        // First pass: accrue per-position haircut up to capacity cap = min(marginLocked, equity - maintenance)
-        uint256 allocated = 0;
-        uint256[] memory remainingCap = new uint256[](n);
-        for (uint256 i = 0; i < n; i++) {
-            address u = profitablePositions[i].user;
-            // Find the user's position for this market
-            PositionManager.Position[] storage positions = userPositions[u];
-            for (uint256 j = 0; j < positions.length; j++) {
-                if (positions[j].marketId == marketId && positions[j].size != 0) {
-                    // Calculate capacity
-                    uint256 absSize = uint256(positions[j].size >= 0 ? positions[j].size : -positions[j].size);
-                    uint256 notional6 = (absSize * markPrice) / 1e18;
-                    int256 pnl18 = (int256(markPrice) - int256(positions[j].entryPrice)) * positions[j].size / int256(TICK_PRECISION);
-                    int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
-                    int256 equity6 = int256(positions[j].marginLocked) + pnl6;
-                    (uint256 mmrBps, ) = _computeEffectiveMMRBps(u, marketId, positions[j].size);
-                    uint256 maintenance6 = (notional6 * mmrBps) / 10000;
-                    uint256 cap6 = 0;
-                    if (equity6 > int256(maintenance6)) {
-                        // Capacity is excess equity above maintenance; may exceed posted margin
-                        uint256 excess = uint256(equity6 - int256(maintenance6));
-                        cap6 = excess;
-                    }
-                    uint256 assign = targetAssign[i] <= cap6 ? targetAssign[i] : cap6;
-                    if (assign > 0) {
-                        positions[j].socializedLossAccrued6 += assign;
-                        // Tag the quantity of units that this haircut applies to, so future
-                        // increases in position size do not expand haircut to new units
-                        uint256 absSizeUnits18 = absSize; // already in 18 decimals
-                        if (markPrice > 0) {
-                            uint256 unitsTagged18 = (assign * (10**18)) / markPrice; // map USDC->units
-                            uint256 currentTagged18 = positions[j].haircutUnits18;
-                            uint256 untaggedCapacity18 = absSizeUnits18 > currentTagged18 ? (absSizeUnits18 - currentTagged18) : 0;
-                            if (unitsTagged18 > untaggedCapacity18) {
-                                unitsTagged18 = untaggedCapacity18;
-                            }
-                            if (unitsTagged18 > 0) {
-                                positions[j].haircutUnits18 = currentTagged18 + unitsTagged18;
-                            }
-                        }
-                        userSocializedLoss[u] += assign; // aggregate for analytics/UI
-                        allocated += assign;
-                        emit HaircutApplied(u, marketId, assign, userCollateral[u]);
-                    }
-                    remainingCap[i] = cap6 > assign ? (cap6 - assign) : 0;
-                    break;
-                }
-            }
-        }
-
-        uint256 remaining = lossAmount > allocated ? (lossAmount - allocated) : 0;
-        // Second pass: distribute remainder across positions with residual capacity
-        if (remaining > 0) {
-            for (uint256 i = 0; i < n && remaining > 0; i++) {
-                if (remainingCap[i] == 0) continue;
-                address u = profitablePositions[i].user;
-                PositionManager.Position[] storage positions = userPositions[u];
-                for (uint256 j = 0; j < positions.length && remaining > 0; j++) {
-                    if (positions[j].marketId == marketId && positions[j].size != 0) {
-                        uint256 addl = remaining <= remainingCap[i] ? remaining : remainingCap[i];
-                        if (addl > 0) {
-                            positions[j].socializedLossAccrued6 += addl;
-                            // Tag additional units for remainder haircut up to current size
-                            uint256 absSizeUnits18 = uint256(positions[j].size >= 0 ? positions[j].size : -positions[j].size);
-                            if (markPrice > 0) {
-                                uint256 unitsTagged18 = (addl * (10**18)) / markPrice;
-                                uint256 currentTagged18 = positions[j].haircutUnits18;
-                                uint256 untaggedCapacity18 = absSizeUnits18 > currentTagged18 ? (absSizeUnits18 - currentTagged18) : 0;
-                                if (unitsTagged18 > untaggedCapacity18) {
-                                    unitsTagged18 = untaggedCapacity18;
-                                }
-                                if (unitsTagged18 > 0) {
-                                    positions[j].haircutUnits18 = currentTagged18 + unitsTagged18;
-                                }
-                            }
-                            userSocializedLoss[u] += addl;
-                            remaining -= addl;
-                            allocated += addl;
-                            emit HaircutApplied(u, marketId, addl, userCollateral[u]);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (remaining > 0) {
-            marketBadDebt[marketId] += remaining;
-            emit BadDebtRecorded(marketId, remaining, liquidatedUser);
-            emit SocializationFailed(marketId, remaining, "Insufficient winner capacity for haircut", liquidatedUser);
-        }
-
-        if (adlDebug) {
-            emit SocializationCompleted(marketId, allocated, remaining, n, liquidatedUser);
-        }
-        emit SocializedLossApplied(marketId, allocated, liquidatedUser);
-    }
+    // removed: _socializeLoss (delegated to LiquidationManager)
     
     /**
      * @dev Get all users who have positions in a specific market
@@ -2014,99 +1387,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
      * @param excludeUser User to exclude (the liquidated user)
      * @return Array of profitable positions sorted by profit score
      */
-    function _findProfitablePositions(
-        bytes32 marketId, 
-        address excludeUser
-    ) internal returns (ProfitablePosition[] memory) {
-        address[] memory usersWithPositions = _getUsersWithPositionsInMarket(marketId);
-        uint256 markPrice = getMarkPrice(marketId);
-        
-        // First pass: count profitable positions
-        uint256 profitableCount = 0;
-        for (uint256 i = 0; i < usersWithPositions.length; i++) {
-            address user = usersWithPositions[i];
-            if (user == excludeUser) continue;
-            
-            PositionManager.Position[] storage positions = userPositions[user];
-            for (uint256 j = 0; j < positions.length; j++) {
-                if (positions[j].marketId == marketId && positions[j].size != 0) {
-                    // Calculate unrealized PnL
-                    int256 unrealizedPnL = _calculateUnrealizedPnL(positions[j], markPrice);
-                    if (unrealizedPnL > 0) {
-                        profitableCount++;
-                    }
-                    break;
-                }
-            }
-        }
-        
-        if (profitableCount == 0) {
-            return new ProfitablePosition[](0);
-        }
-        
-        // Second pass: populate profitable positions array (bounded by adlMaxCandidates for gas)
-        uint256 cap = profitableCount > adlMaxCandidates ? adlMaxCandidates : profitableCount;
-        ProfitablePosition[] memory profitablePositions = new ProfitablePosition[](cap);
-        uint256 index = 0;
-        
-        for (uint256 i = 0; i < usersWithPositions.length; i++) {
-            address user = usersWithPositions[i];
-            if (user == excludeUser) continue;
-            
-            PositionManager.Position[] storage positions = userPositions[user];
-            for (uint256 j = 0; j < positions.length; j++) {
-                if (positions[j].marketId == marketId && positions[j].size != 0) {
-                    PositionManager.Position storage pos = positions[j];
-                    int256 unrealizedPnL = _calculateUnrealizedPnL(pos, markPrice);
-                    
-                    if (unrealizedPnL > 0) {
-                        uint256 absSize = uint256(pos.size >= 0 ? pos.size : -pos.size);
-                        uint256 profitScore = uint256(unrealizedPnL) * absSize / 1e18; // Profit × Position Size
-                        
-                        profitablePositions[index] = ProfitablePosition({
-                            user: user,
-                            positionSize: pos.size,
-                            entryPrice: pos.entryPrice,
-                            unrealizedPnL: uint256(unrealizedPnL),
-                            profitScore: profitScore,
-                            isLong: pos.size > 0
-                        });
-                        
-                        // DEBUG events guarded
-                        if (adlDebug) {
-                            emit ProfitablePositionFound(
-                                user,
-                                marketId,
-                                pos.size,
-                                pos.entryPrice,
-                                markPrice,
-                                uint256(unrealizedPnL),
-                                profitScore
-                            );
-                            emit DebugProfitCalculation(
-                                user,
-                                marketId,
-                                pos.entryPrice,
-                                markPrice,
-                                pos.size,
-                                unrealizedPnL,
-                                profitScore
-                            );
-                        }
-                        
-                        index++;
-                        if (index == cap) {
-                            // Early exit once cap reached
-                            return profitablePositions;
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        
-        return profitablePositions;
-    }
+    // removed: _findProfitablePositions (delegated to LiquidationManager)
     
     /**
      * @dev Calculate unrealized PnL for a position at current mark price
@@ -2114,95 +1395,19 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
      * @param markPrice Current mark price
      * @return Unrealized PnL in USDC (6 decimals)
      */
-    function _calculateUnrealizedPnL(
-        PositionManager.Position storage position,
-        uint256 markPrice
-    ) internal view returns (int256) {
-        if (position.size == 0 || markPrice == 0 || position.entryPrice == 0) {
-            return 0;
-        }
-        
-        // Calculate PnL: (mark_price - entry_price) * position_size / tick_precision
-        int256 priceDiff = int256(markPrice) - int256(position.entryPrice);
-        return (priceDiff * position.size) / int256(TICK_PRECISION);
-    }
+    // removed: _calculateUnrealizedPnL (delegated to LiquidationManager)
     
     /**
      * @dev Sort profitable positions by profit score (highest first) using insertion sort
      * @param positions Array of positions to sort (modified in-place)
      */
-    function _sortProfitablePositionsByScore(ProfitablePosition[] memory positions) internal pure {
-        if (positions.length <= 1) return;
-        
-        // Simple insertion sort (efficient for small arrays)
-        for (uint256 i = 1; i < positions.length; i++) {
-            ProfitablePosition memory key = positions[i];
-            uint256 j = i;
-            
-            // Sort in descending order by profit score
-            while (j > 0 && positions[j - 1].profitScore < key.profitScore) {
-                positions[j] = positions[j - 1];
-                j--;
-            }
-            positions[j] = key;
-        }
-    }
+    // removed: _sortProfitablePositionsByScore
 
     /**
      * @dev Select approximate top-K by profitScore using a single pass thresholding approach.
      *      This avoids sorting the entire array when many candidates are present.
      */
-    function _selectTopKByProfitScore(
-        ProfitablePosition[] memory positions,
-        uint256 k
-    ) internal pure returns (ProfitablePosition[] memory) {
-        if (positions.length <= k) {
-            return positions;
-        }
-
-        // First pass: estimate threshold by sampling every Nth element
-        uint256 sampleStride = positions.length / (k == 0 ? 1 : k);
-        if (sampleStride == 0) sampleStride = 1;
-
-        uint256 approxThreshold = 0;
-        for (uint256 i = 0; i < positions.length; i += sampleStride) {
-            if (positions[i].profitScore > approxThreshold) {
-                approxThreshold = positions[i].profitScore;
-            }
-        }
-
-        // Second pass: collect up to K items >= threshold
-        ProfitablePosition[] memory result = new ProfitablePosition[](k);
-        uint256 count = 0;
-        for (uint256 i = 0; i < positions.length && count < k; i++) {
-            if (positions[i].profitScore >= approxThreshold) {
-                result[count] = positions[i];
-                count++;
-            }
-        }
-
-        // If we collected less than K due to threshold being too high, fill remaining with next best by linear scan
-        if (count < k) {
-            // Find remaining top by linear pass without duplicates
-            for (uint256 i = 0; i < positions.length && count < k; i++) {
-                // naive membership check: ok since k is small
-                bool exists = false;
-                for (uint256 j = 0; j < count; j++) {
-                    if (
-                        positions[i].user == result[j].user &&
-                        positions[i].positionSize == result[j].positionSize &&
-                        positions[i].entryPrice == result[j].entryPrice
-                    ) { exists = true; break; }
-                }
-                if (!exists) {
-                    result[count] = positions[i];
-                    count++;
-                }
-            }
-        }
-
-        return result;
-    }
+    // removed: _selectTopKByProfitScore
     
     /**
      * @dev Execute administrative position closure to realize profits for loss coverage
@@ -2213,153 +1418,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
      * @param targetProfit Amount of profit to realize
      * @return PositionClosureResult with success status and details
      */
-    function _executeAdministrativePositionClosure(
-        address user,
-        bytes32 marketId,
-        int256 currentPositionSize,
-        uint256 entryPrice,
-        uint256 targetProfit
-    ) internal returns (PositionClosureResult memory) {
-        uint256 markPrice = getMarkPrice(marketId);
-        if (markPrice == 0 || entryPrice == 0) {
-            return PositionClosureResult({
-                success: false,
-                realizedProfit: 0,
-                newPositionSize: uint256(currentPositionSize >= 0 ? currentPositionSize : -currentPositionSize),
-                newEntryPrice: entryPrice,
-                failureReason: "Invalid prices"
-            });
-        }
-        
-        // Find the actual position in storage
-        PositionManager.Position[] storage positions = userPositions[user];
-        for (uint256 i = 0; i < positions.length; i++) {
-            if (positions[i].marketId == marketId && positions[i].size == currentPositionSize) {
-                PositionManager.Position storage position = positions[i];
-                
-                // Calculate how much position to close to realize target profit
-                uint256 absCurrentSize = uint256(currentPositionSize >= 0 ? currentPositionSize : -currentPositionSize);
-                int256 totalUnrealizedPnL = _calculateUnrealizedPnL(position, markPrice);
-                
-                if (totalUnrealizedPnL <= 0) {
-                    return PositionClosureResult({
-                        success: false,
-                        realizedProfit: 0,
-                        newPositionSize: absCurrentSize,
-                        newEntryPrice: entryPrice,
-                        failureReason: "Position not profitable"
-                    });
-                }
-                
-                // Calculate reduction ratio to achieve target profit
-                uint256 totalProfitAvailable18 = uint256(totalUnrealizedPnL); // 18 decimals (standard P&L precision)
-                
-                // Scale target profit from 6 decimals (USDC) to 18 decimals for ratio math
-                uint256 targetProfit18 = targetProfit * DECIMAL_SCALE; // 6 → 18 decimals
-                uint256 actualTargetProfit18 = targetProfit18 > totalProfitAvailable18 ? totalProfitAvailable18 : targetProfit18;
-                
-                // Calculate position reduction amount using 18-decimal ratio precision
-                uint256 reductionRatio = (actualTargetProfit18 * 1e18) / totalProfitAvailable18; // 18 decimal precision
-                uint256 sizeReduction = (absCurrentSize * reductionRatio) / 1e18;
-                
-                if (sizeReduction == 0) {
-                    return PositionClosureResult({
-                        success: false,
-                        realizedProfit: 0,
-                        newPositionSize: absCurrentSize,
-                        newEntryPrice: entryPrice,
-                        failureReason: "Reduction too small"
-                    });
-                }
-                
-                // Apply the position reduction
-                uint256 newAbsSize = absCurrentSize - sizeReduction;
-                int256 newSize = currentPositionSize >= 0 ? int256(newAbsSize) : -int256(newAbsSize);
-                
-                // Calculate actual realized profit (18 decimals) then convert to 6 decimals for accounting
-                int256 priceDiff = int256(markPrice) - int256(entryPrice);
-                int256 sizeReductionSigned = currentPositionSize >= 0 ? int256(sizeReduction) : -int256(sizeReduction);
-                uint256 actualRealizedProfit18 = uint256((priceDiff * sizeReductionSigned) / int256(TICK_PRECISION));
-                uint256 actualRealizedProfit = actualRealizedProfit18 / DECIMAL_SCALE;
-                
-        // DEBUG: Emit position reduction details
-        if (adlDebug) {
-            emit DebugPositionReduction(
-                user,
-                marketId,
-                absCurrentSize,
-                sizeReduction,
-                newAbsSize,
-                actualRealizedProfit
-            );
-        }
-                
-                if (newAbsSize == 0) {
-                    // Position fully closed
-                    // Release margin
-                    if (position.marginLocked <= totalMarginLocked) {
-                        totalMarginLocked -= position.marginLocked;
-                    }
-                    
-                    // Remove position
-                    if (i < positions.length - 1) {
-                        positions[i] = positions[positions.length - 1];
-                    }
-                    positions.pop();
-                    
-                    // Remove market ID from user's list
-                    _removeMarketIdFromUser(user, marketId);
-                    
-                    // Notify OrderBook
-                    address ob = marketToOrderBook[marketId];
-                    if (ob != address(0)) {
-                        try IOrderBook(ob).clearUserPosition(user) {} catch {}
-                    }
-                    
-                    emit PositionUpdated(user, marketId, currentPositionSize, 0, entryPrice, 0);
-                    
-                    return PositionClosureResult({
-                        success: true,
-                        realizedProfit: actualRealizedProfit,
-                        newPositionSize: 0,
-                        newEntryPrice: 0,
-                        failureReason: ""
-                    });
-                    
-                } else {
-                    // Position partially closed - update size and recalculate margin
-                    position.size = newSize;
-                    
-                    // Proportionally adjust margin
-                    uint256 newMargin = (position.marginLocked * newAbsSize) / absCurrentSize;
-                    uint256 marginReleased = position.marginLocked - newMargin;
-                    
-                    position.marginLocked = newMargin;
-                    if (marginReleased <= totalMarginLocked) {
-                        totalMarginLocked -= marginReleased;
-                    }
-                    
-                    emit PositionUpdated(user, marketId, currentPositionSize, newSize, entryPrice, newMargin);
-                    
-                    return PositionClosureResult({
-                        success: true,
-                        realizedProfit: actualRealizedProfit,
-                        newPositionSize: newAbsSize,
-                        newEntryPrice: entryPrice, // Entry price stays the same
-                        failureReason: ""
-                    });
-                }
-            }
-        }
-        
-        return PositionClosureResult({
-            success: false,
-            realizedProfit: 0,
-            newPositionSize: uint256(currentPositionSize >= 0 ? currentPositionSize : -currentPositionSize),
-            newEntryPrice: entryPrice,
-            failureReason: "Position not found"
-        });
-    }
+    // removed: _executeAdministrativePositionClosure
 
     // ============ Internal Helper Functions ============
     

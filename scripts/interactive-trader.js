@@ -789,6 +789,15 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       this.contracts.orderBook = await getContract("ALUMINUM_ORDERBOOK");
       this.contracts.router = await getContract("TRADING_ROUTER");
       this.contracts.factory = await getContract("FUTURES_MARKET_FACTORY");
+      // Try to load LiquidationManager if present in config; fall back handled in listeners
+      try {
+        this.contracts.liquidationManager = await getContract(
+          "LIQUIDATION_MANAGER"
+        );
+      } catch (e) {
+        // Optional: not all deployments include LIQUIDATION_MANAGER key
+        this.contracts.liquidationManager = null;
+      }
 
       console.log(
         colorText("✅ All contracts loaded successfully!", colors.brightGreen)
@@ -825,6 +834,15 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         console.log(
           colorText(`✅ CoreVault loaded at: ${vaultAddress}`, colors.green)
         );
+        if (this.contracts.liquidationManager) {
+          const liqAddr = await this.contracts.liquidationManager.getAddress();
+          console.log(
+            colorText(
+              `✅ LiquidationManager loaded at: ${liqAddr}`,
+              colors.green
+            )
+          );
+        }
 
         // Test basic contract functionality
         try {
@@ -928,9 +946,10 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           );
         }
 
-        // Subscribe to haircut/bad debt events
+        // Subscribe to haircut/bad debt events (from LiquidationManager if available)
         try {
-          this.contracts.vault.on(
+          const liq = this.contracts.liquidationManager || this.contracts.vault;
+          liq.on(
             "HaircutApplied",
             (user, marketId, debitAmount, collateralAfter, event) => {
               this.handleHaircutAppliedEvent(
@@ -942,7 +961,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
               );
             }
           );
-          this.contracts.vault.on(
+          liq.on(
             "BadDebtRecorded",
             (marketId, amount, liquidatedUser, event) => {
               this.handleBadDebtRecordedEvent(
@@ -2089,8 +2108,8 @@ ${
           }
         );
 
-        // ADO Event: Socialized Loss Applied - tracks when losses are socialized
-        this.contracts.vault.on(
+        // ADO Event: Socialized Loss Applied - tracks when losses are socialized (prefer LiquidationManager)
+        (this.contracts.liquidationManager || this.contracts.vault).on(
           "SocializedLossApplied",
           (marketId, lossAmount, liquidatedUser, event) => {
             this.handleSocializedLossAppliedEvent(
@@ -2102,8 +2121,8 @@ ${
           }
         );
 
-        // ADO Event: User Loss Socialized - tracks individual user loss socialization
-        this.contracts.vault.on(
+        // ADO Event: User Loss Socialized - tracks individual user loss socialization (prefer LiquidationManager)
+        (this.contracts.liquidationManager || this.contracts.vault).on(
           "UserLossSocialized",
           (user, lossAmount, remainingCollateral, event) => {
             this.handleUserLossSocializedEvent(

@@ -131,6 +131,32 @@ async function main() {
     contracts.CORE_VAULT = await coreVault.getAddress();
     console.log("     ✅ CoreVault deployed at:", contracts.CORE_VAULT);
 
+    // 4b) Deploy LiquidationManager and wire into CoreVault
+    console.log("  4️⃣b Deploying LiquidationManager...");
+    const LiquidationManager = await ethers.getContractFactory(
+      "LiquidationManager",
+      {
+        libraries: {
+          VaultAnalytics: contracts.VAULT_ANALYTICS,
+          PositionManager: contracts.POSITION_MANAGER,
+        },
+      }
+    );
+    const liquidationManager = await LiquidationManager.deploy(
+      contracts.MOCK_USDC,
+      deployer.address
+    );
+    await liquidationManager.waitForDeployment();
+    contracts.LIQUIDATION_MANAGER = await liquidationManager.getAddress();
+    console.log(
+      "     ✅ LiquidationManager deployed at:",
+      contracts.LIQUIDATION_MANAGER
+    );
+
+    console.log("     🔧 Setting CoreVault.liquidationManager...");
+    await coreVault.setLiquidationManager(contracts.LIQUIDATION_MANAGER);
+    console.log("     ✅ LiquidationManager configured on CoreVault");
+
     // Deploy FuturesMarketFactory
     console.log("  5️⃣ Deploying FuturesMarketFactory...");
     const FuturesMarketFactory = await ethers.getContractFactory(

@@ -11,6 +11,7 @@
     "deploy:hyperliquid": "hardhat run scripts/deploy.js --network hyperliquid",
     "deploy:hyperliquid-testnet": "hardhat run scripts/deploy.js --network hyperliquid_testnet",
     "deploy:polygon": "hardhat run scripts/deploy.js --network polygon",
+    "size:contracts": "node scripts/check-contract-sizes.js",
     "trade": "hardhat run scripts/interactive-trader.js --network localhost",
     "trade:hyperliquid": "hardhat run scripts/interactive-trader.js --network hyperliquid",
     "viewer": "hardhat run scripts/live-orderbook-viewer.js --network localhost",
