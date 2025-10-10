@@ -4,7 +4,7 @@ First, you want to ensure that the hardhat-node is running and operational.
     npx hardhat node - (ensure this window is kept open at all times to keep the blockchain operational.)
 
 Second, you want to run the deploy scripts to deploy all our smart contracts and create the markets
-    npx hardhat run scripts/deploy.js --network localhost
+    
 
 Third, you want to run the @interactive-trader.js by running
     node trade.js 

@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "./OrderBook.sol";
 import "./CoreVault.sol";
+import "@openzeppelin/contracts/proxy/Clones.sol";
 
 // UMA Oracle interface
 interface IOptimisticOracleV3 {
@@ -30,6 +31,7 @@ interface IPriceOracle {
  * @notice Allows users to create and trade custom metric futures with margin support
  */
 contract FuturesMarketFactory {
+    using Clones for address;
     // ============ State Variables ============
     
     CoreVault public immutable vault;
@@ -70,6 +72,9 @@ contract FuturesMarketFactory {
     address public oracleAdmin;
     uint256 public defaultOracleReward = 10 * 10**6; // 10 USDC reward for UMA requests
     
+    // Minimal proxy implementation for OrderBook (EIP-1167)
+    address public orderBookImplementation;
+    
     address[] public allOrderBooks;
     bytes32[] public allMarkets;
     
@@ -89,19 +94,12 @@ contract FuturesMarketFactory {
         uint256 settlementDate,
         uint256 startPrice
     );
-    event FuturesMarketDeactivated(address indexed orderBook, bytes32 indexed marketId, address indexed creator);
-    event DefaultParametersUpdated(uint256 marginRequirement, uint256 tradingFee);
-    event MarketCreationFeeUpdated(uint256 oldFee, uint256 newFee);
-    event PublicMarketCreationToggled(bool enabled);
-    event AdminUpdated(address indexed oldAdmin, address indexed newAdmin);
-    event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
+    // Admin/config events removed to reduce bytecode size
     
     // Oracle and settlement events
-    event OracleConfigurationUpdated(address indexed umaOracle, address indexed defaultOracle, address indexed oracleAdmin);
-    event MarketSettlementRequested(bytes32 indexed marketId, bytes32 indexed umaRequestId, address indexed requestor);
+    // Auxiliary oracle events removed to reduce bytecode size
     event MarketSettled(bytes32 indexed marketId, uint256 finalPrice, address indexed settler);
-    event CustomOracleAssigned(bytes32 indexed marketId, address indexed oracle);
-    event EmergencyPriceUpdate(bytes32 indexed marketId, uint256 price, string reason);
+    // Auxiliary oracle events removed to reduce bytecode size
     
     // ============ Modifiers ============
     
@@ -203,12 +201,10 @@ contract FuturesMarketFactory {
         require(marginRequirementBps >= 1000 && marginRequirementBps <= 10000, "FuturesMarketFactory: invalid margin requirement"); // 10% to 100%
         require(tradingFee <= 1000, "FuturesMarketFactory: trading fee too high"); // Max 10%
         
-        // Deploy new OrderBook
-        orderBook = address(new OrderBook(
-            address(vault),
-            marketId,
-            feeRecipient
-        ));
+        // Deploy new OrderBook via EIP-1167 clone
+        require(orderBookImplementation != address(0), "FuturesMarketFactory: template not set");
+        orderBook = orderBookImplementation.clone();
+        OrderBook(orderBook).initialize(address(vault), marketId, feeRecipient);
         
         // Register with vault
         vault.registerOrderBook(orderBook);
@@ -301,7 +297,7 @@ contract FuturesMarketFactory {
             }
         }
         
-        emit FuturesMarketDeactivated(orderBook, marketId, marketCreators[marketId]);
+        // event omitted to reduce bytecode size
     }
     
     // ============ Oracle Integration Functions ============
@@ -321,7 +317,7 @@ contract FuturesMarketFactory {
         defaultOracle = IPriceOracle(_defaultOracle);
         oracleAdmin = _oracleAdmin;
         
-        emit OracleConfigurationUpdated(_umaOracle, _defaultOracle, _oracleAdmin);
+        // event omitted to reduce bytecode size
     }
     
     /**
@@ -337,7 +333,7 @@ contract FuturesMarketFactory {
         );
         
         marketOracles[marketId] = oracle;
-        emit CustomOracleAssigned(marketId, oracle);
+        // event omitted to reduce bytecode size
     }
     
     /**
@@ -369,8 +365,7 @@ contract FuturesMarketFactory {
         );
         
         umaRequestIds[marketId] = requestId;
-        
-        emit MarketSettlementRequested(marketId, requestId, msg.sender);
+        // event omitted to reduce bytecode size
     }
     
     /**
@@ -450,7 +445,7 @@ contract FuturesMarketFactory {
         defaultMarginRequirementBps = marginRequirementBps;
         defaultTradingFee = tradingFee;
         
-        emit DefaultParametersUpdated(marginRequirementBps, tradingFee);
+        // event omitted to reduce bytecode size
     }
     
     /**
@@ -458,9 +453,8 @@ contract FuturesMarketFactory {
      * @param newFee New market creation fee in USDC
      */
     function updateMarketCreationFee(uint256 newFee) external onlyAdmin {
-        uint256 oldFee = marketCreationFee;
         marketCreationFee = newFee;
-        emit MarketCreationFeeUpdated(oldFee, newFee);
+        // event omitted to reduce bytecode size
     }
     
     /**
@@ -469,7 +463,7 @@ contract FuturesMarketFactory {
      */
     function togglePublicMarketCreation(bool enabled) external onlyAdmin {
         publicMarketCreation = enabled;
-        emit PublicMarketCreationToggled(enabled);
+        // event omitted to reduce bytecode size
     }
     
     /**
@@ -479,10 +473,8 @@ contract FuturesMarketFactory {
     function updateAdmin(address newAdmin) external onlyAdmin {
         require(newAdmin != address(0), "OrderBookFactory: admin cannot be zero address");
         
-        address oldAdmin = admin;
         admin = newAdmin;
-        
-        emit AdminUpdated(oldAdmin, newAdmin);
+        // event omitted to reduce bytecode size
     }
     
     /**
@@ -492,10 +484,19 @@ contract FuturesMarketFactory {
     function updateFeeRecipient(address newFeeRecipient) external onlyAdmin {
         require(newFeeRecipient != address(0), "OrderBookFactory: fee recipient cannot be zero address");
         
-        address oldRecipient = feeRecipient;
         feeRecipient = newFeeRecipient;
-        
-        emit FeeRecipientUpdated(oldRecipient, newFeeRecipient);
+        // event omitted to reduce bytecode size
+    }
+    
+    /**
+     * @dev Set the OrderBook implementation used for EIP-1167 clones
+     * @param implementation Address of deployed OrderBook logic contract (template)
+     */
+    function setOrderBookImplementation(address implementation) external onlyAdmin {
+        require(implementation != address(0), "FuturesMarketFactory: invalid implementation");
+        // Basic sanity: ensure it looks like an OrderBook by calling a harmless view via low-level call
+        // Not strictly necessary; avoids extra bytecode by skipping interface checks.
+        orderBookImplementation = implementation;
     }
     
     // ============ View Functions ============
@@ -509,22 +510,13 @@ contract FuturesMarketFactory {
         return marketToOrderBook[marketId];
     }
     
-    /**
-     * @dev Get market ID for an OrderBook
-     * @param orderBook OrderBook address
-     * @return Market ID (bytes32(0) if not found)
-     */
-    function getMarketForOrderBook(address orderBook) external view returns (bytes32) {
-        return orderBookToMarket[orderBook];
-    }
+    // Removed redundant reverse lookup getter to reduce bytecode size
     
     /**
      * @dev Get all OrderBook addresses
      * @return Array of OrderBook addresses
      */
-    function getAllOrderBooks() external view returns (address[] memory) {
-        return allOrderBooks;
-    }
+    // Removed convenience getter to reduce bytecode size
     
     /**
      * @dev Get all market IDs
@@ -538,18 +530,14 @@ contract FuturesMarketFactory {
      * @dev Get total number of OrderBooks
      * @return Number of OrderBooks
      */
-    function getOrderBookCount() external view returns (uint256) {
-        return allOrderBooks.length;
-    }
+    // Removed convenience getter to reduce bytecode size
     
     /**
      * @dev Check if a market exists
      * @param marketId Market identifier
      * @return True if market exists
      */
-    function doesMarketExist(bytes32 marketId) external view returns (bool) {
-        return marketExists[marketId];
-    }
+    // Removed redundant getter: use public mapping `marketExists`
     
     /**
      * @dev Get default trading parameters
@@ -565,9 +553,7 @@ contract FuturesMarketFactory {
      * @param marketId Market identifier
      * @return Creator address
      */
-    function getMarketCreator(bytes32 marketId) external view returns (address) {
-        return marketCreators[marketId];
-    }
+    // Removed redundant getter: use public mapping `marketCreators`
     
     /**
      * @dev Get market symbol
@@ -583,76 +569,44 @@ contract FuturesMarketFactory {
      * @param marketId Market identifier
      * @return Metric URL string
      */
-    function getMarketMetricUrl(bytes32 marketId) external view returns (string memory) {
-        return marketMetricUrls[marketId];
-    }
+    // Removed redundant getter: use public mapping `marketMetricUrls`
     
     /**
      * @dev Get settlement date for a market
      * @param marketId Market identifier
      * @return Settlement date timestamp
      */
-    function getMarketSettlementDate(bytes32 marketId) external view returns (uint256) {
-        return marketSettlementDates[marketId];
-    }
+    // Removed redundant getter: use public mapping `marketSettlementDates`
     
     /**
      * @dev Get start price for a market
      * @param marketId Market identifier
      * @return Start price (6 USDC decimals)
      */
-    function getMarketStartPrice(bytes32 marketId) external view returns (uint256) {
-        return marketStartPrices[marketId];
-    }
+    // Removed redundant getter: use public mapping `marketStartPrices`
     
     /**
      * @dev Get market creation timestamp
      * @param marketId Market identifier
      * @return Creation timestamp
      */
-    function getMarketCreationTimestamp(bytes32 marketId) external view returns (uint256) {
-        return marketCreationTimestamps[marketId];
-    }
+    // Removed redundant getter: use public mapping `marketCreationTimestamps`
     
-    /**
-     * @dev Check if a market has settled (past settlement date)
-     * @param marketId Market identifier
-     * @return True if market has settled
-     */
-    function isMarketSettled(bytes32 marketId) external view returns (bool) {
-        return block.timestamp >= marketSettlementDates[marketId];
-    }
-    
-    /**
-     * @dev Get time remaining until settlement
-     * @param marketId Market identifier
-     * @return Time remaining in seconds (0 if already settled)
-     */
-    function getTimeToSettlement(bytes32 marketId) external view returns (uint256) {
-        uint256 settlementDate = marketSettlementDates[marketId];
-        if (block.timestamp >= settlementDate) {
-            return 0;
-        }
-        return settlementDate - block.timestamp;
-    }
+    // Removed convenience settlement helpers to reduce bytecode size
     
     /**
      * @dev Get data source for a market
      * @param marketId Market identifier
      * @return Data source string
      */
-    function getMarketDataSource(bytes32 marketId) external view returns (string memory) {
-        return marketDataSources[marketId];
-    }
+    // Removed redundant getter: use public mapping `marketDataSources`
     
     /**
      * @dev Get tags for a market
      * @param marketId Market identifier
      * @return Array of tag strings
      */
-    function getMarketTags(bytes32 marketId) external view returns (string[] memory) {
-        return marketTags[marketId];
-    }
+    // Removed redundant getter
     
     /**
      * @dev Get settlement status and final price
@@ -660,18 +614,14 @@ contract FuturesMarketFactory {
      * @return settled Whether market is settled
      * @return finalPrice Final settlement price (0 if not settled)
      */
-    function getMarketSettlementInfo(bytes32 marketId) external view returns (bool settled, uint256 finalPrice) {
-        return (marketSettled[marketId], finalSettlementPrices[marketId]);
-    }
+    // Removed convenience view
     
     /**
      * @dev Get markets created by a user
      * @param creator Creator address
      * @return Array of market IDs created by the user
      */
-    function getUserCreatedMarkets(address creator) external view returns (bytes32[] memory) {
-        return userCreatedMarkets[creator];
-    }
+    // Removed convenience view
     
     // ============ Market Discovery Functions ============
     
@@ -679,80 +629,27 @@ contract FuturesMarketFactory {
      * @dev Get all custom metric markets
      * @return Array of custom metric market IDs
      */
-    function getCustomMetricMarkets() external view returns (bytes32[] memory) {
-        return _getMarketsByType(true);
-    }
+    // Removed discovery helper
     
     /**
      * @dev Get all standard markets
      * @return Array of standard market IDs
      */
-    function getStandardMarkets() external view returns (bytes32[] memory) {
-        return _getMarketsByType(false);
-    }
+    // Removed discovery helper
     
     /**
      * @dev Get markets by data source
      * @param dataSource Data source to filter by
      * @return Array of market IDs from the specified data source
      */
-    function getMarketsByDataSource(string memory dataSource) external view returns (bytes32[] memory) {
-        uint256 count = 0;
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (_compareStrings(marketDataSources[allMarkets[i]], dataSource)) {
-                count++;
-            }
-        }
-        
-        bytes32[] memory filtered = new bytes32[](count);
-        uint256 index = 0;
-        
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (_compareStrings(marketDataSources[allMarkets[i]], dataSource)) {
-                filtered[index] = allMarkets[i];
-                index++;
-            }
-        }
-        
-        return filtered;
-    }
+    // Removed discovery helper
     
     /**
      * @dev Get markets containing a specific tag
      * @param tag Tag to search for
      * @return Array of market IDs containing the tag
      */
-    function getMarketsByTag(string memory tag) external view returns (bytes32[] memory) {
-        uint256 count = 0;
-        
-        // Count matching markets
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            string[] memory tags = marketTags[allMarkets[i]];
-            for (uint256 j = 0; j < tags.length; j++) {
-                if (_compareStrings(tags[j], tag)) {
-                    count++;
-                    break;
-                }
-            }
-        }
-        
-        bytes32[] memory filtered = new bytes32[](count);
-        uint256 index = 0;
-        
-        // Collect matching markets
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            string[] memory tags = marketTags[allMarkets[i]];
-            for (uint256 j = 0; j < tags.length; j++) {
-                if (_compareStrings(tags[j], tag)) {
-                    filtered[index] = allMarkets[i];
-                    index++;
-                    break;
-                }
-            }
-        }
-        
-        return filtered;
-    }
+    // Removed discovery helper
     
     /**
      * @dev Get markets settling within a time range
@@ -760,62 +657,17 @@ contract FuturesMarketFactory {
      * @param toTimestamp End of time range
      * @return Array of market IDs settling in the range
      */
-    function getMarketsBySettlementRange(
-        uint256 fromTimestamp,
-        uint256 toTimestamp
-    ) external view returns (bytes32[] memory) {
-        require(fromTimestamp <= toTimestamp, "FuturesMarketFactory: invalid time range");
-        
-        uint256 count = 0;
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            uint256 settlementDate = marketSettlementDates[allMarkets[i]];
-            if (settlementDate >= fromTimestamp && settlementDate <= toTimestamp) {
-                count++;
-            }
-        }
-        
-        bytes32[] memory filtered = new bytes32[](count);
-        uint256 index = 0;
-        
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            uint256 settlementDate = marketSettlementDates[allMarkets[i]];
-            if (settlementDate >= fromTimestamp && settlementDate <= toTimestamp) {
-                filtered[index] = allMarkets[i];
-                index++;
-            }
-        }
-        
-        return filtered;
-    }
+    // Removed discovery helper
     
     /**
      * @dev Get active (unsettled) markets
      * @return Array of active market IDs
      */
-    function getActiveMarkets() external view returns (bytes32[] memory) {
-        uint256 count = 0;
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (!marketSettled[allMarkets[i]] && block.timestamp < marketSettlementDates[allMarkets[i]]) {
-                count++;
-            }
-        }
-        
-        bytes32[] memory active = new bytes32[](count);
-        uint256 index = 0;
-        
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (!marketSettled[allMarkets[i]] && block.timestamp < marketSettlementDates[allMarkets[i]]) {
-                active[index] = allMarkets[i];
-                index++;
-            }
-        }
-        
-        return active;
-    }
+    // Removed discovery helper
     
     /**
      * @dev Get markets ready for settlement
-     * @return Array of market IDs ready for settlement
+     * NOTE: Retained due to potential external usage
      */
     function getMarketsReadyForSettlement() external view returns (bytes32[] memory) {
         uint256 count = 0;
@@ -838,14 +690,7 @@ contract FuturesMarketFactory {
         return ready;
     }
     
-    /**
-     * @dev Get market creation settings
-     * @return creationFee Market creation fee
-     * @return publicCreation Whether public creation is enabled
-     */
-    function getMarketCreationSettings() external view returns (uint256 creationFee, bool publicCreation) {
-        return (marketCreationFee, publicMarketCreation);
-    }
+    // Removed convenience getter for market creation settings to reduce bytecode size
     
     /**
      * @dev Get comprehensive market details
@@ -859,27 +704,7 @@ contract FuturesMarketFactory {
      * @return creationTimestamp When market was created
      * @return exists Whether market exists
      */
-    function getMarketDetails(bytes32 marketId) external view returns (
-        address orderBook,
-        address creator,
-        string memory symbol,
-        string memory metricUrl,
-        uint256 settlementDate,
-        uint256 startPrice,
-        uint256 creationTimestamp,
-        bool exists
-    ) {
-        return (
-            marketToOrderBook[marketId],
-            marketCreators[marketId],
-            marketSymbols[marketId],
-            marketMetricUrls[marketId],
-            marketSettlementDates[marketId],
-            marketStartPrices[marketId],
-            marketCreationTimestamps[marketId],
-            marketExists[marketId]
-        );
-    }
+    // Removed aggregated details view
     
     /**
      * @dev Get market metadata only
@@ -890,21 +715,7 @@ contract FuturesMarketFactory {
      * @return startPrice Start price (6 USDC decimals)
      * @return settled Whether market has settled
      */
-    function getMarketMetadata(bytes32 marketId) external view returns (
-        string memory symbol,
-        string memory metricUrl,
-        uint256 settlementDate,
-        uint256 startPrice,
-        bool settled
-    ) {
-        return (
-            marketSymbols[marketId],
-            marketMetricUrls[marketId],
-            marketSettlementDates[marketId],
-            marketStartPrices[marketId],
-            block.timestamp >= marketSettlementDates[marketId]
-        );
-    }
+    // Removed aggregated metadata view
     
     // ============ Robust Oracle Management Functions ============
     
@@ -989,28 +800,7 @@ contract FuturesMarketFactory {
      * @return priceTimestamp Price timestamp
      * @return isSettlementReady Whether market is ready for settlement
      */
-    function getMarketOracleInfo(bytes32 marketId) external view returns (
-        address customOracle,
-        address defaultOracleAddr,
-        address umaOracleAddr,
-        uint256 currentPrice,
-        uint256 priceTimestamp,
-        bool isSettlementReady
-    ) {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        
-        // Get current price
-        (currentPrice, priceTimestamp) = this.getCurrentOraclePrice(marketId);
-        
-        return (
-            marketOracles[marketId],
-            address(defaultOracle),
-            address(umaOracle),
-            currentPrice,
-            priceTimestamp,
-            block.timestamp >= marketSettlementDates[marketId] && !marketSettled[marketId]
-        );
-    }
+    // Removed aggregated oracle info view to reduce bytecode size
     
     /**
      * @dev Update multiple market prices via oracle admin
@@ -1036,36 +826,7 @@ contract FuturesMarketFactory {
      * @param maxAge Maximum age in seconds for price to be considered fresh
      * @return Array of market IDs needing price updates
      */
-    function getMarketsNeedingPriceUpdate(uint256 maxAge) external view returns (bytes32[] memory) {
-        uint256 count = 0;
-        uint256 cutoffTime = block.timestamp - maxAge;
-        
-        // Count markets needing updates
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (!marketSettled[allMarkets[i]]) {
-                (, uint256 timestamp) = this.getCurrentOraclePrice(allMarkets[i]);
-                if (timestamp < cutoffTime) {
-                    count++;
-                }
-            }
-        }
-        
-        bytes32[] memory staleMarkets = new bytes32[](count);
-        uint256 index = 0;
-        
-        // Collect markets needing updates
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (!marketSettled[allMarkets[i]]) {
-                (, uint256 timestamp) = this.getCurrentOraclePrice(allMarkets[i]);
-                if (timestamp < cutoffTime) {
-                    staleMarkets[index] = allMarkets[i];
-                    index++;
-                }
-            }
-        }
-        
-        return staleMarkets;
-    }
+    // Removed oracle monitoring helper
     
     /**
      * @dev Get oracle health status across all markets
@@ -1075,35 +836,7 @@ contract FuturesMarketFactory {
      * @return marketsWithUMARequests Number of markets with pending UMA requests
      * @return settledMarkets Number of settled markets
      */
-    function getOracleHealthStatus() external view returns (
-        uint256 totalMarkets,
-        uint256 activeMarkets,
-        uint256 marketsWithCustomOracles,
-        uint256 marketsWithUMARequests,
-        uint256 settledMarkets
-    ) {
-        totalMarkets = allMarkets.length;
-        
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            bytes32 marketId = allMarkets[i];
-            
-            if (!marketSettled[marketId] && block.timestamp < marketSettlementDates[marketId]) {
-                activeMarkets++;
-            }
-            
-            if (marketOracles[marketId] != address(0)) {
-                marketsWithCustomOracles++;
-            }
-            
-            if (umaRequestIds[marketId] != bytes32(0)) {
-                marketsWithUMARequests++;
-            }
-            
-            if (marketSettled[marketId]) {
-                settledMarkets++;
-            }
-        }
-    }
+    // Removed oracle health view
     
     /**
      * @dev Emergency oracle intervention - update price directly
@@ -1121,9 +854,7 @@ contract FuturesMarketFactory {
         require(bytes(reason).length > 0, "FuturesMarketFactory: reason required");
         
         vault.updateMarkPrice(marketId, emergencyPrice);
-        
-        // Emergency intervention logged via event
-        emit EmergencyPriceUpdate(marketId, emergencyPrice, reason);
+        // event omitted to reduce bytecode size
     }
     
     // ============ Internal Helper Functions ============
@@ -1179,19 +910,10 @@ contract FuturesMarketFactory {
                 index++;
             }
         }
+        return marketIds;
     }
 
-    /**
-     * @dev Get market information
-     * @param marketId Market ID
-     * @return name Market symbol
-     * @return orderBookAddress OrderBook contract address
-     */
-    function getMarketInfo(bytes32 marketId) external view returns (string memory name, address orderBookAddress) {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        name = marketSymbols[marketId];
-        orderBookAddress = marketToOrderBook[marketId];
-    }
+    // Removed convenience market info getter to reduce bytecode size
 
     /**
      * @dev Compare two strings for equality
@@ -1226,8 +948,7 @@ contract FuturesMarketFactory {
         
         // Enable leverage on the OrderBook
         orderBook.enableLeverage(maxLeverage, marginRequirementBps);
-        
-        emit MarketLeverageEnabled(marketId, maxLeverage, marginRequirementBps);
+        // event omitted to reduce bytecode size
     }
 
     /**
@@ -1242,8 +963,7 @@ contract FuturesMarketFactory {
         
         // Disable leverage on the OrderBook
         orderBook.disableLeverage();
-        
-        emit MarketLeverageDisabled(marketId);
+        // event omitted to reduce bytecode size
     }
 
     /**
@@ -1263,8 +983,7 @@ contract FuturesMarketFactory {
         
         // Update leverage controller on the OrderBook
         orderBook.setLeverageController(controller);
-        
-        emit MarketLeverageControllerUpdated(marketId, controller);
+        // event omitted to reduce bytecode size
     }
 
     /**
@@ -1302,14 +1021,9 @@ contract FuturesMarketFactory {
         
         defaultMarginRequirementBps = _defaultMarginRequirementBps;
         defaultLeverageEnabled = _defaultLeverageEnabled;
-        
-        emit DefaultLeverageSettingsUpdated(_defaultMarginRequirementBps, _defaultLeverageEnabled);
+        // event omitted to reduce bytecode size
     }
 
     // ============ Additional Events for Leverage Management ============
-    
-    event MarketLeverageEnabled(bytes32 indexed marketId, uint256 maxLeverage, uint256 marginRequirement);
-    event MarketLeverageDisabled(bytes32 indexed marketId);
-    event MarketLeverageControllerUpdated(bytes32 indexed marketId, address indexed controller);
-    event DefaultLeverageSettingsUpdated(uint256 defaultMarginRequirement, bool defaultLeverageEnabled);
+    // removed to reduce bytecode size
 }

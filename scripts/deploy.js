@@ -174,6 +174,39 @@ async function main() {
       contracts.FUTURES_MARKET_FACTORY
     );
 
+    // 5b) Deploy OrderBook implementation (EIP-1167 template)
+    console.log("  5️⃣b Deploying OrderBook implementation (template)...");
+    const OrderBook = await ethers.getContractFactory("OrderBook");
+    // For the implementation, constructor params won't affect clones' state; pass safe values
+    const orderBookImpl = await OrderBook.deploy(
+      contracts.CORE_VAULT,
+      ethers.ZeroHash,
+      TREASURY_ADDRESS
+    );
+    await orderBookImpl.waitForDeployment();
+    contracts.ORDERBOOK_IMPLEMENTATION = await orderBookImpl.getAddress();
+    console.log(
+      "     ✅ OrderBook implementation deployed at:",
+      contracts.ORDERBOOK_IMPLEMENTATION
+    );
+
+    // Set template on factory so future markets use minimal proxies
+    try {
+      console.log(
+        "  🔧 Setting factory OrderBook implementation template for clones..."
+      );
+      await factory.setOrderBookImplementation(
+        contracts.ORDERBOOK_IMPLEMENTATION
+      );
+      console.log("     ✅ Factory template set successfully");
+    } catch (e) {
+      console.log(
+        "     ⚠️  Could not set OrderBook implementation on factory:",
+        e?.message || e
+      );
+      throw e;
+    }
+
     // Set conservative defaults: 100% margin, 0 bps trading fee (no fees)
     try {
       console.log(
@@ -301,6 +334,8 @@ async function main() {
       const parsedEvent = factory.interface.parseLog(event);
       contracts.ALUMINUM_ORDERBOOK = parsedEvent.args.orderBook;
       actualMarketId = parsedEvent.args.marketId;
+      // Persist the runtime marketId so config can reference the correct mapping key
+      contracts.ALUMINUM_MARKET_ID = actualMarketId;
       console.log(
         "     ✅ ALUMINUM OrderBook deployed at:",
         contracts.ALUMINUM_ORDERBOOK
@@ -1141,12 +1176,25 @@ async function updateContractsFile(contracts) {
         );
       }
 
+      // If ALUMINUM block already exists, ensure marketId is the actual one
+      if (contracts.ALUMINUM_MARKET_ID) {
+        const aluBlockRegex = /ALUMINUM:\s*\{[\s\S]*?\}/m;
+        const m = content.match(aluBlockRegex);
+        if (m) {
+          const updated = m[0].replace(
+            /marketId:\s*[^,]+,/,
+            `marketId: "${contracts.ALUMINUM_MARKET_ID}",`
+          );
+          content = content.replace(aluBlockRegex, updated);
+        }
+      }
+
       // Add ALUMINUM market info if not present
       if (!content.includes("ALUMINUM: {")) {
         const aluminumInfo = `
   ALUMINUM: {
     symbol: "ALU-USD",
-    marketId: ethers.keccak256(ethers.toUtf8Bytes("ALU-USD")),
+    marketId: "${contracts.ALUMINUM_MARKET_ID || "0x"}",
     name: "Aluminum Futures",
     orderBook: "${contracts.ALUMINUM_ORDERBOOK}",
     leverageEnabled: false,

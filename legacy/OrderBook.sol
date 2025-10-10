@@ -114,8 +114,8 @@ contract OrderBook {
     mapping(uint256 => bool) public sellPriceExists;
 
     // Vault integration
-    ICoreVault public vault;
-    bytes32 public marketId;
+    ICoreVault public immutable vault;
+    bytes32 public immutable marketId;
     
     // Trading parameters
     uint256 public marginRequirementBps = 10000; // 100% margin requirement by default (1:1, basis points)
@@ -1257,28 +1257,6 @@ contract OrderBook {
     }
 
     /**
-     * @dev Initializer for clone-based deployments (EIP-1167). Can be called only once.
-     * @param _vault Core vault address
-     * @param _marketId Market identifier
-     * @param _feeRecipient Fee recipient and initial leverage controller
-     */
-    function initialize(
-        address _vault,
-        bytes32 _marketId,
-        address _feeRecipient
-    ) external {
-        // Simple initializer guard without OZ Initializable to avoid extra deps/bytecode
-        require(address(vault) == address(0) && marketId == bytes32(0) && feeRecipient == address(0), "OrderBook: already initialized");
-        require(_vault != address(0), "OrderBook: vault cannot be zero address");
-        require(_feeRecipient != address(0), "OrderBook: fee recipient cannot be zero address");
-
-        vault = ICoreVault(_vault);
-        marketId = _marketId;
-        feeRecipient = _feeRecipient;
-        leverageController = _feeRecipient;
-    }
-
-    /**
      * @dev Place a limit order
      * @param price Price with 6 decimals (USDC)
      * @param amount Amount with 18 decimals
@@ -2338,11 +2316,9 @@ contract OrderBook {
         
         // Sort buy prices in descending order
         for (uint256 i = 0; i < buyPrices.length; i++) {
-            uint256 p = buyPrices[i];
-            PriceLevel storage lvl = buyLevels[p];
-            if (lvl.exists && lvl.totalAmount > 0 && lvl.firstOrderId != 0) {
-                allBuyPrices[buyCount] = p;
-                allBuyAmounts[buyCount] = lvl.totalAmount;
+            if (buyLevels[buyPrices[i]].exists) {
+                allBuyPrices[buyCount] = buyPrices[i];
+                allBuyAmounts[buyCount] = buyLevels[buyPrices[i]].totalAmount;
                 buyCount++;
             }
         }
@@ -2358,25 +2334,6 @@ contract OrderBook {
                 }
             }
         }
-        // Pointer-based fallback if arrays were not populated but bestBid exists
-        if (buyCount == 0 && bestBid > 0) {
-            uint256 p = bestBid;
-            uint256 k = 0;
-            // Limit temporary arrays to requested levels
-            uint256 maxLevels = levels > 0 ? levels : 1;
-            allBuyPrices = new uint256[](maxLevels);
-            allBuyAmounts = new uint256[](maxLevels);
-            while (k < maxLevels && p != 0) {
-                PriceLevel storage lvl = buyLevels[p];
-                if (lvl.exists && lvl.totalAmount > 0 && lvl.firstOrderId != 0) {
-                    allBuyPrices[k] = p;
-                    allBuyAmounts[k] = lvl.totalAmount;
-                    k++;
-                }
-                p = _getPrevBuyPrice(p);
-            }
-            buyCount = k;
-        }
         
         // Get sell side (asks)
         uint256[] memory allSellPrices = new uint256[](sellPrices.length);
@@ -2384,11 +2341,9 @@ contract OrderBook {
         uint256 sellCount = 0;
         
         for (uint256 i = 0; i < sellPrices.length; i++) {
-            uint256 p = sellPrices[i];
-            PriceLevel storage lvl = sellLevels[p];
-            if (lvl.exists && lvl.totalAmount > 0 && lvl.firstOrderId != 0) {
-                allSellPrices[sellCount] = p;
-                allSellAmounts[sellCount] = lvl.totalAmount;
+            if (sellLevels[sellPrices[i]].exists) {
+                allSellPrices[sellCount] = sellPrices[i];
+                allSellAmounts[sellCount] = sellLevels[sellPrices[i]].totalAmount;
                 sellCount++;
             }
         }
@@ -2403,24 +2358,6 @@ contract OrderBook {
                     }
                 }
             }
-        }
-        // Pointer-based fallback if arrays were not populated but bestAsk exists
-        if (sellCount == 0 && bestAsk > 0) {
-            uint256 p = bestAsk;
-            uint256 k = 0;
-            uint256 maxLevels = levels > 0 ? levels : 1;
-            allSellPrices = new uint256[](maxLevels);
-            allSellAmounts = new uint256[](maxLevels);
-            while (k < maxLevels && p != 0) {
-                PriceLevel storage lvl = sellLevels[p];
-                if (lvl.exists && lvl.totalAmount > 0 && lvl.firstOrderId != 0) {
-                    allSellPrices[k] = p;
-                    allSellAmounts[k] = lvl.totalAmount;
-                    k++;
-                }
-                p = _getNextSellPrice(p);
-            }
-            sellCount = k;
         }
         
         // Return requested number of levels
@@ -2440,67 +2377,6 @@ contract OrderBook {
         for (uint256 i = 0; i < askLevels; i++) {
             askPrices[i] = allSellPrices[i];
             askAmounts[i] = allSellAmounts[i];
-        }
-    }
-
-    /**
-     * @dev Get order book depth by scanning from best pointers instead of arrays.
-     *      This is resilient if price arrays are temporarily desynchronized.
-     */
-    function getOrderBookDepthFromPointers(uint256 levels)
-        external
-        view
-        returns (
-            uint256[] memory bidPrices,
-            uint256[] memory bidAmounts,
-            uint256[] memory askPrices,
-            uint256[] memory askAmounts
-        )
-    {
-        // Bids: walk from bestBid downward
-        uint256[] memory tmpBidPrices = new uint256[](levels);
-        uint256[] memory tmpBidAmounts = new uint256[](levels);
-        uint256 bCount = 0;
-        {
-            uint256 p = bestBid;
-            while (bCount < levels && p != 0) {
-                PriceLevel storage lvl = buyLevels[p];
-                if (lvl.exists && lvl.totalAmount > 0 && lvl.firstOrderId != 0) {
-                    tmpBidPrices[bCount] = p;
-                    tmpBidAmounts[bCount] = lvl.totalAmount;
-                    bCount++;
-                }
-                p = _getPrevBuyPrice(p);
-            }
-        }
-        bidPrices = new uint256[](bCount);
-        bidAmounts = new uint256[](bCount);
-        for (uint256 i = 0; i < bCount; i++) {
-            bidPrices[i] = tmpBidPrices[i];
-            bidAmounts[i] = tmpBidAmounts[i];
-        }
-
-        // Asks: walk from bestAsk upward
-        uint256[] memory tmpAskPrices = new uint256[](levels);
-        uint256[] memory tmpAskAmounts = new uint256[](levels);
-        uint256 aCount = 0;
-        {
-            uint256 p2 = bestAsk;
-            while (aCount < levels && p2 != 0) {
-                PriceLevel storage lvl2 = sellLevels[p2];
-                if (lvl2.exists && lvl2.totalAmount > 0 && lvl2.firstOrderId != 0) {
-                    tmpAskPrices[aCount] = p2;
-                    tmpAskAmounts[aCount] = lvl2.totalAmount;
-                    aCount++;
-                }
-                p2 = _getNextSellPrice(p2);
-            }
-        }
-        askPrices = new uint256[](aCount);
-        askAmounts = new uint256[](aCount);
-        for (uint256 j = 0; j < aCount; j++) {
-            askPrices[j] = tmpAskPrices[j];
-            askAmounts[j] = tmpAskAmounts[j];
         }
     }
 

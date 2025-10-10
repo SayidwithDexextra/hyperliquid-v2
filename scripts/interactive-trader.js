@@ -449,7 +449,7 @@ async function getMarkPriceAndPnL(contracts, position) {
       const bestBid = await contracts.orderBook.bestBid();
       const bestAsk = await contracts.orderBook.bestAsk();
 
-      if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
+      if (bestBid > 0n && bestAsk < ethers.MaxUint256) {
         const bidPrice = parseFloat(ethers.formatUnits(bestBid, 6));
         const askPrice = parseFloat(ethers.formatUnits(bestAsk, 6));
 
@@ -786,7 +786,20 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
     try {
       this.contracts.mockUSDC = await getContract("MOCK_USDC");
       this.contracts.vault = await getContract("CORE_VAULT");
-      this.contracts.orderBook = await getContract("ALUMINUM_ORDERBOOK");
+      // Prefer the vault-mapped OrderBook for the ALUMINUM market; fall back to configured address
+      try {
+        const mapped = await this.contracts.vault.marketToOrderBook(
+          MARKET_INFO.ALUMINUM.marketId
+        );
+        if (mapped && mapped !== ethers.ZeroAddress) {
+          const OrderBook = await ethers.getContractFactory("OrderBook");
+          this.contracts.orderBook = OrderBook.attach(mapped);
+        } else {
+          this.contracts.orderBook = await getContract("ALUMINUM_ORDERBOOK");
+        }
+      } catch (_) {
+        this.contracts.orderBook = await getContract("ALUMINUM_ORDERBOOK");
+      }
       this.contracts.router = await getContract("TRADING_ROUTER");
       this.contracts.factory = await getContract("FUTURES_MARKET_FACTORY");
       // Try to load LiquidationManager if present in config; fall back handled in listeners
@@ -8430,7 +8443,7 @@ ${colors.brightRed}└───────────────────�
         } catch (_) {}
       } catch (error) {
         // Fallback: calculate mark price manually
-        if (bestBid > 0 && bestAsk < ethers.MaxUint256) {
+        if (bestBid > 0n && bestAsk < ethers.MaxUint256) {
           const bidPrice = parseFloat(
             formatPriceWithValidation(bestBid, 6, 4, false)
           );
@@ -8494,21 +8507,40 @@ ${colors.brightRed}└───────────────────�
   }
   // Helper function to get enhanced order book data with trader information
   async getEnhancedOrderBookDepth(depth) {
-    const [bidPrices, bidAmounts, askPrices, askAmounts] =
+    let [bidPrices, bidAmounts, askPrices, askAmounts] =
       await this.contracts.orderBook.getOrderBookDepth(depth);
+
+    // Fallback: if arrays empty while best pointers indicate liquidity, scan from pointers
+    try {
+      const [bestBid, bestAsk] = await this.contracts.orderBook.getBestPrices();
+      const noBids = !bidPrices || bidPrices.length === 0;
+      const noAsks = !askPrices || askPrices.length === 0;
+      const haveBidPtr =
+        typeof bestBid === "bigint" ? bestBid > 0n : Number(bestBid) > 0;
+      const haveAskPtr =
+        typeof bestAsk === "bigint" ? bestAsk > 0n : Number(bestAsk) > 0;
+      if ((noBids && haveBidPtr) || (noAsks && haveAskPtr)) {
+        const alt =
+          await this.contracts.orderBook.getOrderBookDepthFromPointers(depth);
+        bidPrices = alt[0];
+        bidAmounts = alt[1];
+        askPrices = alt[2];
+        askAmounts = alt[3];
+      }
+    } catch (_) {}
 
     const bids = [];
     const asks = [];
 
     // Get detailed bid information
-    for (let i = 0; i < bidPrices.length && bidPrices[i] > 0; i++) {
+    for (let i = 0; i < bidPrices.length && bidPrices[i] > 0n; i++) {
       const price = bidPrices[i];
       const totalAmount = bidAmounts[i];
 
       // Get the first order at this price level to show as representative trader
       try {
         const buyLevel = await this.contracts.orderBook.buyLevels(price);
-        if (buyLevel.exists && buyLevel.firstOrderId > 0) {
+        if (buyLevel.exists && buyLevel.firstOrderId > 0n) {
           const firstOrder = await this.contracts.orderBook.getOrder(
             buyLevel.firstOrderId
           );
@@ -8531,14 +8563,14 @@ ${colors.brightRed}└───────────────────�
     }
 
     // Get detailed ask information
-    for (let i = 0; i < askPrices.length && askPrices[i] > 0; i++) {
+    for (let i = 0; i < askPrices.length && askPrices[i] > 0n; i++) {
       const price = askPrices[i];
       const totalAmount = askAmounts[i];
 
       // Get the first order at this price level to show as representative trader
       try {
         const sellLevel = await this.contracts.orderBook.sellLevels(price);
-        if (sellLevel.exists && sellLevel.firstOrderId > 0) {
+        if (sellLevel.exists && sellLevel.firstOrderId > 0n) {
           const firstOrder = await this.contracts.orderBook.getOrder(
             sellLevel.firstOrderId
           );
