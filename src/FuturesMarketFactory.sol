@@ -1,11 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "./OrderBook.sol";
 import "./diamond/Diamond.sol";
 import "./diamond/interfaces/IDiamondCut.sol";
 import "./CoreVault.sol";
-import "@openzeppelin/contracts/proxy/Clones.sol";
+// OrderBook (Diamond) admin/view minimal interfaces
+interface IOBAdminFacet {
+    function updateTradingParameters(uint256 _marginRequirementBps, uint256 _tradingFee, address _feeRecipient) external;
+    function enableLeverage(uint256 _maxLeverage, uint256 _marginRequirementBps) external;
+    function disableLeverage() external;
+    function setLeverageController(address _newController) external;
+}
+
+interface IOBViewFacet {
+    function getLeverageInfo() external view returns (bool enabled, uint256 maxLev, uint256 marginReq, address controller);
+}
 
 // UMA Oracle interface
 interface IOptimisticOracleV3 {
@@ -27,62 +36,79 @@ interface IPriceOracle {
     function requestPriceUpdate(bytes32 identifier, string memory metricUrl) external;
 }
 
+// ============ Custom Errors (reduce bytecode vs long revert strings) ============
+error OnlyAdmin();
+error MarketCreationRestricted();
+error InvalidMarketSymbol();
+error InvalidMetricUrl();
+error InvalidSettlementDate();
+error ZeroAddress();
+error InvalidInput();
+error MarketIdCollision();
+error MarketNotFound();
+error NotAuthorized();
+error OracleNotConfigured();
+error SettlementNotReady();
+error UmaRequestMissing();
+error MarketAlreadySettledErr();
+error InvalidOraclePrice();
+error InvalidFinalPrice();
+error InvalidMarginRequirement();
+error TradingFeeTooHigh();
+error InvalidLeverage();
+error MarginTooLowForLeverage();
+error RewardMustBePositive();
+error ReasonRequired();
+error UseCreateMarketDiamond();
+
 /**
  * @title FuturesMarketFactory
  * @dev Factory contract for creating custom futures markets with dedicated OrderBooks
  * @notice Allows users to create and trade custom metric futures with margin support
  */
 contract FuturesMarketFactory {
-    using Clones for address;
     // ============ State Variables ============
     
-    CoreVault public immutable vault;
-    address public admin;
-    address public feeRecipient;
+    CoreVault immutable vault;
+    address admin;
+    address feeRecipient;
     
     // Default trading parameters - Conservative defaults (1:1 margin, no leverage)
-    uint256 public defaultMarginRequirementBps = 10000; // 100% margin requirement (1:1)
-    uint256 public defaultTradingFee = 10; // 0.1%
-    bool public defaultLeverageEnabled = false; // Leverage disabled by default
+    uint256 defaultMarginRequirementBps = 10000; // 100% margin requirement (1:1)
+    uint256 defaultTradingFee = 10; // 0.1%
+    bool defaultLeverageEnabled = false; // Leverage disabled by default
     
     // Futures market tracking
-    mapping(bytes32 => address) public marketToOrderBook;
-    mapping(address => bytes32) public orderBookToMarket;
-    mapping(bytes32 => bool) public marketExists;
-    mapping(bytes32 => address) public marketCreators; // Track who created each market
-    mapping(bytes32 => string) public marketSymbols; // Store market symbols
-    mapping(address => bytes32[]) public userCreatedMarkets; // Markets created by each user
+    mapping(bytes32 => address) internal marketToOrderBook;
+    mapping(address => bytes32) internal orderBookToMarket;
+    mapping(bytes32 => bool) internal marketExists;
+    mapping(bytes32 => address) internal marketCreators; // Track who created each market
+    mapping(bytes32 => string) internal marketSymbols; // Store market symbols
+    // removed: userCreatedMarkets tracking to reduce bytecode size
     
     // Enhanced market metadata
-    mapping(bytes32 => string) public marketMetricUrls; // Single source of truth URL for each market
-    mapping(bytes32 => uint256) public marketSettlementDates; // Settlement end date (timestamp)
-    mapping(bytes32 => uint256) public marketStartPrices; // Start price when market was created
-    mapping(bytes32 => uint256) public marketCreationTimestamps; // When market was created
-    mapping(bytes32 => string) public marketDataSources; // Data source categorization
-    mapping(bytes32 => string[]) public marketTags; // Tags for discovery
-    mapping(bytes32 => bool) public isCustomMetric; // True for custom metrics, false for standard
+    mapping(bytes32 => string) internal marketMetricUrls; // Single source of truth URL for each market
+    mapping(bytes32 => uint256) internal marketSettlementDates; // Settlement end date (timestamp)
+    // removed: start prices, creation timestamps, data sources, tags, type flags to reduce bytecode
     
     // Oracle integration
-    mapping(bytes32 => address) public marketOracles; // Custom oracle per market
-    mapping(bytes32 => bytes32) public umaRequestIds; // UMA request IDs for settlement
-    mapping(bytes32 => bool) public marketSettled; // Settlement status
-    mapping(bytes32 => uint256) public finalSettlementPrices; // Final settlement prices
+    mapping(bytes32 => address) internal marketOracles; // Custom oracle per market
+    mapping(bytes32 => bytes32) internal umaRequestIds; // UMA request IDs for settlement
+    mapping(bytes32 => bool) internal marketSettled; // Settlement status
+    // removed: finalSettlementPrices mapping to reduce bytecode
     
     // Global oracle settings
-    IOptimisticOracleV3 public umaOracle;
-    IPriceOracle public defaultOracle;
-    address public oracleAdmin;
-    uint256 public defaultOracleReward = 10 * 10**6; // 10 USDC reward for UMA requests
+    IOptimisticOracleV3 internal umaOracle;
+    IPriceOracle internal defaultOracle;
+    address internal oracleAdmin;
+    uint256 internal defaultOracleReward = 10 * 10**6; // 10 USDC reward for UMA requests
     
-    // Minimal proxy implementation for OrderBook (EIP-1167)
-    address public orderBookImplementation;
-    
-    address[] public allOrderBooks;
-    bytes32[] public allMarkets;
+    // removed: allOrderBooks tracking to reduce bytecode
+    bytes32[] internal allMarkets;
     
     // Market creation settings
-    uint256 public marketCreationFee = 100 * 10**6; // 100 USDC fee to create market
-    bool public publicMarketCreation = true; // Allow anyone to create markets
+    uint256 internal marketCreationFee = 100 * 10**6; // 100 USDC fee to create market
+    bool internal publicMarketCreation = true; // Allow anyone to create markets
     
     // ============ Events ============
     
@@ -106,30 +132,29 @@ contract FuturesMarketFactory {
     // ============ Modifiers ============
     
     modifier onlyAdmin() {
-        require(msg.sender == admin, "FuturesMarketFactory: only admin");
+        if (msg.sender != admin) revert OnlyAdmin();
         _;
     }
     
     modifier canCreateMarket() {
-        require(publicMarketCreation || msg.sender == admin, "FuturesMarketFactory: market creation restricted");
+        if (!(publicMarketCreation || msg.sender == admin)) revert MarketCreationRestricted();
         _;
     }
     
     modifier validMarketSymbol(string memory symbol) {
-        require(bytes(symbol).length > 0, "FuturesMarketFactory: empty market symbol");
-        require(bytes(symbol).length <= 64, "FuturesMarketFactory: market symbol too long");
+        uint256 len = bytes(symbol).length;
+        if (len == 0 || len > 64) revert InvalidMarketSymbol();
         _;
     }
     
     modifier validMetricUrl(string memory url) {
-        require(bytes(url).length > 0, "FuturesMarketFactory: empty metric URL");
-        require(bytes(url).length <= 256, "FuturesMarketFactory: metric URL too long");
+        uint256 len = bytes(url).length;
+        if (len == 0 || len > 256) revert InvalidMetricUrl();
         _;
     }
     
     modifier validSettlementDate(uint256 settlementDate) {
-        require(settlementDate > block.timestamp, "FuturesMarketFactory: settlement date must be in future");
-        require(settlementDate <= block.timestamp + 365 days, "FuturesMarketFactory: settlement date too far in future");
+        if (settlementDate <= block.timestamp || settlementDate > block.timestamp + 365 days) revert InvalidSettlementDate();
         _;
     }
     
@@ -140,9 +165,7 @@ contract FuturesMarketFactory {
         address _admin,
         address _feeRecipient
     ) {
-        require(_vault != address(0), "FuturesMarketFactory: vault cannot be zero address");
-        require(_admin != address(0), "FuturesMarketFactory: admin cannot be zero address");
-        require(_feeRecipient != address(0), "FuturesMarketFactory: fee recipient cannot be zero address");
+        if (_vault == address(0) || _admin == address(0) || _feeRecipient == address(0)) revert ZeroAddress();
         
         vault = CoreVault(_vault);
         admin = _admin;
@@ -152,110 +175,20 @@ contract FuturesMarketFactory {
     // ============ Futures Market Creation ============
     
     /**
-     * @dev Create a new futures market with dedicated OrderBook
-     * @param marketSymbol Human-readable market symbol (e.g., "TESLA-STOCK-PRICE-EOY")
-     * @param metricUrl URL to the single source of truth for this metric
-     * @param settlementDate Unix timestamp when the market settles
-     * @param startPrice Initial price for the metric (with 6 USDC decimals)
-     * @param dataSource Data source category (e.g., "NASDAQ", "COINBASE", "CUSTOM")
-     * @param tags Array of tags for market discovery
-     * @param marginRequirementBps Margin requirement in basis points (optional, uses default if 0)
-     * @param tradingFee Trading fee in basis points (optional, uses default if 0)
-     * @return orderBook Address of the created OrderBook
-     * @return marketId Generated market ID
+     * @dev Deprecated: use createFuturesMarketDiamond. Kept for backward compatibility.
      */
     function createFuturesMarket(
-        string memory marketSymbol,
-        string memory metricUrl,
-        uint256 settlementDate,
-        uint256 startPrice,
-        string memory dataSource,
-        string[] memory tags,
-        uint256 marginRequirementBps,
-        uint256 tradingFee
-    ) external 
-        canCreateMarket 
-        validMarketSymbol(marketSymbol) 
-        validMetricUrl(metricUrl)
-        validSettlementDate(settlementDate)
-        returns (address orderBook, bytes32 marketId) {
-        require(startPrice > 0, "FuturesMarketFactory: start price must be positive");
-        require(bytes(dataSource).length > 0, "FuturesMarketFactory: data source cannot be empty");
-        require(tags.length <= 10, "FuturesMarketFactory: too many tags");
-        // Collect market creation fee if enabled
-        if (marketCreationFee > 0 && msg.sender != admin) {
-            vault.deductFees(msg.sender, marketCreationFee, feeRecipient);
-        }
-        
-        // Generate unique market ID from symbol, URL, and creator
-        marketId = keccak256(abi.encodePacked(marketSymbol, metricUrl, msg.sender, block.timestamp, block.number));
-        require(!marketExists[marketId], "FuturesMarketFactory: market ID collision");
-        
-        // Use default parameters if not specified
-        if (marginRequirementBps == 0) {
-            marginRequirementBps = defaultMarginRequirementBps;
-        }
-        if (tradingFee == 0) {
-            tradingFee = defaultTradingFee;
-        }
-        
-        // Validate parameters - Allow up to 100% margin requirement for conservative markets
-        require(marginRequirementBps >= 1000 && marginRequirementBps <= 10000, "FuturesMarketFactory: invalid margin requirement"); // 10% to 100%
-        require(tradingFee <= 1000, "FuturesMarketFactory: trading fee too high"); // Max 10%
-        
-        // Deploy new OrderBook via EIP-1167 clone
-        require(orderBookImplementation != address(0), "FuturesMarketFactory: template not set");
-        orderBook = orderBookImplementation.clone();
-        OrderBook(orderBook).initialize(address(vault), marketId, feeRecipient);
-        
-        // Register with vault
-        vault.registerOrderBook(orderBook);
-        vault.assignMarketToOrderBook(marketId, orderBook);
-        
-        // Update trading parameters if different from defaults
-        if (marginRequirementBps != defaultMarginRequirementBps || 
-            tradingFee != defaultTradingFee) {
-            OrderBook(orderBook).updateTradingParameters(
-                marginRequirementBps,
-                tradingFee,
-                feeRecipient
-            );
-        }
-        
-        // Update tracking
-        marketToOrderBook[marketId] = orderBook;
-        orderBookToMarket[orderBook] = marketId;
-        marketExists[marketId] = true;
-        marketCreators[marketId] = msg.sender;
-        marketSymbols[marketId] = marketSymbol;
-        userCreatedMarkets[msg.sender].push(marketId);
-        allOrderBooks.push(orderBook);
-        allMarkets.push(marketId);
-        
-        // Store enhanced metadata
-        marketMetricUrls[marketId] = metricUrl;
-        marketSettlementDates[marketId] = settlementDate;
-        marketStartPrices[marketId] = startPrice;
-        marketCreationTimestamps[marketId] = block.timestamp;
-        marketDataSources[marketId] = dataSource;
-        marketTags[marketId] = tags;
-        isCustomMetric[marketId] = true; // All user-created markets are custom metrics
-        
-        // Set initial mark price in vault
-        vault.updateMarkPrice(marketId, startPrice);
-        
-        emit FuturesMarketCreated(
-            orderBook, 
-            marketId, 
-            marketSymbol, 
-            msg.sender, 
-            marketCreationFee,
-            metricUrl,
-            settlementDate,
-            startPrice
-        );
-        
-        return (orderBook, marketId);
+        string memory /*marketSymbol*/,
+        string memory /*metricUrl*/,
+        uint256 /*settlementDate*/,
+        uint256 /*startPrice*/,
+        string memory /*dataSource*/,
+        string[] memory /*tags*/,
+        uint256 /*marginRequirementBps*/,
+        uint256 /*tradingFee*/
+    ) external pure returns (address /*orderBook*/, bytes32 /*marketId*/) {
+        // Deprecated: Factory no longer deploys EIP-1167 OrderBooks
+        revert UseCreateMarketDiamond();
     }
 
     /**
@@ -269,7 +202,7 @@ contract FuturesMarketFactory {
      * @param diamondOwner Owner of the Diamond (admin)
      * @param cut Initial facet cut describing facets and selectors
      * @param initFacet Address to run initialization delegatecall (e.g., OrderBookInitFacet)
-     * @param initCalldata Calldata to run on initFacet (e.g., obInitialize(vault, marketId, feeRecipient))
+     * @param initFacet Calldata param kept in docs for backwards compatibility (unused)
      */
     function createFuturesMarketDiamond(
         string memory marketSymbol,
@@ -281,7 +214,7 @@ contract FuturesMarketFactory {
         address diamondOwner,
         IDiamondCut.FacetCut[] memory cut,
         address initFacet,
-        bytes memory initCalldata
+        bytes memory /*initCalldata*/
     ) external 
         canCreateMarket
         validMarketSymbol(marketSymbol)
@@ -289,20 +222,20 @@ contract FuturesMarketFactory {
         validSettlementDate(settlementDate)
         returns (address orderBook, bytes32 marketId) 
     {
-        require(startPrice > 0, "FuturesMarketFactory: start price must be positive");
-        require(bytes(dataSource).length > 0, "FuturesMarketFactory: data source cannot be empty");
-        require(tags.length <= 10, "FuturesMarketFactory: too many tags");
-        require(diamondOwner != address(0), "FuturesMarketFactory: owner zero");
+        if (startPrice == 0) revert InvalidOraclePrice();
+        if (bytes(dataSource).length == 0) revert InvalidInput();
+        if (tags.length > 10) revert InvalidInput();
+        if (diamondOwner == address(0)) revert ZeroAddress();
 
         if (marketCreationFee > 0 && msg.sender != admin) {
             vault.deductFees(msg.sender, marketCreationFee, feeRecipient);
         }
 
         marketId = keccak256(abi.encodePacked(marketSymbol, metricUrl, msg.sender, block.timestamp, block.number));
-        require(!marketExists[marketId], "FuturesMarketFactory: market ID collision");
+        if (marketExists[marketId]) revert MarketIdCollision();
 
         // Deploy Diamond with factory-computed initializer that includes the computed marketId
-        require(initFacet != address(0), "FuturesMarketFactory: init facet required");
+        if (initFacet == address(0)) revert ZeroAddress();
         bytes4 initSel = bytes4(keccak256("obInitialize(address,bytes32,address)"));
         bytes memory initData = abi.encodeWithSelector(initSel, address(vault), marketId, feeRecipient);
         Diamond diamond = new Diamond(diamondOwner, cut, initFacet, initData);
@@ -318,16 +251,10 @@ contract FuturesMarketFactory {
         marketExists[marketId] = true;
         marketCreators[marketId] = msg.sender;
         marketSymbols[marketId] = marketSymbol;
-        userCreatedMarkets[msg.sender].push(marketId);
-        allOrderBooks.push(orderBook);
         allMarkets.push(marketId);
         marketMetricUrls[marketId] = metricUrl;
         marketSettlementDates[marketId] = settlementDate;
-        marketStartPrices[marketId] = startPrice;
-        marketCreationTimestamps[marketId] = block.timestamp;
-        marketDataSources[marketId] = dataSource;
-        marketTags[marketId] = tags;
-        isCustomMetric[marketId] = true;
+        // metadata writes removed for bytecode reduction (startPrice, creationTs, dataSource, tags)
 
         vault.updateMarkPrice(marketId, startPrice);
 
@@ -340,16 +267,13 @@ contract FuturesMarketFactory {
      * @param orderBook Address of the OrderBook to deactivate
      */
     function deactivateFuturesMarket(address orderBook) external {
-        require(orderBook != address(0), "FuturesMarketFactory: invalid OrderBook address");
+        if (orderBook == address(0)) revert ZeroAddress();
         
         bytes32 marketId = orderBookToMarket[orderBook];
-        require(marketId != bytes32(0), "FuturesMarketFactory: OrderBook not found");
+        if (marketId == bytes32(0)) revert MarketNotFound();
         
         // Only admin or market creator can deactivate
-        require(
-            msg.sender == admin || msg.sender == marketCreators[marketId],
-            "FuturesMarketFactory: only admin or creator can deactivate"
-        );
+        if (!(msg.sender == admin || msg.sender == marketCreators[marketId])) revert NotAuthorized();
         
         // Deregister from vault
         vault.deregisterOrderBook(orderBook);
@@ -359,21 +283,15 @@ contract FuturesMarketFactory {
         delete orderBookToMarket[orderBook];
         marketExists[marketId] = false;
         
-        // Remove from arrays
-        for (uint256 i = 0; i < allOrderBooks.length; i++) {
-            if (allOrderBooks[i] == orderBook) {
-                allOrderBooks[i] = allOrderBooks[allOrderBooks.length - 1];
-                allOrderBooks.pop();
-                break;
-            }
-        }
-        
-        for (uint256 i = 0; i < allMarkets.length; i++) {
+        // Remove from arrays (only markets retained)
+        uint256 mLen = allMarkets.length;
+        for (uint256 i = 0; i < mLen; ) {
             if (allMarkets[i] == marketId) {
                 allMarkets[i] = allMarkets[allMarkets.length - 1];
                 allMarkets.pop();
                 break;
             }
+            unchecked { ++i; }
         }
         
         // event omitted to reduce bytecode size
@@ -405,11 +323,8 @@ contract FuturesMarketFactory {
      * @param oracle Custom oracle address
      */
     function assignCustomOracle(bytes32 marketId, address oracle) external {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        require(
-            msg.sender == marketCreators[marketId] || msg.sender == admin,
-            "FuturesMarketFactory: only creator or admin can assign oracle"
-        );
+        if (!marketExists[marketId]) revert MarketNotFound();
+        if (!(msg.sender == marketCreators[marketId] || msg.sender == admin)) revert NotAuthorized();
         
         marketOracles[marketId] = oracle;
         // event omitted to reduce bytecode size
@@ -420,19 +335,16 @@ contract FuturesMarketFactory {
      * @param marketId Market identifier
      */
     function requestUMASettlement(bytes32 marketId) external {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        require(!marketSettled[marketId], "FuturesMarketFactory: market already settled");
-        require(
-            block.timestamp >= marketSettlementDates[marketId],
-            "FuturesMarketFactory: settlement date not reached"
-        );
-        require(address(umaOracle) != address(0), "FuturesMarketFactory: UMA oracle not configured");
+        if (!marketExists[marketId]) revert MarketNotFound();
+        if (marketSettled[marketId]) revert MarketAlreadySettledErr();
+        if (block.timestamp < marketSettlementDates[marketId]) revert SettlementNotReady();
+        if (address(umaOracle) == address(0)) revert OracleNotConfigured();
         
         // Create UMA request
         bytes memory ancillaryData = abi.encodePacked(
-            "Metric URL: ", marketMetricUrls[marketId],
-            ", Market: ", marketSymbols[marketId],
-            ", Settlement Date: ", marketSettlementDates[marketId]
+            "URL:", marketMetricUrls[marketId],
+            ",SYM:", marketSymbols[marketId],
+            ",T:", marketSettlementDates[marketId]
         );
         
         bytes32 requestId = umaOracle.requestPrice(
@@ -452,13 +364,13 @@ contract FuturesMarketFactory {
      * @param marketId Market identifier
      */
     function settleMarketWithUMA(bytes32 marketId) external {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        require(!marketSettled[marketId], "FuturesMarketFactory: market already settled");
-        require(umaRequestIds[marketId] != bytes32(0), "FuturesMarketFactory: no UMA request found");
+        if (!marketExists[marketId]) revert MarketNotFound();
+        if (marketSettled[marketId]) revert MarketAlreadySettledErr();
+        if (umaRequestIds[marketId] == bytes32(0)) revert UmaRequestMissing();
         
         // Get price from UMA oracle
         int256 oraclePrice = umaOracle.getPrice(umaRequestIds[marketId]);
-        require(oraclePrice > 0, "FuturesMarketFactory: invalid oracle price");
+        if (oraclePrice <= 0) revert InvalidOraclePrice();
         
         uint256 finalPrice = uint256(oraclePrice);
         
@@ -474,17 +386,11 @@ contract FuturesMarketFactory {
      * @param finalPrice Final settlement price
      */
     function manualSettle(bytes32 marketId, uint256 finalPrice) external {
-        require(
-            msg.sender == oracleAdmin || msg.sender == admin,
-            "FuturesMarketFactory: only oracle admin can manually settle"
-        );
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        require(!marketSettled[marketId], "FuturesMarketFactory: market already settled");
-        require(
-            block.timestamp >= marketSettlementDates[marketId],
-            "FuturesMarketFactory: settlement date not reached"
-        );
-        require(finalPrice > 0, "FuturesMarketFactory: invalid final price");
+        if (!(msg.sender == oracleAdmin || msg.sender == admin)) revert NotAuthorized();
+        if (!marketExists[marketId]) revert MarketNotFound();
+        if (marketSettled[marketId]) revert MarketAlreadySettledErr();
+        if (block.timestamp < marketSettlementDates[marketId]) revert SettlementNotReady();
+        if (finalPrice == 0) revert InvalidFinalPrice();
         
         _settleMarket(marketId, finalPrice);
         
@@ -498,7 +404,6 @@ contract FuturesMarketFactory {
      */
     function _settleMarket(bytes32 marketId, uint256 finalPrice) internal {
         marketSettled[marketId] = true;
-        finalSettlementPrices[marketId] = finalPrice;
         
         // Update final mark price in vault
         vault.updateMarkPrice(marketId, finalPrice);
@@ -518,8 +423,8 @@ contract FuturesMarketFactory {
         uint256 marginRequirementBps,
         uint256 tradingFee
     ) external onlyAdmin {
-        require(marginRequirementBps >= 1000 && marginRequirementBps <= 10000, "FuturesMarketFactory: invalid default margin requirement");
-        require(tradingFee <= 1000, "FuturesMarketFactory: trading fee too high");
+        if (marginRequirementBps < 1000 || marginRequirementBps > 10000) revert InvalidMarginRequirement();
+        if (tradingFee > 1000) revert TradingFeeTooHigh();
         
         defaultMarginRequirementBps = marginRequirementBps;
         defaultTradingFee = tradingFee;
@@ -550,7 +455,7 @@ contract FuturesMarketFactory {
      * @param newAdmin New admin address
      */
     function updateAdmin(address newAdmin) external onlyAdmin {
-        require(newAdmin != address(0), "OrderBookFactory: admin cannot be zero address");
+        if (newAdmin == address(0)) revert ZeroAddress();
         
         admin = newAdmin;
         // event omitted to reduce bytecode size
@@ -561,7 +466,7 @@ contract FuturesMarketFactory {
      * @param newFeeRecipient New fee recipient address
      */
     function updateFeeRecipient(address newFeeRecipient) external onlyAdmin {
-        require(newFeeRecipient != address(0), "OrderBookFactory: fee recipient cannot be zero address");
+        if (newFeeRecipient == address(0)) revert ZeroAddress();
         
         feeRecipient = newFeeRecipient;
         // event omitted to reduce bytecode size
@@ -571,12 +476,7 @@ contract FuturesMarketFactory {
      * @dev Set the OrderBook implementation used for EIP-1167 clones
      * @param implementation Address of deployed OrderBook logic contract (template)
      */
-    function setOrderBookImplementation(address implementation) external onlyAdmin {
-        require(implementation != address(0), "FuturesMarketFactory: invalid implementation");
-        // Basic sanity: ensure it looks like an OrderBook by calling a harmless view via low-level call
-        // Not strictly necessary; avoids extra bytecode by skipping interface checks.
-        orderBookImplementation = implementation;
-    }
+    // Removed: EIP-1167 clone template management. Factory only supports Diamond-based markets now.
     
     // ============ View Functions ============
     
@@ -749,21 +649,26 @@ contract FuturesMarketFactory {
      * NOTE: Retained due to potential external usage
      */
     function getMarketsReadyForSettlement() external view returns (bytes32[] memory) {
+        uint256 mLen = allMarkets.length;
         uint256 count = 0;
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (!marketSettled[allMarkets[i]] && block.timestamp >= marketSettlementDates[allMarkets[i]]) {
+        for (uint256 i = 0; i < mLen; ) {
+            bytes32 mid = allMarkets[i];
+            if (!marketSettled[mid] && block.timestamp >= marketSettlementDates[mid]) {
                 count++;
             }
+            unchecked { ++i; }
         }
         
         bytes32[] memory ready = new bytes32[](count);
         uint256 index = 0;
         
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (!marketSettled[allMarkets[i]] && block.timestamp >= marketSettlementDates[allMarkets[i]]) {
-                ready[index] = allMarkets[i];
-                index++;
+        for (uint256 i = 0; i < mLen; ) {
+            bytes32 mid = allMarkets[i];
+            if (!marketSettled[mid] && block.timestamp >= marketSettlementDates[mid]) {
+                ready[index] = mid;
+                unchecked { ++index; }
             }
+            unchecked { ++i; }
         }
         
         return ready;
@@ -803,7 +708,7 @@ contract FuturesMarketFactory {
      * @param rewardAmount New reward amount in USDC
      */
     function setOracleReward(uint256 rewardAmount) external onlyAdmin {
-        require(rewardAmount > 0, "FuturesMarketFactory: reward must be positive");
+        if (rewardAmount == 0) revert RewardMustBePositive();
         defaultOracleReward = rewardAmount;
     }
     
@@ -812,7 +717,7 @@ contract FuturesMarketFactory {
      * @param newOracleAdmin New oracle admin address
      */
     function updateOracleAdmin(address newOracleAdmin) external onlyAdmin {
-        require(newOracleAdmin != address(0), "FuturesMarketFactory: oracle admin cannot be zero");
+        if (newOracleAdmin == address(0)) revert ZeroAddress();
         oracleAdmin = newOracleAdmin;
     }
     
@@ -821,8 +726,8 @@ contract FuturesMarketFactory {
      * @param marketId Market identifier
      */
     function requestPriceUpdate(bytes32 marketId) external {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        require(address(defaultOracle) != address(0), "FuturesMarketFactory: default oracle not configured");
+        if (!marketExists[marketId]) revert MarketNotFound();
+        if (address(defaultOracle) == address(0)) revert OracleNotConfigured();
         
         defaultOracle.requestPriceUpdate(marketId, marketMetricUrls[marketId]);
     }
@@ -834,7 +739,7 @@ contract FuturesMarketFactory {
      * @return timestamp Price timestamp
      */
     function getCurrentOraclePrice(bytes32 marketId) external view returns (uint256 price, uint256 timestamp) {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
+        if (!marketExists[marketId]) revert MarketNotFound();
         
         // Try custom oracle first
         if (marketOracles[marketId] != address(0)) {
@@ -887,16 +792,16 @@ contract FuturesMarketFactory {
      * @param prices Array of new prices
      */
     function batchUpdatePrices(bytes32[] memory marketIds, uint256[] memory prices) external {
-        require(
-            msg.sender == oracleAdmin || msg.sender == admin,
-            "FuturesMarketFactory: only oracle admin can batch update"
-        );
-        require(marketIds.length == prices.length, "FuturesMarketFactory: arrays length mismatch");
+        if (!(msg.sender == oracleAdmin || msg.sender == admin)) revert NotAuthorized();
+        if (marketIds.length != prices.length) revert InvalidInput();
         
-        for (uint256 i = 0; i < marketIds.length; i++) {
-            if (marketExists[marketIds[i]] && !marketSettled[marketIds[i]]) {
-                vault.updateMarkPrice(marketIds[i], prices[i]);
+        uint256 len = marketIds.length;
+        for (uint256 i = 0; i < len; ) {
+            bytes32 mid = marketIds[i];
+            if (marketExists[mid] && !marketSettled[mid]) {
+                vault.updateMarkPrice(mid, prices[i]);
             }
+            unchecked { ++i; }
         }
     }
     
@@ -928,9 +833,9 @@ contract FuturesMarketFactory {
         uint256 emergencyPrice,
         string memory reason
     ) external onlyAdmin {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        require(emergencyPrice > 0, "FuturesMarketFactory: price must be positive");
-        require(bytes(reason).length > 0, "FuturesMarketFactory: reason required");
+        if (!marketExists[marketId]) revert MarketNotFound();
+        if (emergencyPrice == 0) revert InvalidOraclePrice();
+        if (bytes(reason).length == 0) revert ReasonRequired();
         
         vault.updateMarkPrice(marketId, emergencyPrice);
         // event omitted to reduce bytecode size
@@ -943,54 +848,14 @@ contract FuturesMarketFactory {
      * @param customType True for custom metrics, false for standard
      * @return Array of market IDs of the specified type
      */
-    function _getMarketsByType(bool customType) internal view returns (bytes32[] memory) {
-        uint256 count = 0;
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (isCustomMetric[allMarkets[i]] == customType) {
-                count++;
-            }
-        }
-        
-        bytes32[] memory filtered = new bytes32[](count);
-        uint256 index = 0;
-        
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (isCustomMetric[allMarkets[i]] == customType) {
-                filtered[index] = allMarkets[i];
-                index++;
-            }
-        }
-        
-        return filtered;
-    }
+    // helper removed: _getMarketsByType (and related typology) to reduce bytecode size
     
     /**
      * @dev Get markets by type (custom vs traditional)
      * @param customOnly If true, return only custom markets; if false, return traditional markets
      * @return marketIds Array of market IDs
      */
-    function getMarketsByType(bool customOnly) external view returns (bytes32[] memory marketIds) {
-        uint256 count = 0;
-        
-        // Count matching markets
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (isCustomMetric[allMarkets[i]] == customOnly) {
-                count++;
-            }
-        }
-        
-        // Create array and populate
-        marketIds = new bytes32[](count);
-        uint256 index = 0;
-        
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (isCustomMetric[allMarkets[i]] == customOnly) {
-                marketIds[index] = allMarkets[i];
-                index++;
-            }
-        }
-        return marketIds;
-    }
+    // view removed: getMarketsByType to reduce bytecode size
 
     // Removed convenience market info getter to reduce bytecode size
 
@@ -1000,9 +865,7 @@ contract FuturesMarketFactory {
      * @param b Second string
      * @return True if strings are equal
      */
-    function _compareStrings(string memory a, string memory b) internal pure returns (bool) {
-        return keccak256(abi.encodePacked(a)) == keccak256(abi.encodePacked(b));
-    }
+    // helper removed (unused) to reduce bytecode size
 
     // ============ Leverage Management Functions ============
 
@@ -1017,16 +880,15 @@ contract FuturesMarketFactory {
         uint256 maxLeverage,
         uint256 marginRequirementBps
     ) external onlyAdmin {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        require(maxLeverage > 1 && maxLeverage <= 100, "FuturesMarketFactory: invalid max leverage");
-        require(marginRequirementBps >= 100 && marginRequirementBps <= 10000, "FuturesMarketFactory: invalid margin requirement");
-        require(marginRequirementBps <= (10000 / maxLeverage), "FuturesMarketFactory: margin requirement too low for max leverage");
+        if (!marketExists[marketId]) revert MarketNotFound();
+        if (!(maxLeverage > 1 && maxLeverage <= 100)) revert InvalidLeverage();
+        if (!(marginRequirementBps >= 100 && marginRequirementBps <= 10000)) revert InvalidMarginRequirement();
+        if (marginRequirementBps > (10000 / maxLeverage)) revert MarginTooLowForLeverage();
         
         address orderBookAddress = marketToOrderBook[marketId];
-        OrderBook orderBook = OrderBook(orderBookAddress);
-        
-        // Enable leverage on the OrderBook
-        orderBook.enableLeverage(maxLeverage, marginRequirementBps);
+        IOBAdminFacet obAdmin = IOBAdminFacet(orderBookAddress);
+        // Enable leverage on the Diamond OB via admin facet
+        obAdmin.enableLeverage(maxLeverage, marginRequirementBps);
         // event omitted to reduce bytecode size
     }
 
@@ -1035,13 +897,11 @@ contract FuturesMarketFactory {
      * @param marketId Market identifier
      */
     function disableMarketLeverage(bytes32 marketId) external onlyAdmin {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
+        if (!marketExists[marketId]) revert MarketNotFound();
         
         address orderBookAddress = marketToOrderBook[marketId];
-        OrderBook orderBook = OrderBook(orderBookAddress);
-        
-        // Disable leverage on the OrderBook
-        orderBook.disableLeverage();
+        IOBAdminFacet obAdmin = IOBAdminFacet(orderBookAddress);
+        obAdmin.disableLeverage();
         // event omitted to reduce bytecode size
     }
 
@@ -1054,14 +914,12 @@ contract FuturesMarketFactory {
         bytes32 marketId,
         address controller
     ) external onlyAdmin {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
-        require(controller != address(0), "FuturesMarketFactory: invalid controller address");
+        if (!marketExists[marketId]) revert MarketNotFound();
+        if (controller == address(0)) revert ZeroAddress();
         
         address orderBookAddress = marketToOrderBook[marketId];
-        OrderBook orderBook = OrderBook(orderBookAddress);
-        
-        // Update leverage controller on the OrderBook
-        orderBook.setLeverageController(controller);
+        IOBAdminFacet obAdmin = IOBAdminFacet(orderBookAddress);
+        obAdmin.setLeverageController(controller);
         // event omitted to reduce bytecode size
     }
 
@@ -1079,12 +937,11 @@ contract FuturesMarketFactory {
         uint256 marginRequirement,
         address controller
     ) {
-        require(marketExists[marketId], "FuturesMarketFactory: market does not exist");
+        if (!marketExists[marketId]) revert MarketNotFound();
         
         address orderBookAddress = marketToOrderBook[marketId];
-        OrderBook orderBook = OrderBook(orderBookAddress);
-        
-        return orderBook.getLeverageInfo();
+        IOBViewFacet obView = IOBViewFacet(orderBookAddress);
+        return obView.getLeverageInfo();
     }
 
     /**
@@ -1096,7 +953,7 @@ contract FuturesMarketFactory {
         uint256 _defaultMarginRequirementBps,
         bool _defaultLeverageEnabled
     ) external onlyAdmin {
-        require(_defaultMarginRequirementBps >= 1000 && _defaultMarginRequirementBps <= 10000, "FuturesMarketFactory: invalid default margin requirement");
+        if (_defaultMarginRequirementBps < 1000 || _defaultMarginRequirementBps > 10000) revert InvalidMarginRequirement();
         
         defaultMarginRequirementBps = _defaultMarginRequirementBps;
         defaultLeverageEnabled = _defaultLeverageEnabled;

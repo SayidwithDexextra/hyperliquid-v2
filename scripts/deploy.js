@@ -238,17 +238,7 @@ async function main() {
       );
     }
 
-    // Deploy TradingRouter
-    console.log("  6️⃣ Deploying TradingRouter...");
-    const TradingRouter = await ethers.getContractFactory("TradingRouter");
-    const router = await TradingRouter.deploy(
-      contracts.CORE_VAULT,
-      contracts.FUTURES_MARKET_FACTORY,
-      deployer.address
-    );
-    await router.waitForDeployment();
-    contracts.TRADING_ROUTER = await router.getAddress();
-    console.log("     ✅ TradingRouter deployed at:", contracts.TRADING_ROUTER);
+    // TradingRouter deployment removed (Diamond-only flow)
 
     // ============================================
     // STEP 2: SETUP AUTHORIZATION
@@ -309,14 +299,9 @@ async function main() {
     console.log(`     Margin Requirement: ${marginRequirementBps / 100}%`);
     console.log(`     Trading Fee: ${tradingFee / 100}%`);
 
-    // Check and pay creation fee
-    const creationFee = await factory.marketCreationFee();
-    console.log(
-      `  💰 Market creation fee: ${ethers.formatUnits(creationFee, 6)} USDC`
-    );
-
-    await mockUSDC.approve(contracts.FUTURES_MARKET_FACTORY, creationFee);
-    console.log("     ✅ Fee approved");
+    // Check and pay creation fee (optional; admin is exempt). The optimized factory
+    // may not expose a public getter, so we skip querying and approval.
+    console.log("  💰 Market creation fee: skipped query (admin exempt)");
 
     // Create Diamond-based market
     console.log("  🚀 Creating ALUMINUM futures market (Diamond)...");
@@ -472,15 +457,15 @@ async function main() {
 
     // Configure margin requirements for 1:1 longs, 150% shorts (no leverage)
     console.log("  🔧 Configuring margin requirements...");
-    const orderBook = await ethers.getContractAt(
-      "OrderBook",
+    const obAdmin2 = await ethers.getContractAt(
+      "OBAdminFacet",
       contracts.ALUMINUM_ORDERBOOK
     );
 
     // Ensure leverage is disabled and margin is set to 100% (10000 BPS) for longs
     // Shorts will require 150% but that's handled in the trading logic
     try {
-      await orderBook.connect(deployer).disableLeverage();
+      await obAdmin2.connect(deployer).disableLeverage();
       console.log("     ✅ Leverage disabled - using 1:1 margin system");
     } catch (error) {
       console.log("     ⚠️  Leverage already disabled");
@@ -569,14 +554,22 @@ async function main() {
 
     if (ENABLE_INITIAL_TRADES) {
       try {
-        // Get the deployed OrderBook contract
-        const orderBook = await ethers.getContractAt(
-          "OrderBook",
+        // Get the deployed Diamond OrderBook facets
+        const orderPlacement = await ethers.getContractAt(
+          "OBOrderPlacementFacet",
+          contracts.ALUMINUM_ORDERBOOK
+        );
+        const tradeExec = await ethers.getContractAt(
+          "OBTradeExecutionFacet",
+          contracts.ALUMINUM_ORDERBOOK
+        );
+        const viewFacetRuntime = await ethers.getContractAt(
+          "OBViewFacet",
           contracts.ALUMINUM_ORDERBOOK
         );
 
         // ============================================
-        // DEBUG: RUNTIME EVENT LISTENERS (OrderBook/CoreVault)
+        // DEBUG: RUNTIME EVENT LISTENERS (Diamond/CoreVault)
         // ============================================
         try {
           const fmt6 = (x) => {
@@ -595,304 +588,28 @@ async function main() {
           };
           const toStr = (x) => x?.toString?.() ?? String(x);
 
-          // ----- OrderBook events -----
-          orderBook.on("PriceUpdated", (lastTradePrice, currentMarkPrice) => {
-            console.log(
-              `🧭 PriceUpdated → last=${fmt6(lastTradePrice)} mark=${fmt6(
-                currentMarkPrice
-              )}`
-            );
-          });
-          orderBook.on(
+          // ----- Diamond OB events -----
+          const obIfaceForEvents = await ethers.getContractAt(
+            "OrderBook",
+            contracts.ALUMINUM_ORDERBOOK
+          );
+          obIfaceForEvents.on(
+            "PriceUpdated",
+            (lastTradePrice, currentMarkPrice) => {
+              console.log(
+                `🧭 PriceUpdated → last=${fmt6(lastTradePrice)} mark=${fmt6(
+                  currentMarkPrice
+                )}`
+              );
+            }
+          );
+          obIfaceForEvents.on(
             "LiquidationCheckTriggered",
             (currentMark, lastMarkPrice) => {
               console.log(
                 `🧪 LiquidationCheckTriggered → current=${fmt6(
                   currentMark
                 )} last=${fmt6(lastMarkPrice)}`
-              );
-            }
-          );
-          orderBook.on(
-            "AutoLiquidationTriggered",
-            (trader, marketId, size, markPrice) => {
-              console.log(
-                `⚡ AutoLiquidationTriggered → trader=${trader} size=${fmt18(
-                  size
-                )} mark=${fmt6(markPrice)}`
-              );
-            }
-          );
-          orderBook.on(
-            "LiquidationPositionProcessed",
-            (trader, positionSize, executionPrice) => {
-              console.log(
-                `✅ LiquidationPositionProcessed → ${trader} size=${fmt18(
-                  positionSize
-                )} exec=${fmt6(executionPrice)}`
-              );
-            }
-          );
-          orderBook.on(
-            "GapLossDetected",
-            (
-              trader,
-              marketId,
-              gapLossAmount,
-              liquidationPrice,
-              executionPrice,
-              positionSize
-            ) => {
-              console.log(
-                `💥 GapLossDetected → trader=${trader} gap=${fmt6(
-                  gapLossAmount
-                )} liq=${fmt6(liquidationPrice)} exec=${fmt6(
-                  executionPrice
-                )} size=${fmt18(positionSize)}`
-              );
-            }
-          );
-          orderBook.on(
-            "LiquidationRequiresSocialization",
-            (trader, remainingShortfall, userCollateralExhausted) => {
-              console.log(
-                `🔄 LiquidationRequiresSocialization → trader=${trader} shortfall=${fmt6(
-                  remainingShortfall
-                )} collateralExhausted=${fmt6(userCollateralExhausted)}`
-              );
-            }
-          );
-          orderBook.on(
-            "DebugLiquidationCall",
-            (trader, marketId, positionSize, label) => {
-              console.log(
-                `🔎 DebugLiquidationCall → ${label} trader=${trader} size=${fmt18(
-                  positionSize
-                )}`
-              );
-            }
-          );
-          orderBook.on(
-            "LiquidationSocializedLossAttempt",
-            (trader, isLong, method) => {
-              console.log(
-                `🛰️  SocializedLossAttempt → trader=${trader} isLong=${isLong} method=${toStr(
-                  method
-                )}`
-              );
-            }
-          );
-          orderBook.on(
-            "LiquidationSocializedLossResult",
-            (trader, success, method) => {
-              console.log(
-                `🛰️  SocializedLossResult → trader=${trader} success=${success} method=${toStr(
-                  method
-                )}`
-              );
-            }
-          );
-          orderBook.on("LiquidationCompleted", (trader, count, method) => {
-            console.log(
-              `🏁 LiquidationCompleted → trader=${trader} count=${toStr(
-                count
-              )} method=${toStr(method)}`
-            );
-          });
-
-          // ===== NEW: Market order deep debug =====
-          orderBook.on(
-            "MarketOrderAttempt",
-            (user, isBuy, amount, referencePrice, slippageBps) => {
-              console.log(
-                `🛠️ MarketOrderAttempt → user=${user} side=${
-                  isBuy ? "BUY" : "SELL"
-                } amt=${fmt18(amount)} ref=${fmt6(
-                  referencePrice
-                )} slippage=${toStr(slippageBps)}bps`
-              );
-            }
-          );
-          orderBook.on(
-            "MarketOrderLiquidityCheck",
-            (isBuy, bestOppositePrice, hasLiquidity) => {
-              console.log(
-                `🧪 MarketOrderLiquidityCheck → side=${
-                  isBuy ? "BUY" : "SELL"
-                } bestOpp=${fmt6(bestOppositePrice)} hasLiq=${toStr(
-                  hasLiquidity
-                )}`
-              );
-            }
-          );
-          orderBook.on("MarketOrderPriceBounds", (maxPrice, minPrice) => {
-            console.log(
-              `📐 MarketOrderPriceBounds → max=${fmt6(maxPrice)} min=${fmt6(
-                minPrice
-              )}`
-            );
-          });
-          orderBook.on(
-            "MarketOrderMarginEstimation",
-            (worstCasePrice, estimatedMargin, availableCollateral) => {
-              console.log(
-                `💵 MarketOrderMarginEstimation → worst=${fmt6(
-                  worstCasePrice
-                )} est=${fmt6(estimatedMargin)} avail=${fmt6(
-                  availableCollateral
-                )}`
-              );
-            }
-          );
-          orderBook.on(
-            "MarketOrderCreated",
-            (orderId, user, limitPrice, amount, isBuy) => {
-              console.log(
-                `🧾 MarketOrderCreated → id=${toStr(
-                  orderId
-                )} user=${user} limit=${fmt6(limitPrice)} amt=${fmt18(
-                  amount
-                )} side=${isBuy ? "BUY" : "SELL"}`
-              );
-            }
-          );
-          orderBook.on(
-            "MarketOrderCompleted",
-            (filledAmount, remainingAmount) => {
-              console.log(
-                `✅ MarketOrderCompleted → filled=${fmt18(
-                  filledAmount
-                )} remaining=${fmt18(remainingAmount)}`
-              );
-            }
-          );
-          // ===== END Market order deep debug =====
-
-          // ----- CoreVault events -----
-          coreVault.on(
-            "MarginConfiscated",
-            (user, marginToConfiscate, seized, penalty, liquidator) => {
-              console.log(
-                `🧮 MarginConfiscated → user=${user} seized=${fmt6(
-                  seized
-                )} penalty=${fmt6(penalty)} liquidator=${liquidator}`
-              );
-            }
-          );
-          coreVault.on(
-            "LiquidatorRewardPaid",
-            (liquidator, user, marketId, reward, liqCollat) => {
-              console.log(
-                `🎁 (legacy) LiquidatorRewardPaid → ${liquidator} reward=${fmt6(
-                  reward
-                )} for=${user}`
-              );
-            }
-          );
-          coreVault.on(
-            "MakerLiquidationRewardPaid",
-            (maker, user, marketId, reward) => {
-              console.log(
-                `🎁 MakerLiquidationRewardPaid → maker=${maker} reward=${fmt6(
-                  reward
-                )} forLiquidationOf=${user}`
-              );
-            }
-          );
-          coreVault.on(
-            "LiquidationExecuted",
-            (user, marketId, liquidator, seizedOrLoss, remainingCollateral) => {
-              console.log(
-                `🧷 LiquidationExecuted → user=${user} seized=${fmt6(
-                  seizedOrLoss
-                )} remaining=${fmt6(remainingCollateral)} by=${liquidator}`
-              );
-            }
-          );
-          coreVault.on(
-            "PositionUpdated",
-            (user, marketId, oldSize, newSize, entryPrice, marginLocked) => {
-              console.log(
-                `📌 PositionUpdated → user=${user} old=${fmt18(
-                  oldSize
-                )} new=${fmt18(newSize)} entry=${fmt6(
-                  entryPrice
-                )} margin=${fmt6(marginLocked)}`
-              );
-            }
-          );
-          coreVault.on(
-            "AvailableCollateralConfiscated",
-            (user, amount, remainingAvailable) => {
-              console.log(
-                `🏦 AvailableCollateralConfiscated → user=${user} amount=${fmt6(
-                  amount
-                )} remaining=${fmt6(remainingAvailable)}`
-              );
-            }
-          );
-          coreVault.on(
-            "SocializationStarted",
-            (marketId, lossAmount, liquidatedUser, timestamp) => {
-              console.log(
-                `🔔 SocializationStarted → loss=${fmt6(
-                  lossAmount
-                )} user=${liquidatedUser}`
-              );
-            }
-          );
-          coreVault.on(
-            "AdministrativePositionClosure",
-            (
-              user,
-              marketId,
-              sizeBefore,
-              sizeAfter,
-              realizedProfit,
-              newEntryPrice
-            ) => {
-              console.log(
-                `📉 AdministrativePositionClosure → user=${user} size ${fmt18(
-                  sizeBefore
-                )}→${fmt18(sizeAfter)} profit=${fmt6(realizedProfit)}`
-              );
-            }
-          );
-          coreVault.on(
-            "UserLossSocialized",
-            (user, lossAmount, remainingCollateral) => {
-              console.log(
-                `💸 UserLossSocialized → user=${user} loss=${fmt6(
-                  lossAmount
-                )} remaining=${fmt6(remainingCollateral)}`
-              );
-            }
-          );
-          coreVault.on(
-            "SocializationCompleted",
-            (
-              marketId,
-              totalLossCovered,
-              remainingLoss,
-              positionsAffected,
-              liquidatedUser
-            ) => {
-              console.log(
-                `✅ SocializationCompleted → covered=${fmt6(
-                  totalLossCovered
-                )} remaining=${fmt6(remainingLoss)} affected=${toStr(
-                  positionsAffected
-                )}`
-              );
-            }
-          );
-          coreVault.on(
-            "SocializationFailed",
-            (marketId, lossAmount, reason, liquidatedUser) => {
-              console.log(
-                `❌ SocializationFailed → loss=${fmt6(
-                  lossAmount
-                )} reason=${toStr(reason)} user=${liquidatedUser}`
               );
             }
           );
@@ -905,27 +622,26 @@ async function main() {
         console.log("     Amount: 5 ALU each");
         console.log("     Side: BUY");
 
-        // Place two limit buy orders: 5 ALU at $1.00 from deployer and User1
         const price = ethers.parseUnits("1", 6); // $1.00 in USDC (6 decimals)
         const amountEach = ethers.parseUnits("4", 18);
         const amountEach2 = ethers.parseUnits("6", 18);
 
-        const buyTx1 = await orderBook
+        const buyTx1 = await orderPlacement
           .connect(deployer)
           .placeMarginLimitOrder(price, amountEach, true);
         await buyTx1.wait();
         console.log("     ✅ Deployer limit buy placed (5 ALU @ $1.00)");
 
         const user1Signer = signers[1]; // User1 is the 2nd signer
-        const buyTx2 = await orderBook
+        const buyTx2 = await orderPlacement
           .connect(user1Signer)
           .placeMarginLimitOrder(price, amountEach2, true);
         await buyTx2.wait();
         console.log("     ✅ User1 limit buy placed (5 ALU @ $1.00)");
 
         // Check the order book state
-        const bestBid = await orderBook.bestBid();
-        const bestAsk = await orderBook.bestAsk();
+        const bestBid = await viewFacetRuntime.bestBid();
+        const bestAsk = await viewFacetRuntime.bestAsk();
         console.log(`     📊 Best Bid: $${ethers.formatUnits(bestBid, 6)}`);
         console.log(`     📊 Best Ask: $${ethers.formatUnits(bestAsk, 6)}`);
 
@@ -935,9 +651,8 @@ async function main() {
         console.log("     Side: SELL (market order)");
 
         const user3 = signers[3]; // User3 is the 4th signer
-
         const totalSellAmount = ethers.parseUnits("10", 18); // 10 ALU to match both bids
-        const sellTx = await orderBook
+        const sellTx = await tradeExec
           .connect(user3)
           .placeMarginMarketOrder(totalSellAmount, false);
 
@@ -946,8 +661,8 @@ async function main() {
         console.log(`     💰 User3 opened short position: -10 ALU @ $1.00`);
 
         // Check final order book state
-        const finalBestBid = await orderBook.bestBid();
-        const finalBestAsk = await orderBook.bestAsk();
+        const finalBestBid = await viewFacetRuntime.bestBid();
+        const finalBestAsk = await viewFacetRuntime.bestAsk();
         console.log(
           `     📊 Final Best Bid: $${ethers.formatUnits(finalBestBid, 6)}`
         );
@@ -965,7 +680,7 @@ async function main() {
         const user2Price = ethers.parseUnits("2.3", 6); // $2.30 in USDC (6 decimals)
         const user2Amount = ethers.parseUnits("20", 18); // 20 ALU (18 decimals)
 
-        const user2OrderTx = await orderBook
+        const user2OrderTx = await orderPlacement
           .connect(user2)
           .placeMarginLimitOrder(
             user2Price,
@@ -978,8 +693,8 @@ async function main() {
         console.log(`     💰 User2 placed ask: 20 ALU @ $2.50`);
 
         // Check updated order book state
-        const updatedBestBid = await orderBook.bestBid();
-        const updatedBestAsk = await orderBook.bestAsk();
+        const updatedBestBid = await viewFacetRuntime.bestBid();
+        const updatedBestAsk = await viewFacetRuntime.bestAsk();
         console.log(
           `     📊 Updated Best Bid: $${ethers.formatUnits(updatedBestBid, 6)}`
         );
@@ -987,23 +702,13 @@ async function main() {
           `     📊 Updated Best Ask: $${ethers.formatUnits(updatedBestAsk, 6)}`
         );
 
-        // Now place User1's limit buy order at the ask to avoid market path overflow
-        console.log(
-          "\n  🔸 Placing market buy order from User1 to match ask..."
-        );
-        console.log("     Amount: 5 ALU");
-        console.log("     Side: BUY (limit order)");
-
-        const user1 = signers[1]; // User1 is the 2nd signer
-        const user1Amount = ethers.parseUnits("5", 18); // 5 ALU (18 decimals)
-
+        // Market buy preflight (keep as diagnostics without execution)
         try {
-          // Preflight diagnostics
-          const bestAskNow = await orderBook.bestAsk();
-          const slippageBps = await orderBook.maxSlippageBps();
+          const bestAskNow = await viewFacetRuntime.bestAsk();
+          const slippageBps = await viewFacetRuntime.maxSlippageBps();
           const worstCasePrice = (bestAskNow * (10000n + slippageBps)) / 10000n;
           const user1Avail = await coreVault.getAvailableCollateral(
-            user1.address
+            user1Signer.address
           );
           console.log(
             `     🔍 Preflight: bestAsk=${ethers.formatUnits(
@@ -1014,56 +719,16 @@ async function main() {
               6
             )} avail=${ethers.formatUnits(user1Avail, 6)}`
           );
-
-          // Try gas estimation
-          try {
-            const est = await orderBook
-              .connect(user1)
-              .placeMarginMarketOrder.estimateGas(user1Amount, true);
-            console.log(
-              `     ⛽ estimateGas(placeMarginMarketOrder)=${est.toString()}`
-            );
-          } catch (e) {
-            console.log(
-              `     ⛽ estimateGas failed: ${e?.reason || e?.message || e}`
-            );
-            try {
-              await orderBook
-                .connect(user1)
-                .callStatic.placeMarginMarketOrder(user1Amount, true);
-              console.log("     ⛽ callStatic would succeed");
-            } catch (e2) {
-              console.log(
-                `     ⛽ callStatic revert: ${
-                  e2?.reason || e2?.shortMessage || e2?.message || e2
-                }`
-              );
-            }
-          }
-
-          // Execute a limit buy at current best ask to guarantee match
-          // const user1OrderTx = await orderBook
-          //   .connect(user1)
-          //   .placeMarginLimitOrder(bestAskNow, user1Amount, true);
-
-          // await user1OrderTx.wait();
-          // console.log("     ✅ Market buy order executed successfully!");
-          // console.log(
-          //   `     💰 User1 opened long position: +${ethers.formatUnits(
-          //     user1Amount,
-          //     18
-          //   )} ALU @ $${ethers.formatUnits(bestAskNow, 6)}`
-          // );
-        } catch (error) {
-          console.log(`     DEBUG ERROR: ${error.message}`);
+        } catch (e) {
+          console.log(`     DEBUG ERROR: ${e.message}`);
           console.log(
-            "     ⚠️  Could not place User1's buy order - continuing deployment"
+            "     ⚠️  Could not run preflight - continuing deployment"
           );
         }
 
-        // Check final order book state after User1's order
-        const finalUpdatedBestBid = await orderBook.bestBid();
-        const finalUpdatedBestAsk = await orderBook.bestAsk();
+        // Check final order book state after diagnostics
+        const finalUpdatedBestBid = await viewFacetRuntime.bestBid();
+        const finalUpdatedBestAsk = await viewFacetRuntime.bestAsk();
         console.log(
           `     📊 Final Best Bid: $${ethers.formatUnits(
             finalUpdatedBestBid,
