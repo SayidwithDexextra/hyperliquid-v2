@@ -45,18 +45,14 @@ contract OBTradeExecutionFacet {
                 }
                 // Counterparty receives units via normal margin path
                 if (buyer == address(this) && seller != address(0) && seller != address(this)) {
-                    (int256 sellerOld, uint256 sellerEntry, ) = _getSummary(s, seller);
+                    (int256 sellerOld, uint256 sellerEntry, uint256 sellerLocked) = _getSummary(s, seller);
                     int256 sellerDelta = -int256(amount);
-                    int256 sellerNew = sellerOld + sellerDelta;
-                    uint256 sellerNewEntry = _computeNewEntryPrice(sellerOld, sellerEntry, sellerDelta, price);
-                    uint256 mrSellerTotal = _calculateTotalRequiredMargin(s, sellerNew, sellerNewEntry);
+                    uint256 mrSellerTotal = _calculateRequiredMarginAdditive(s, sellerOld, sellerEntry, sellerLocked, sellerDelta, price);
                     try s.vault.updatePositionWithMargin(seller, s.marketId, sellerDelta, price, mrSellerTotal) { } catch { }
                 } else if (seller == address(this) && buyer != address(0) && buyer != address(this)) {
-                    (int256 buyerOld, uint256 buyerEntry, ) = _getSummary(s, buyer);
+                    (int256 buyerOld, uint256 buyerEntry, uint256 buyerLocked) = _getSummary(s, buyer);
                     int256 buyerDelta = int256(amount);
-                    int256 buyerNew = buyerOld + buyerDelta;
-                    uint256 buyerNewEntry = _computeNewEntryPrice(buyerOld, buyerEntry, buyerDelta, price);
-                    uint256 mrBuyerTotal = _calculateTotalRequiredMargin(s, buyerNew, buyerNewEntry);
+                    uint256 mrBuyerTotal = _calculateRequiredMarginAdditive(s, buyerOld, buyerEntry, buyerLocked, buyerDelta, price);
                     try s.vault.updatePositionWithMargin(buyer, s.marketId, buyerDelta, price, mrBuyerTotal) { } catch { }
                 }
             } else {
@@ -65,19 +61,15 @@ contract OBTradeExecutionFacet {
                 (int256 sellerOld, uint256 sellerEntry, uint256 sellerLocked) = _getSummary(s, seller);
                 int256 buyerDelta = int256(amount);       // buyer adds long
                 int256 sellerDelta = -int256(amount);     // seller adds short
-                int256 buyerNew = buyerOld + buyerDelta;
-                int256 sellerNew = sellerOld + sellerDelta;
                 // Pre-trade solvency guards for closing legs
                 _assertPreTradeSolvency(s, buyer, buyerOld, buyerEntry, buyerLocked, buyerDelta, price);
                 _assertPreTradeSolvency(s, seller, sellerOld, sellerEntry, sellerLocked, sellerDelta, price);
                 if (buyer != address(this)) {
-                    uint256 buyerNewEntry = _computeNewEntryPrice(buyerOld, buyerEntry, buyerDelta, price);
-                    uint256 mrBuyerTotal = _calculateTotalRequiredMargin(s, buyerNew, buyerNewEntry);
+                    uint256 mrBuyerTotal = _calculateRequiredMarginAdditive(s, buyerOld, buyerEntry, buyerLocked, buyerDelta, price);
                     try s.vault.updatePositionWithMargin(buyer, s.marketId, buyerDelta, price, mrBuyerTotal) { } catch { }
                 }
                 if (seller != address(this)) {
-                    uint256 sellerNewEntry = _computeNewEntryPrice(sellerOld, sellerEntry, sellerDelta, price);
-                    uint256 mrSellerTotal = _calculateTotalRequiredMargin(s, sellerNew, sellerNewEntry);
+                    uint256 mrSellerTotal = _calculateRequiredMarginAdditive(s, sellerOld, sellerEntry, sellerLocked, sellerDelta, price);
                     try s.vault.updatePositionWithMargin(seller, s.marketId, sellerDelta, price, mrSellerTotal) { } catch { }
                 }
             }
@@ -149,6 +141,54 @@ contract OBTradeExecutionFacet {
         return Math.mulDiv(notional, marginBps, 10000);
     }
 
+    // Per-fill additive margin model:
+    // - For same-direction adds: add IMR of the new fill at execution price
+    // - For reductions: release IMR of the closed portion at entry price
+    // - For flips: release IMR of full old position at entry price, then add IMR of remainder at execution price
+    // Returns the absolute new total margin for the position (not delta)
+    function _calculateRequiredMarginAdditive(
+        OrderBookStorage.State storage s,
+        int256 currentNet,
+        uint256 entryPrice,
+        uint256 marginLocked,
+        int256 delta,
+        uint256 executionPrice
+    ) private view returns (uint256) {
+        if (delta == 0) return marginLocked;
+        if (currentNet == 0) {
+            // No existing position: only add margin for the new amount at execution price
+            uint256 addOnly = _calculateExecutionMargin(s, delta, executionPrice);
+            return addOnly;
+        }
+
+        bool sameDirection = (currentNet > 0 && delta > 0) || (currentNet < 0 && delta < 0);
+        if (sameDirection) {
+            // Pure add
+            uint256 addMargin = _calculateExecutionMargin(s, delta, executionPrice);
+            return marginLocked + addMargin;
+        }
+
+        // Reduction or flip
+        uint256 absDelta = uint256(delta > 0 ? delta : -delta);
+        uint256 posAbs = uint256(currentNet > 0 ? currentNet : -currentNet);
+        uint256 closeAbs = absDelta > posAbs ? posAbs : absDelta;
+        // Released margin valued at entry price using the side of the existing position
+        int256 closingSizeSigned = currentNet > 0 ? int256(closeAbs) : -int256(closeAbs);
+        uint256 releaseMargin = _calculateExecutionMargin(s, closingSizeSigned, entryPrice);
+        uint256 afterClose = marginLocked > releaseMargin ? (marginLocked - releaseMargin) : 0;
+
+        // If flip, add new remainder at execution price
+        if (absDelta > posAbs) {
+            uint256 openAbs = absDelta - posAbs;
+            int256 openSigned = delta > 0 ? int256(openAbs) : -int256(openAbs);
+            uint256 addRemainder = _calculateExecutionMargin(s, openSigned, executionPrice);
+            return afterClose + addRemainder;
+        }
+
+        // Pure partial/complete close
+        return afterClose;
+    }
+
     function _calculateTotalRequiredMargin(OrderBookStorage.State storage s, int256 newNet, uint256 basisPrice) private view returns (uint256) {
         if (newNet == 0) return 0;
         uint256 absAmount = uint256(newNet >= 0 ? newNet : -newNet);
@@ -209,7 +249,7 @@ contract OBTradeExecutionFacet {
         address user,
         int256 currentNet,
         uint256 entryPrice,
-        uint256 marginLocked,
+        uint256 /*marginLocked*/,
         int256 delta,
         uint256 executionPrice
     ) private view {
@@ -234,14 +274,11 @@ contract OBTradeExecutionFacet {
             }
         }
         if (tradingLossClosed6 == 0) return;
-        int256 newSizeRaw;
-        unchecked { newSizeRaw = currentNet + delta; }
-        int256 newSize = newSizeRaw;
-        if ((currentNet > 0 && newSizeRaw < 0) || (currentNet < 0 && newSizeRaw > 0)) { newSize = 0; }
-        uint256 basisPriceForMargin = newSize != 0 ? entryPrice : executionPrice;
-        uint256 newRequiredMargin = _calculateTotalRequiredMargin(s, newSize, basisPriceForMargin);
-        uint256 headroom = marginLocked > newRequiredMargin ? (marginLocked - newRequiredMargin) : 0;
-        require(tradingLossClosed6 <= headroom, "OrderBook: closing loss exceeds position margin");
+        // Under additive model, the immediate headroom available to cover the closing loss
+        // is the margin released by the portion being closed (valued at entry price).
+        int256 closingSizeSigned = currentNet > 0 ? int256(closeAbs) : -int256(closeAbs);
+        uint256 releasedMargin6 = _calculateExecutionMargin(s, closingSizeSigned, entryPrice);
+        require(tradingLossClosed6 <= releasedMargin6, "OrderBook: closing loss exceeds position margin");
     }
 
     // Minimal trade views to support existing consumers
