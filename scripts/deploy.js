@@ -174,38 +174,53 @@ async function main() {
       contracts.FUTURES_MARKET_FACTORY
     );
 
-    // 5b) Deploy OrderBook implementation (EIP-1167 template)
-    console.log("  5️⃣b Deploying OrderBook implementation (template)...");
-    const OrderBook = await ethers.getContractFactory("OrderBook");
-    // For the implementation, constructor params won't affect clones' state; pass safe values
-    const orderBookImpl = await OrderBook.deploy(
-      contracts.CORE_VAULT,
-      ethers.ZeroHash,
-      TREASURY_ADDRESS
+    // 5b) Deploy Diamond facets and prepare cut
+    console.log("  5️⃣b Deploying Diamond facets for OrderBook...");
+    const OrderBookInitFacet = await ethers.getContractFactory(
+      "OrderBookInitFacet"
     );
-    await orderBookImpl.waitForDeployment();
-    contracts.ORDERBOOK_IMPLEMENTATION = await orderBookImpl.getAddress();
-    console.log(
-      "     ✅ OrderBook implementation deployed at:",
-      contracts.ORDERBOOK_IMPLEMENTATION
+    const OBAdminFacet = await ethers.getContractFactory("OBAdminFacet");
+    const OBPricingFacet = await ethers.getContractFactory("OBPricingFacet");
+    const OBOrderPlacementFacet = await ethers.getContractFactory(
+      "OBOrderPlacementFacet"
     );
+    const OBTradeExecutionFacet = await ethers.getContractFactory(
+      "OBTradeExecutionFacet"
+    );
+    const OBLiquidationFacet = await ethers.getContractFactory(
+      "OBLiquidationFacet"
+    );
+    const OBViewFacet = await ethers.getContractFactory("OBViewFacet");
 
-    // Set template on factory so future markets use minimal proxies
-    try {
-      console.log(
-        "  🔧 Setting factory OrderBook implementation template for clones..."
-      );
-      await factory.setOrderBookImplementation(
-        contracts.ORDERBOOK_IMPLEMENTATION
-      );
-      console.log("     ✅ Factory template set successfully");
-    } catch (e) {
-      console.log(
-        "     ⚠️  Could not set OrderBook implementation on factory:",
-        e?.message || e
-      );
-      throw e;
-    }
+    const initFacet = await OrderBookInitFacet.deploy();
+    await initFacet.waitForDeployment();
+    const adminFacet = await OBAdminFacet.deploy();
+    await adminFacet.waitForDeployment();
+    const pricingFacet = await OBPricingFacet.deploy();
+    await pricingFacet.waitForDeployment();
+    const placementFacet = await OBOrderPlacementFacet.deploy();
+    await placementFacet.waitForDeployment();
+    const execFacet = await OBTradeExecutionFacet.deploy();
+    await execFacet.waitForDeployment();
+    const liqFacet = await OBLiquidationFacet.deploy();
+    await liqFacet.waitForDeployment();
+    const viewFacet = await OBViewFacet.deploy();
+    await viewFacet.waitForDeployment();
+
+    const initAddr = await initFacet.getAddress();
+    const adminAddr = await adminFacet.getAddress();
+    const pricingAddr = await pricingFacet.getAddress();
+    const placementAddr = await placementFacet.getAddress();
+    const execAddr = await execFacet.getAddress();
+    const liqAddr = await liqFacet.getAddress();
+
+    console.log("     ✅ Facets deployed:");
+    console.log("        init:", initAddr);
+    console.log("        admin:", adminAddr);
+    console.log("        pricing:", pricingAddr);
+    console.log("        placement:", placementAddr);
+    console.log("        execution:", execAddr);
+    console.log("        liquidation:", liqAddr);
 
     // Set conservative defaults: 100% margin, 0 bps trading fee (no fees)
     try {
@@ -303,17 +318,64 @@ async function main() {
     await mockUSDC.approve(contracts.FUTURES_MARKET_FACTORY, creationFee);
     console.log("     ✅ Fee approved");
 
-    // Create market
-    console.log("  🚀 Creating ALUMINUM futures market...");
-    const createTx = await factory.createFuturesMarket(
+    // Create Diamond-based market
+    console.log("  🚀 Creating ALUMINUM futures market (Diamond)...");
+    // Build cut with selectors
+    const cut = [];
+    const FacetCutAction = { Add: 0 };
+    function selectors(iface) {
+      // Build 4-byte selectors from function fragments
+      return iface.fragments
+        .filter((f) => f.type === "function")
+        .map((f) => {
+          const sig = f.format("sighash"); // e.g., transfer(address,uint256)
+          const sel = ethers.id(sig).slice(0, 10); // 0x + 8 hex chars
+          return sel;
+        });
+    }
+    cut.push({
+      facetAddress: adminAddr,
+      action: FacetCutAction.Add,
+      functionSelectors: selectors(adminFacet.interface),
+    });
+    cut.push({
+      facetAddress: pricingAddr,
+      action: FacetCutAction.Add,
+      functionSelectors: selectors(pricingFacet.interface),
+    });
+    cut.push({
+      facetAddress: placementAddr,
+      action: FacetCutAction.Add,
+      functionSelectors: selectors(placementFacet.interface),
+    });
+    cut.push({
+      facetAddress: execAddr,
+      action: FacetCutAction.Add,
+      functionSelectors: selectors(execFacet.interface),
+    });
+    cut.push({
+      facetAddress: liqAddr,
+      action: FacetCutAction.Add,
+      functionSelectors: selectors(liqFacet.interface),
+    });
+    const viewAddr = await viewFacet.getAddress();
+    cut.push({
+      facetAddress: viewAddr,
+      action: FacetCutAction.Add,
+      functionSelectors: selectors(viewFacet.interface),
+    });
+
+    const createTx = await factory.createFuturesMarketDiamond(
       marketSymbol,
       metricUrl,
       settlementDate,
       startPrice,
       dataSource,
       tags,
-      marginRequirementBps,
-      tradingFee
+      deployer.address,
+      cut,
+      initAddr,
+      "0x" // init calldata will be generated in factory using obInitialize(vault, marketId, feeRecipient)
     );
 
     const receipt = await createTx.wait();
@@ -345,24 +407,20 @@ async function main() {
       throw new Error("Failed to get OrderBook address from event");
     }
 
-    // Ensure the newly created OrderBook has 0 bps fee and the treasury as fee recipient
+    // Configure the Diamond OB via admin facet
     try {
-      const obForParams = await ethers.getContractAt(
-        "OrderBook",
+      const obAdmin = await ethers.getContractAt(
+        "OBAdminFacet",
         contracts.ALUMINUM_ORDERBOOK
       );
       console.log(
-        "  🔧 Configuring OrderBook fees & recipient (0 bps, treasury)..."
+        "  🔧 Configuring Diamond OB params (100% margin, 0% fee, treasury)..."
       );
-      await obForParams
-        .connect(deployer)
-        .updateTradingParameters(10000, 0, TREASURY_ADDRESS);
-      console.log(
-        "     ✅ OrderBook trading parameters set (100% margin, 0% fee, treasury recipient)"
-      );
+      await obAdmin.updateTradingParameters(10000, 0, TREASURY_ADDRESS);
+      console.log("     ✅ Diamond OB trading parameters set");
     } catch (e) {
       console.log(
-        "     ⚠️  Could not set OrderBook trading parameters (margin/fee/recipient):",
+        "     ⚠️  Could not set Diamond OB trading parameters:",
         e?.message || e
       );
     }
@@ -387,11 +445,11 @@ async function main() {
       )}, but using $1 for initial trades`
     );
 
-    // Grant ORDERBOOK_ROLE to the OrderBook
+    // Grant ORDERBOOK_ROLE to the Diamond OB
     await coreVault.grantRole(ORDERBOOK_ROLE, contracts.ALUMINUM_ORDERBOOK);
     console.log("     ✅ ORDERBOOK_ROLE granted to OrderBook");
 
-    // Grant SETTLEMENT_ROLE to the OrderBook (needed for updateMarkPrice calls)
+    // Grant SETTLEMENT_ROLE to the Diamond OB
     await coreVault.grantRole(SETTLEMENT_ROLE, contracts.ALUMINUM_ORDERBOOK);
     console.log("     ✅ SETTLEMENT_ROLE granted to OrderBook");
 

@@ -9357,8 +9357,9 @@ ${colors.brightRed}└───────────────────�
     );
 
     try {
-      // Get current best price for reference
-      const [bestBid, bestAsk] = await this.contracts.orderBook.getBestPrices();
+      // Get current best price for reference (diamond view facet provides bestBid/bestAsk)
+      const bestBid = await this.contracts.orderBook.bestBid();
+      const bestAsk = await this.contracts.orderBook.bestAsk();
       const referencePrice = isBuy ? bestAsk : bestBid;
 
       if (
@@ -9539,60 +9540,25 @@ ${colors.brightRed}└───────────────────�
 
         const amountWei = ethers.parseUnits(amount, 18);
 
-        // Use the slippage-aware market order function
-        const filledAmountWei = await this.contracts.orderBook
+        // Preflight (static) call to capture revert reasons before sending tx
+        await this.contracts.orderBook
           .connect(this.currentUser)
-          .placeMarginMarketOrderWithSlippage.staticCall(
-            amountWei,
-            isBuy,
-            slippageBps
-          );
+          .placeMarginMarketOrder.staticCall(amountWei, isBuy);
 
         const tx = await this.contracts.orderBook
           .connect(this.currentUser)
-          .placeMarginMarketOrderWithSlippage(amountWei, isBuy, slippageBps);
+          .placeMarginMarketOrder(amountWei, isBuy);
 
         console.log(colorText("⏳ Transaction submitted...", colors.yellow));
         const receipt = await tx.wait();
 
-        const filledAmount = parseFloat(
-          ethers.formatUnits(filledAmountWei, 18)
-        );
-        const requestedAmount = parseFloat(amount);
-        const fillRate = (filledAmount / requestedAmount) * 100;
-
         console.log(colorText("✅ Market order executed!", colors.brightGreen));
-        console.log(
-          colorText(`📊 Requested: ${requestedAmount} ALU`, colors.cyan)
-        );
-        console.log(colorText(`📊 Filled: ${filledAmount} ALU`, colors.green));
-        console.log(
-          colorText(`📊 Fill Rate: ${fillRate.toFixed(1)}%`, colors.cyan)
-        );
-
-        if (filledAmount < requestedAmount) {
-          const cancelledAmount = requestedAmount - filledAmount;
+        try {
+          const ltp = await this.contracts.orderBook.lastTradePrice();
           console.log(
-            colorText(
-              `🛡️ Cancelled: ${cancelledAmount} ALU (slippage protection)`,
-              colors.magenta
-            )
+            colorText(`📊 Last Trade Price: $${formatPrice(ltp)}`, colors.cyan)
           );
-          console.log(
-            colorText(
-              `✅ Requirement 11 Demonstrated: Unfilled portion cancelled!`,
-              colors.brightGreen
-            )
-          );
-        } else {
-          console.log(
-            colorText(
-              `✅ Order fully filled within slippage tolerance`,
-              colors.brightGreen
-            )
-          );
-        }
-
+        } catch (_) {}
         console.log(colorText(`📄 Transaction: ${tx.hash}`, colors.dim));
         console.log(
           colorText(`⛽ Gas used: ${receipt.gasUsed.toString()}`, colors.dim)

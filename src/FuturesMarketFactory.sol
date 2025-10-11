@@ -2,6 +2,8 @@
 pragma solidity ^0.8.20;
 
 import "./OrderBook.sol";
+import "./diamond/Diamond.sol";
+import "./diamond/interfaces/IDiamondCut.sol";
 import "./CoreVault.sol";
 import "@openzeppelin/contracts/proxy/Clones.sol";
 
@@ -253,6 +255,83 @@ contract FuturesMarketFactory {
             startPrice
         );
         
+        return (orderBook, marketId);
+    }
+
+    /**
+     * @dev Create a new futures market using Diamond proxy pattern.
+     * @param marketSymbol Human-readable market symbol
+     * @param metricUrl Source-of-truth URL
+     * @param settlementDate Settlement timestamp
+     * @param startPrice Initial mark price (6 decimals)
+     * @param dataSource Data source descriptor
+     * @param tags Discovery tags
+     * @param diamondOwner Owner of the Diamond (admin)
+     * @param cut Initial facet cut describing facets and selectors
+     * @param initFacet Address to run initialization delegatecall (e.g., OrderBookInitFacet)
+     * @param initCalldata Calldata to run on initFacet (e.g., obInitialize(vault, marketId, feeRecipient))
+     */
+    function createFuturesMarketDiamond(
+        string memory marketSymbol,
+        string memory metricUrl,
+        uint256 settlementDate,
+        uint256 startPrice,
+        string memory dataSource,
+        string[] memory tags,
+        address diamondOwner,
+        IDiamondCut.FacetCut[] memory cut,
+        address initFacet,
+        bytes memory initCalldata
+    ) external 
+        canCreateMarket
+        validMarketSymbol(marketSymbol)
+        validMetricUrl(metricUrl)
+        validSettlementDate(settlementDate)
+        returns (address orderBook, bytes32 marketId) 
+    {
+        require(startPrice > 0, "FuturesMarketFactory: start price must be positive");
+        require(bytes(dataSource).length > 0, "FuturesMarketFactory: data source cannot be empty");
+        require(tags.length <= 10, "FuturesMarketFactory: too many tags");
+        require(diamondOwner != address(0), "FuturesMarketFactory: owner zero");
+
+        if (marketCreationFee > 0 && msg.sender != admin) {
+            vault.deductFees(msg.sender, marketCreationFee, feeRecipient);
+        }
+
+        marketId = keccak256(abi.encodePacked(marketSymbol, metricUrl, msg.sender, block.timestamp, block.number));
+        require(!marketExists[marketId], "FuturesMarketFactory: market ID collision");
+
+        // Deploy Diamond with factory-computed initializer that includes the computed marketId
+        require(initFacet != address(0), "FuturesMarketFactory: init facet required");
+        bytes4 initSel = bytes4(keccak256("obInitialize(address,bytes32,address)"));
+        bytes memory initData = abi.encodeWithSelector(initSel, address(vault), marketId, feeRecipient);
+        Diamond diamond = new Diamond(diamondOwner, cut, initFacet, initData);
+        orderBook = address(diamond);
+
+        // Register with vault and assign market
+        vault.registerOrderBook(orderBook);
+        vault.assignMarketToOrderBook(marketId, orderBook);
+
+        // Update tracking and metadata
+        marketToOrderBook[marketId] = orderBook;
+        orderBookToMarket[orderBook] = marketId;
+        marketExists[marketId] = true;
+        marketCreators[marketId] = msg.sender;
+        marketSymbols[marketId] = marketSymbol;
+        userCreatedMarkets[msg.sender].push(marketId);
+        allOrderBooks.push(orderBook);
+        allMarkets.push(marketId);
+        marketMetricUrls[marketId] = metricUrl;
+        marketSettlementDates[marketId] = settlementDate;
+        marketStartPrices[marketId] = startPrice;
+        marketCreationTimestamps[marketId] = block.timestamp;
+        marketDataSources[marketId] = dataSource;
+        marketTags[marketId] = tags;
+        isCustomMetric[marketId] = true;
+
+        vault.updateMarkPrice(marketId, startPrice);
+
+        emit FuturesMarketCreated(orderBook, marketId, marketSymbol, msg.sender, marketCreationFee, metricUrl, settlementDate, startPrice);
         return (orderBook, marketId);
     }
     

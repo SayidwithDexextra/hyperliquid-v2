@@ -173,7 +173,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     event MarginToppedUp(address indexed user, bytes32 indexed marketId, uint256 amount);
     // Margin reservation events (compat with CentralizedVault)
     event MarginReserved(address indexed user, bytes32 indexed orderId, bytes32 indexed marketId, uint256 amount);
-    event MarginUnreserved(address indexed user, bytes32 indexed orderId, uint256 amount);
+    event MarginUnreserved(address indexed user, bytes32 orderId, uint256 amount);
     event MarketAuthorized(bytes32 indexed marketId, address indexed orderBook);
     event LiquidationExecuted(address indexed user, bytes32 indexed marketId, address indexed liquidator, uint256 totalLoss, uint256 remainingCollateral);
     event MarginConfiscated(address indexed user, uint256 marginAmount, uint256 totalLoss, uint256 penalty, address indexed liquidator);
@@ -1071,25 +1071,23 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 // Approximate fixed trigger using current equity-per-unit snapshot
                 uint256 mark = getMarkPrice(marketId);
                 if (mark == 0) { mark = positions[i].entryPrice; }
-                int256 priceDiff = int256(mark) - int256(positions[i].entryPrice);
-                int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
-                int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
-                int256 equity6 = int256(positions[i].marginLocked) + pnl6;
+                // Keep mark calculations for completeness, but avoid unused vars
+                // and do not use equity in short-liq formula to keep mark-independence.
+                // int256 priceDiff = int256(mark) - int256(positions[i].entryPrice);
+                // int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
+                // int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
                 uint256 absSize = uint256(positions[i].size >= 0 ? positions[i].size : -positions[i].size);
                 if (absSize == 0) { positions[i].liquidationPrice = 0; return; }
-                // eOverQ6 = equity6 / |Q| (both in 6 decimals after scaling by 1e18/1e18)
-                int256 eOverQ6 = (equity6 * int256(1e18)) / int256(absSize);
                 if (positions[i].size > 0) {
-                    // Long trigger: P_liq = ((mark - eOverQ6) * 10000) / (10000 - MMR)
-                    int256 numeratorSigned = int256(mark) - eOverQ6;
-                    uint256 denomBps = 10000 - mmrBps;
-                    uint256 numerator = numeratorSigned > 0 ? uint256(numeratorSigned) : 0;
-                    positions[i].liquidationPrice = denomBps == 0 ? 0 : Math.mulDiv(numerator, 10000, denomBps);
+                    // Policy: Long positions display a liquidation price of 0
+                    positions[i].liquidationPrice = 0;
                 } else {
-                    // Short trigger: P_liq = ((mark + eOverQ6) * 10000) / (10000 + MMR)
-                    int256 numeratorSigned = int256(mark) + eOverQ6;
+                    // Short trigger (mark-independent, 1:1 with original):
+                    // P_liq = (entryPrice + marginPerUnit) * 10000 / (10000 + MMR)
+                    // where marginPerUnit = (marginLocked * 1e18) / |Q|   → 6 decimals
+                    uint256 marginPerUnit6 = Math.mulDiv(positions[i].marginLocked, 1e18, absSize);
+                    uint256 numerator = positions[i].entryPrice + marginPerUnit6;
                     uint256 denomBps = 10000 + mmrBps;
-                    uint256 numerator = numeratorSigned > 0 ? uint256(numeratorSigned) : 0;
                     positions[i].liquidationPrice = Math.mulDiv(numerator, 10000, denomBps);
                 }
                 return;
