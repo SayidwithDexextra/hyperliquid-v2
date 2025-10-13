@@ -10,23 +10,14 @@ import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "./VaultAnalytics.sol";
 import "./PositionManager.sol";
+import "./diamond/interfaces/IOBPricingFacet.sol";
 
 // Minimal ERC20 metadata interface to validate decimals at runtime
 interface IERC20Metadata {
     function decimals() external view returns (uint8);
 }
 
-// Interface for OrderBook
-interface IOrderBook {
-    function calculateMarkPrice() external view returns (uint256);
-    function clearUserPosition(address user) external;
-    function getOrderBookDepth(uint256 levels) external view returns (
-        uint256[] memory bidPrices,
-        uint256[] memory bidAmounts,
-        uint256[] memory askPrices,
-        uint256[] memory askAmounts
-    );
-}
+// Removed legacy IOrderBook usage; use IOBPricingFacet for depth/view calls
 
 /**
  * @title CoreVault
@@ -1213,7 +1204,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         address obAddr = marketToOrderBook[marketId];
         if (obAddr == address(0)) return 0;
         // Attempt to get depth; if it fails, return 0 to enforce max risk
-        try IOrderBook(obAddr).getOrderBookDepth(mmrLiquidityDepthLevels) returns (
+        try IOBPricingFacet(obAddr).getOrderBookDepth(mmrLiquidityDepthLevels) returns (
             uint256[] memory /*bidPrices*/,
             uint256[] memory bidAmounts,
             uint256[] memory /*askPrices*/,

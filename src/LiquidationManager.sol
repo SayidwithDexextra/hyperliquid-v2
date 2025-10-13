@@ -8,21 +8,13 @@ import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./VaultAnalytics.sol";
 import "./PositionManager.sol";
+import "./diamond/interfaces/IOBPricingFacet.sol";
 
 interface IERC20Metadata {
     function decimals() external view returns (uint8);
 }
 
-interface IOrderBook {
-    function calculateMarkPrice() external view returns (uint256);
-    function clearUserPosition(address user) external;
-    function getOrderBookDepth(uint256 levels) external view returns (
-        uint256[] memory bidPrices,
-        uint256[] memory bidAmounts,
-        uint256[] memory askPrices,
-        uint256[] memory askAmounts
-    );
-}
+// Removed legacy IOrderBook; use IOBPricingFacet for depth
 
 contract LiquidationManager is AccessControl, ReentrancyGuard, Pausable {
     
@@ -923,7 +915,7 @@ contract LiquidationManager is AccessControl, ReentrancyGuard, Pausable {
     function _getCloseLiquidity(bytes32 marketId, uint256 /*absSize*/) internal view returns (uint256 liquidity18) {
         address obAddr = marketToOrderBook[marketId];
         if (obAddr == address(0)) return 0;
-        try IOrderBook(obAddr).getOrderBookDepth(mmrLiquidityDepthLevels) returns (
+        try IOBPricingFacet(obAddr).getOrderBookDepth(mmrLiquidityDepthLevels) returns (
             uint256[] memory /*bidPrices*/,
             uint256[] memory bidAmounts,
             uint256[] memory /*askPrices*/,

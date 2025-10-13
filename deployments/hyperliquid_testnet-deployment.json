@@ -1,0 +1,48 @@
+{
+  "network": "hyperliquid_testnet",
+  "chainId": 998,
+  "timestamp": "2025-10-12T21:24:05.176Z",
+  "contracts": {
+    "MOCK_USDC": "0x69bfB7DAB0135fB6cD3387CF411624d874B3c799",
+    "VAULT_ANALYTICS": "0x31Fa820E9d545a2986992470781CfD8a476d534D",
+    "POSITION_MANAGER": "0x5641433aDCD2b52e979059063F7fF7b6f4Ab82Fd",
+    "CORE_VAULT": "0x3F76468754fC1FA4a79C796C580824799281aCa0",
+    "LIQUIDATION_MANAGER": "0x93bF290F0a2039E502b87c8767c71e77A50C79C2",
+    "FUTURES_MARKET_FACTORY": "0x95c85427fdC7d6F04C948895fFe3dc6F84798EeC",
+    "ALUMINUM_ORDERBOOK": "0xFC27fc4786BE01510c3564117becD13fdB077bb3",
+    "ALUMINUM_MARKET_ID": "0xc6348f46a4dac78005a64ff26ab0e3d114645a0d336494037e628c070eb137b4"
+  },
+  "deployer": "0x84b1e48e10D6326eD70a1947AaABF49AC8e290C7",
+  "allUsers": [
+    {
+      "index": 0,
+      "address": "0x84b1e48e10D6326eD70a1947AaABF49AC8e290C7",
+      "role": "deployer"
+    },
+    {
+      "index": 1,
+      "address": "0xcB641417acE8281f4BC9c58775456Ea204979E9d",
+      "role": "user1"
+    },
+    {
+      "index": 2,
+      "address": "0x9517b46578f94b5498dfC442994968D718e628b3",
+      "role": "user2"
+    },
+    {
+      "index": 3,
+      "address": "0xddA468df398DDeEcC7d589Ef3195c828Df4812B4",
+      "role": "user3"
+    },
+    {
+      "index": 4,
+      "address": "0xfeDc3AE13DBfED752185410E688588675B393A75",
+      "role": "user4"
+    }
+  ],
+  "aluminumMarket": {
+    "marketId": "0xc6348f46a4dac78005a64ff26ab0e3d114645a0d336494037e628c070eb137b4",
+    "symbol": "ALU-USD",
+    "orderBook": "0xFC27fc4786BE01510c3564117becD13fdB077bb3"
+  }
+}

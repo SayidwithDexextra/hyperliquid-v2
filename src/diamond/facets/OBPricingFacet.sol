@@ -194,7 +194,15 @@ contract OBPricingFacet {
             (uint256 vwap2, bool ok2) = _lastTwoTradeVWAP(s);
             if (ok2 && vwap2 > 0) { return vwap2; }
         }
-        if (s.lastTradePrice > 0) return s.lastTradePrice;
+        if (s.lastTradePrice > 0) {
+            // Match legacy behavior: when trades exist, prefer simple average of last two prices if available
+            if (s.totalTradeCount >= 2) {
+                uint256 p1 = s.trades[s.totalTradeCount].price;
+                uint256 p2 = s.trades[s.totalTradeCount - 1].price;
+                return (p1 / 2) + (p2 / 2) + ((p1 % 2 + p2 % 2) / 2);
+            }
+            return s.lastTradePrice;
+        }
         if (s.bestBid > 0) return s.bestBid;
         if (s.bestAsk > 0) return s.bestAsk;
         return 1000000;
@@ -204,6 +212,13 @@ contract OBPricingFacet {
         if (s.totalTradeCount < 2) return (0, false);
         OrderBookStorage.Trade storage t1 = s.trades[s.totalTradeCount];
         OrderBookStorage.Trade storage t2 = s.trades[s.totalTradeCount - 1];
+        // Staleness guard to match legacy behavior
+        if (s.vwapTimeWindow > 0) {
+            uint256 cutoff = block.timestamp - s.vwapTimeWindow;
+            if (t1.timestamp < cutoff || t2.timestamp < cutoff) {
+                return (0, false);
+            }
+        }
         uint256 amountSum = t1.amount + t2.amount; if (amountSum == 0) return (0, false);
         if (t1.price >= t2.price) {
             uint256 priceDelta = t1.price - t2.price;

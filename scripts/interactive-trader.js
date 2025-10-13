@@ -26,6 +26,7 @@ let undiciAgent = null;
 const {
   getContract,
   getAddress,
+  displayConfig, // Import displayConfig
   MARKET_INFO,
   displayFullConfig,
 } = require("../config/contracts");
@@ -408,15 +409,15 @@ async function getMarkPriceAndPnL(contracts, position) {
       );
 
       if (orderBookAddress && orderBookAddress !== ethers.ZeroAddress) {
-        // Create OrderBook contract instance for this specific market
-        const OrderBook = await ethers.getContractFactory("OrderBook");
-        const orderBook = OrderBook.attach(orderBookAddress);
-
-        // Get real-time calculated mark price
-        markPriceBigInt = await orderBook.calculateMarkPrice();
+        // Use pricing facet directly at the market orderbook address
+        const obPricing = await ethers.getContractAt(
+          "OBPricingFacet",
+          orderBookAddress
+        );
+        markPriceBigInt = await obPricing.calculateMarkPrice();
       } else {
-        // Fallback to default OrderBook if market-specific one not found
-        markPriceBigInt = await contracts.orderBook.calculateMarkPrice();
+        // Fallback to default combined contract's pricing call
+        markPriceBigInt = await contracts.obPricing.calculateMarkPrice();
       }
     } catch (error) {
       // Fallback to default OrderBook if market mapping fails
@@ -426,7 +427,7 @@ async function getMarkPriceAndPnL(contracts, position) {
           8
         )}...`
       );
-      markPriceBigInt = await contracts.orderBook.calculateMarkPrice();
+      markPriceBigInt = await contracts.obPricing.calculateMarkPrice();
     }
 
     if (markPriceBigInt > 0) {
@@ -446,8 +447,8 @@ async function getMarkPriceAndPnL(contracts, position) {
       return { markPrice, pnl };
     } else {
       // Fallback: calculate manually using order book data
-      const bestBid = await contracts.orderBook.bestBid();
-      const bestAsk = await contracts.orderBook.bestAsk();
+      const bestBid = await contracts.obView.bestBid();
+      const bestAsk = await contracts.obView.bestAsk();
 
       if (bestBid > 0n && bestAsk < ethers.MaxUint256) {
         const bidPrice = parseFloat(ethers.formatUnits(bestBid, 6));
@@ -672,7 +673,19 @@ class InteractiveTrader {
   async initialize() {
     console.clear();
     await this.showWelcomeScreen();
+
+    // Display contract addresses
+    console.log(
+      "\n🔗 Loading smart contract addresses for the current network..."
+    );
+    displayConfig(); // This will print the table of addresses
+
     await this.loadContracts();
+
+    // Display addresses again after contracts are loaded
+    console.log("\n🔗 Confirmed smart contract addresses in use:");
+    displayConfig();
+
     await this.loadUsers();
 
     // CLI: --hack-file <path> optional batch file runner
@@ -785,46 +798,120 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
 
     try {
       this.contracts.mockUSDC = await getContract("MOCK_USDC");
+      const usdcCode = await ethers.provider.getCode(
+        await this.contracts.mockUSDC.getAddress()
+      );
+      if (usdcCode === "0x") {
+        console.log(
+          colorText(
+            "❌ Error: MOCK_USDC contract not found at address.",
+            colors.red
+          )
+        );
+        throw new Error("MOCK_USDC contract has no bytecode.");
+      }
       this.contracts.vault = await getContract("CORE_VAULT");
-      // Prefer the vault-mapped OrderBook for the ALUMINUM market; fall back to configured address
+      // Resolve OrderBook (Diamond) address for ALUMINUM
+      let obAddress;
       try {
         const mapped = await this.contracts.vault.marketToOrderBook(
           MARKET_INFO.ALUMINUM.marketId
         );
         if (mapped && mapped !== ethers.ZeroAddress) {
-          const OrderBook = await ethers.getContractFactory("OrderBook");
-          this.contracts.orderBook = OrderBook.attach(mapped);
+          obAddress = mapped;
         } else {
-          this.contracts.orderBook = await getContract("ALUMINUM_ORDERBOOK");
+          obAddress = getAddress("ALUMINUM_ORDERBOOK");
         }
       } catch (_) {
-        this.contracts.orderBook = await getContract("ALUMINUM_ORDERBOOK");
+        obAddress = getAddress("ALUMINUM_ORDERBOOK");
       }
-      this.contracts.router = await getContract("TRADING_ROUTER");
+      this.contracts.orderBookAddress = obAddress;
+
+      // Attach Diamond facets for reads/writes
+      this.contracts.obView = await ethers.getContractAt(
+        "OBViewFacet",
+        obAddress
+      );
+      this.contracts.obPricing = await ethers.getContractAt(
+        "OBPricingFacet",
+        obAddress
+      );
+      this.contracts.obPlace = await ethers.getContractAt(
+        "OBOrderPlacementFacet",
+        obAddress
+      );
+      this.contracts.obExec = await ethers.getContractAt(
+        "OBTradeExecutionFacet",
+        obAddress
+      );
+      this.contracts.obLiq = await ethers.getContractAt(
+        "OBLiquidationFacet",
+        obAddress
+      );
+      // Build a combined ABI at the diamond address so we can listen across facets
+      const obExecAbi =
+        require("../artifacts/src/diamond/facets/OBTradeExecutionFacet.sol/OBTradeExecutionFacet.json").abi;
+      const obPlaceAbi =
+        require("../artifacts/src/diamond/facets/OBOrderPlacementFacet.sol/OBOrderPlacementFacet.json").abi;
+      const obPricingAbi =
+        require("../artifacts/src/diamond/facets/OBPricingFacet.sol/OBPricingFacet.json").abi;
+      const obViewAbi =
+        require("../artifacts/src/diamond/facets/OBViewFacet.sol/OBViewFacet.json").abi;
+      const obLiqAbi =
+        require("../artifacts/src/diamond/facets/OBLiquidationFacet.sol/OBLiquidationFacet.json").abi;
+      const extraAbi = [
+        "event MarketOrderAttempt(address indexed user, bool isBuy, uint256 amount, uint256 referencePrice, uint256 slippageBps)",
+        "event MarketOrderLiquidityCheck(bool isBuy, uint256 bestOppositePrice, bool hasLiquidity)",
+        "event MarketOrderPriceBounds(uint256 maxPrice, uint256 minPrice)",
+        "event MarketOrderMarginEstimation(uint256 worstCasePrice, uint256 estimatedMargin, uint256 availableCollateral)",
+        "event MarketOrderCreated(uint256 orderId, address indexed user, uint256 limitPrice, uint256 amount, bool isBuy)",
+        "event MarketOrderCompleted(uint256 filledAmount, uint256 remainingAmount)",
+        "event MatchingStarted(address indexed buyer, uint256 remainingAmount, uint256 maxPrice, uint256 startingPrice)",
+        "event PriceLevelEntered(uint256 currentPrice, bool levelExists, uint256 totalAmountAtLevel)",
+        "event OrderMatchAttempt(uint256 indexed orderId, address indexed seller, uint256 sellOrderAmount, uint256 matchAmount)",
+        "event SlippageProtectionTriggered(uint256 currentPrice, uint256 maxPrice, uint256 remainingAmount)",
+        "event MatchingCompleted(address indexed buyer, uint256 originalAmount, uint256 filledAmount, uint256 remainingAmount)",
+        "event LiquidationTradeDetected(bool isLiquidationTrade, address indexed liquidationTarget, bool liquidationClosesShort)",
+        "event MarginUpdatesStarted(bool isLiquidationTrade)",
+        "event LiquidationMarketOrderAttempt(address indexed trader, uint256 amount, bool isBuy, uint256 markPrice)",
+        "event LiquidationSocializedLossAttempt(address indexed trader, bool isLong, string method)",
+        "event LiquidationSocializedLossResult(address indexed trader, bool success, string method)",
+        "event LiquidationMarginConfiscated(address indexed trader, uint256 marginAmount, uint256 penalty, address indexed liquidator)",
+      ];
+      const combinedAbi = [
+        ...obExecAbi,
+        ...obPlaceAbi,
+        ...obPricingAbi,
+        ...obViewAbi,
+        ...obLiqAbi,
+        ...extraAbi,
+      ];
+      const provider =
+        (this.contracts.vault &&
+          this.contracts.vault.runner &&
+          this.contracts.vault.runner.provider) ||
+        ethers.provider;
+      this.contracts.orderBook = new ethers.Contract(
+        obAddress,
+        combinedAbi,
+        provider
+      );
+
       this.contracts.factory = await getContract("FUTURES_MARKET_FACTORY");
-      // Try to load LiquidationManager if present in config; fall back handled in listeners
+      // Optional liquidation manager
       try {
         this.contracts.liquidationManager = await getContract(
           "LIQUIDATION_MANAGER"
         );
       } catch (e) {
-        // Optional: not all deployments include LIQUIDATION_MANAGER key
         this.contracts.liquidationManager = null;
       }
 
-      console.log(
-        colorText("✅ All contracts loaded successfully!", colors.brightGreen)
-      );
-
-      // Set up real-time event listeners
-      await this.setupEventListeners();
-
-      await this.pause(1000);
+      console.log(colorText("✅ Contracts loaded.", colors.green));
     } catch (error) {
-      console.log(
-        colorText("❌ Failed to load contracts: " + error.message, colors.red)
-      );
-      process.exit(1);
+      console.log(colorText("❌ Failed to load contracts", colors.red));
+      console.log(colorText(`Error: ${error.message}`, colors.red));
+      throw error;
     }
   }
 
@@ -1006,18 +1093,15 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         return;
       }
 
-      if (this.contracts.orderBook) {
-        const orderBookAddress = await this.contracts.orderBook.getAddress();
+      const orderBookAddress = this.contracts.orderBookAddress;
+      if (orderBookAddress) {
         console.log(
           colorText(`✅ OrderBook loaded at: ${orderBookAddress}`, colors.green)
         );
       } else {
-        console.log(
-          colorText("❌ OrderBook contract is null/undefined!", colors.red)
-        );
+        console.log(colorText("❌ OrderBook address not set!", colors.red));
       }
-      // ============ COMMENTED OUT: ALL NON-ADL EVENTS FOR ISOLATION ============
-      /*
+
       // Listen for OrderMatched events from the matching engine
       this.contracts.orderBook.on(
         "OrderMatched",
@@ -1193,7 +1277,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         }
       );
 
-      */
       // Market order deep debug (enabled)
       this.contracts.orderBook.on(
         "MarketOrderAttempt",
@@ -1471,7 +1554,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           );
         }
       );
-
       // Fallback provider-level listeners for debug events (in case ABI lacks fragments)
       try {
         const provider = this.contracts.orderBook.runner.provider;
@@ -1525,7 +1607,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           });
         }
       } catch (_) {}
-
       // Listen for detailed liquidation debug context from OrderBook
       this.contracts.orderBook.on(
         "DebugLiquidationContext",
@@ -1551,7 +1632,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           );
         }
       );
-
       // Listen for CoreVault detailed liquidatability checks
       this.contracts.vault.on(
         "DebugIsLiquidatable",
@@ -5408,7 +5488,7 @@ ${colors.brightRed}└───────────────────�
               "ASSERT BID/ASK usage: ASSERT BID|ASK <op> <price>"
             );
           const [bestBid, bestAsk] = await this.withConcurrency(() =>
-            this.withRpcRetry(() => this.contracts.orderBook.getBestPrices())
+            this.withRpcRetry(() => this.contracts.obView.getBestPrices())
           );
           const actual6 =
             what === "BID" ? BigInt(bestBid || 0n) : BigInt(bestAsk || 0n);
@@ -5579,7 +5659,7 @@ ${colors.brightRed}└───────────────────�
 
         const { tx, rcpt } = await this.withConcurrency(() =>
           this.withRpcRetry(async () => {
-            const tx = await this.contracts.orderBook
+            const tx = await this.contracts.obPlace
               .connect(user)
               .placeMarginLimitOrder(priceWei, amountWei, isBuy);
             const rcpt = await tx.wait();
@@ -5625,7 +5705,7 @@ ${colors.brightRed}└───────────────────�
         } else {
           // Convert USDC position value to ALU using reference price
           const [bestBid, bestAsk] = await this.withConcurrency(() =>
-            this.withRpcRetry(() => this.contracts.orderBook.getBestPrices())
+            this.withRpcRetry(() => this.contracts.obView.getBestPrices())
           );
           const ref = isBuy ? bestAsk : bestBid;
           if (!ref || ref === 0n) throw new Error("No liquidity for market");
@@ -5636,7 +5716,7 @@ ${colors.brightRed}└───────────────────�
         const amountWei = ethers.parseUnits(String(amountAlu), 18);
         const { tx, rcpt } = await this.withConcurrency(() =>
           this.withRpcRetry(async () => {
-            const tx = await this.contracts.orderBook
+            const tx = await this.contracts.obPlace
               .connect(user)
               .placeMarginMarketOrderWithSlippage(
                 amountWei,
@@ -6010,14 +6090,19 @@ ${colors.brightRed}└───────────────────�
       case "LIQ_SNAP": {
         // Snapshot liquidation math directly via view calls (no events required)
         const ts = new Date().toLocaleTimeString();
-        const marketId = await this.withRpcRetry(() =>
-          this.contracts.orderBook.marketId()
-        );
+        const marketId = await this.withRpcRetry(async () => {
+          try {
+            const staticInfo = await this.contracts.obView.marketStatic();
+            return staticInfo[1];
+          } catch (e) {
+            return ethers.ZeroHash;
+          }
+        });
         const users = await this.withRpcRetry(() =>
           this.contracts.vault.getUsersWithPositionsInMarket(marketId)
         );
         const mark = await this.withRpcRetry(() =>
-          this.contracts.orderBook.calculateMarkPrice()
+          this.contracts.obPricing.calculateMarkPrice()
         );
         console.log(
           `${colors.dim}[${ts}]${colors.reset} ${colors.cyan}🔎 LIQ SNAP${
@@ -6073,7 +6158,6 @@ ${colors.brightRed}└───────────────────�
         }
         return "LIQ_SNAP";
       }
-
       case "LIQ_VERIFY": {
         const role = ethers.keccak256(ethers.toUtf8Bytes("ORDERBOOK_ROLE"));
         const [obAddr, hasRole] = await this.withRpcRetry(async () => {
@@ -6107,7 +6191,7 @@ ${colors.brightRed}└───────────────────�
         await this.contracts.vault.getUnifiedMarginSummary(
           this.currentUser?.address || ethers.ZeroAddress
         );
-      const [bestBid, bestAsk] = await this.contracts.orderBook.getBestPrices();
+      const [bestBid, bestAsk] = await this.contracts.obView.getBestPrices();
       console.log(
         colorText(
           `User: ${
@@ -6924,27 +7008,22 @@ ${colors.brightRed}└───────────────────�
       );
       console.log(gradient("═".repeat(80)));
 
-      // Resolve the market-specific order book
-      let orderBook;
+      // Resolve the market-specific order book address (no artifact needed)
+      let orderBookAddr = this.contracts.orderBookAddress;
       try {
-        const orderBookAddr = await this.contracts.vault.marketToOrderBook(
+        const mapped = await this.contracts.vault.marketToOrderBook(
           marketIdHex
         );
-        if (orderBookAddr && orderBookAddr !== ethers.ZeroAddress) {
-          const OrderBook = await ethers.getContractFactory("OrderBook");
-          orderBook = OrderBook.attach(orderBookAddr);
-        } else {
-          orderBook = this.contracts.orderBook;
+        if (mapped && mapped !== ethers.ZeroAddress) {
+          orderBookAddr = mapped;
         }
-      } catch (_) {
-        orderBook = this.contracts.orderBook;
-      }
+      } catch (_) {}
 
       // Snapshot order book depth
       let bidPrices, bidAmounts, askPrices, askAmounts;
       try {
         const depth = 10;
-        const data = await orderBook.getOrderBookDepth(depth);
+        const data = await this.contracts.obPricing.getOrderBookDepth(depth);
         bidPrices = data[0];
         bidAmounts = data[1];
         askPrices = data[2];
@@ -6956,8 +7035,8 @@ ${colors.brightRed}└───────────────────�
             colors.yellow
           )
         );
-        const bestBid = await orderBook.bestBid();
-        const bestAsk = await orderBook.bestAsk();
+        const bestBid = await this.contracts.obView.bestBid();
+        const bestAsk = await this.contracts.obView.bestAsk();
         bidPrices = [bestBid];
         bidAmounts = [0n];
         askPrices = [bestAsk];
@@ -6988,8 +7067,8 @@ ${colors.brightRed}└───────────────────�
       let bestBid = 0n,
         bestAsk = 0n;
       try {
-        bestBid = await orderBook.bestBid();
-        bestAsk = await orderBook.bestAsk();
+        bestBid = await this.contracts.obView.bestBid();
+        bestAsk = await this.contracts.obView.bestAsk();
       } catch (_) {}
       const midFloat =
         (toFloat6(bestBid) + toFloat6(bestAsk)) / 2 || newMarkPriceFloat;
@@ -7237,7 +7316,6 @@ ${colors.brightRed}└───────────────────�
       );
     }
   }
-
   async showMarketDetails(marketIdHex) {
     try {
       console.clear();
@@ -7265,29 +7343,19 @@ ${colors.brightRed}└───────────────────�
         spreadBps = 0n,
         valid = false;
       try {
-        if (orderBookAddr && orderBookAddr !== ethers.ZeroAddress) {
-          const OrderBook = await ethers.getContractFactory("OrderBook");
-          const ob = OrderBook.attach(orderBookAddr);
-          const data = await ob.getMarketPriceData();
-          mid = data[0];
-          bid = data[1];
-          ask = data[2];
-          last = data[3];
-          mark = data[4];
-          spread = data[5];
-          spreadBps = data[6];
-          valid = data[7];
-        } else {
-          const data = await this.contracts.orderBook.getMarketPriceData();
-          mid = data[0];
-          bid = data[1];
-          ask = data[2];
-          last = data[3];
-          mark = data[4];
-          spread = data[5];
-          spreadBps = data[6];
-          valid = data[7];
-        }
+        const pricing =
+          orderBookAddr && orderBookAddr !== ethers.ZeroAddress
+            ? await ethers.getContractAt("OBPricingFacet", orderBookAddr)
+            : this.contracts.obPricing;
+        const data = await pricing.getMarketPriceData();
+        mid = data[0];
+        bid = data[1];
+        ask = data[2];
+        last = data[3];
+        mark = data[4];
+        spread = data[5];
+        spreadBps = data[6];
+        valid = data[7];
       } catch (_) {}
 
       const fmt6 = (x) => {
@@ -8270,8 +8338,8 @@ ${colors.brightRed}└───────────────────�
     try {
       const [buyCount, sellCount] =
         await this.contracts.orderBook.getActiveOrdersCount();
-      const bestBid = await this.contracts.orderBook.bestBid();
-      const bestAsk = await this.contracts.orderBook.bestAsk();
+      const bestBid = await this.contracts.obView.bestBid();
+      const bestAsk = await this.contracts.obView.bestAsk();
 
       console.log(
         colorText(
@@ -8396,7 +8464,7 @@ ${colors.brightRed}└───────────────────�
 
       try {
         // Get comprehensive market data from OrderBook
-        const marketData = await this.contracts.orderBook.getMarketPriceData();
+        const marketData = await this.contracts.obPricing.getMarketPriceData();
         // Always display mark price if available, even when isValid is false
         try {
           if (marketData && marketData.markPrice && marketData.markPrice > 0) {
@@ -8508,11 +8576,11 @@ ${colors.brightRed}└───────────────────�
   // Helper function to get enhanced order book data with trader information
   async getEnhancedOrderBookDepth(depth) {
     let [bidPrices, bidAmounts, askPrices, askAmounts] =
-      await this.contracts.orderBook.getOrderBookDepth(depth);
+      await this.contracts.obPricing.getOrderBookDepth(depth);
 
     // Fallback: if arrays empty while best pointers indicate liquidity, scan from pointers
     try {
-      const [bestBid, bestAsk] = await this.contracts.orderBook.getBestPrices();
+      const [bestBid, bestAsk] = await this.contracts.obView.getBestPrices();
       const noBids = !bidPrices || bidPrices.length === 0;
       const noAsks = !askPrices || askPrices.length === 0;
       const haveBidPtr =
@@ -8521,7 +8589,7 @@ ${colors.brightRed}└───────────────────�
         typeof bestAsk === "bigint" ? bestAsk > 0n : Number(bestAsk) > 0;
       if ((noBids && haveBidPtr) || (noAsks && haveAskPtr)) {
         const alt =
-          await this.contracts.orderBook.getOrderBookDepthFromPointers(depth);
+          await this.contracts.obPricing.getOrderBookDepthFromPointers(depth);
         bidPrices = alt[0];
         bidAmounts = alt[1];
         askPrices = alt[2];
@@ -9265,10 +9333,11 @@ ${colors.brightRed}└───────────────────�
 
         // Pre-trade validation to prevent on-chain reverts
         try {
-          const [marginBps, leverageFlag] = await Promise.all([
-            this.contracts.orderBook.marginRequirementBps(),
-            this.contracts.orderBook.leverageEnabled(),
+          const [levInfo] = await Promise.all([
+            this.contracts.obView.getLeverageInfo(),
           ]);
+          const leverageFlag = levInfo[0];
+          const marginBps = levInfo[2];
 
           if (!leverageFlag && Number(marginBps) !== 10000) {
             console.log(
@@ -9312,7 +9381,7 @@ ${colors.brightRed}└───────────────────�
         }
 
         // Always use margin limit order path per new design
-        const tx = await this.contracts.orderBook
+        const tx = await this.contracts.obPlace
           .connect(this.currentUser)
           .placeMarginLimitOrder(priceWei, amountWei, isBuy);
 
@@ -9358,8 +9427,8 @@ ${colors.brightRed}└───────────────────�
 
     try {
       // Get current best price for reference (diamond view facet provides bestBid/bestAsk)
-      const bestBid = await this.contracts.orderBook.bestBid();
-      const bestAsk = await this.contracts.orderBook.bestAsk();
+      const bestBid = await this.contracts.obView.bestBid();
+      const bestAsk = await this.contracts.obView.bestAsk();
       const referencePrice = isBuy ? bestAsk : bestBid;
 
       if (
@@ -9541,11 +9610,11 @@ ${colors.brightRed}└───────────────────�
         const amountWei = ethers.parseUnits(amount, 18);
 
         // Preflight (static) call to capture revert reasons before sending tx
-        await this.contracts.orderBook
+        await this.contracts.obPlace
           .connect(this.currentUser)
           .placeMarginMarketOrder.staticCall(amountWei, isBuy);
 
-        const tx = await this.contracts.orderBook
+        const tx = await this.contracts.obPlace
           .connect(this.currentUser)
           .placeMarginMarketOrder(amountWei, isBuy);
 
@@ -9554,7 +9623,7 @@ ${colors.brightRed}└───────────────────�
 
         console.log(colorText("✅ Market order executed!", colors.brightGreen));
         try {
-          const ltp = await this.contracts.orderBook.lastTradePrice();
+          const ltp = await this.contracts.obView.lastTradePrice();
           console.log(
             colorText(`📊 Last Trade Price: $${formatPrice(ltp)}`, colors.cyan)
           );
@@ -11100,8 +11169,8 @@ ${colors.brightRed}└───────────────────�
 
         // Get current market data
         try {
-          const bestBid = await this.contracts.orderBook.bestBid();
-          const bestAsk = await this.contracts.orderBook.bestAsk();
+          const bestBid = await this.contracts.obView.bestBid();
+          const bestAsk = await this.contracts.obView.bestAsk();
           if (bestBid > 0 && bestAsk > 0) {
             const bidPrice = parseFloat(
               formatPriceWithValidation(bestBid, 6, 4, false)
@@ -11452,7 +11521,7 @@ ${colors.brightRed}└───────────────────�
           const amountWei = ethers.parseUnits(size.toString(), 18);
           const isBuy = !isLong; // If we're long, we sell to close. If we're short, we buy to close.
 
-          const tx = await this.contracts.orderBook
+          const tx = await this.contracts.obPlace
             .connect(this.currentUser)
             .placeMarginMarketOrder(amountWei, isBuy);
 
@@ -11628,7 +11697,7 @@ ${colors.brightRed}└───────────────────�
       }
 
       // Step 2: Check if there's existing liquidity
-      const [bestBid, bestAsk] = await this.contracts.orderBook.getBestPrices();
+      const [bestBid, bestAsk] = await this.contracts.obView.getBestPrices();
       const hasLiquidity = bestBid > 0n || bestAsk < ethers.MaxUint256;
 
       if (!hasLiquidity) {
@@ -11698,7 +11767,7 @@ ${colors.brightRed}└───────────────────�
         const amountWei = ethers.parseUnits(amount, 18);
 
         // Get expected fill amount
-        const filledAmountWei = await this.contracts.orderBook
+        const filledAmountWei = await this.contracts.obPlace
           .connect(this.currentUser)
           .placeMarginMarketOrderWithSlippage.staticCall(
             amountWei,
@@ -11707,7 +11776,7 @@ ${colors.brightRed}└───────────────────�
           );
 
         // Execute the actual order
-        const tx = await this.contracts.orderBook
+        const tx = await this.contracts.obPlace
           .connect(this.currentUser)
           .placeMarginMarketOrderWithSlippage(amountWei, true, slippageBps);
 

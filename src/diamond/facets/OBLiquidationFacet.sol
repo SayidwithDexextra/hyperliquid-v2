@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "../libraries/OrderBookStorage.sol";
 import "../libraries/LibDiamond.sol";
-import "../../OrderBook.sol";
+import "../interfaces/ICoreVault.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract OBLiquidationFacet {
@@ -23,9 +23,13 @@ contract OBLiquidationFacet {
     event LiquidationLiquidityCheck(bool isBuy, uint256 bestOppositePrice, bool hasLiquidity);
     event LiquidationPriceBounds(uint256 maxPrice, uint256 minPrice);
     event LiquidationResync(uint256 bestBidPrice, uint256 bestAskPrice);
+    event LiquidationMarketOrderAttempt(address indexed trader, uint256 amount, bool isBuy, uint256 markPrice);
     event LiquidationMarketOrderResult(address indexed trader, bool success, string reason);
     event LiquidationPositionRetrieved(address indexed trader, int256 size, uint256 marginLocked, int256 unrealizedPnL);
     event LiquidationConfigUpdated(bool scanOnTrade, bool debug);
+    event LiquidationSocializedLossAttempt(address indexed trader, bool isLong, string method);
+    event LiquidationSocializedLossResult(address indexed trader, bool success, string method);
+    event LiquidationMarginConfiscated(address indexed trader, uint256 marginAmount, uint256 penalty, address indexed liquidator);
     // Reward distribution + gap protection debug
     event DebugMakerContributionAdded(address indexed maker, uint256 notionalScaled, uint256 totalScaledAfter);
     event DebugRewardComputation(address indexed liquidatedUser, uint256 expectedPenalty, uint256 obBalance, uint256 rewardPool, uint256 makerCount, uint256 totalScaled);
@@ -158,6 +162,7 @@ contract OBLiquidationFacet {
             orderId: 0, trader: address(this), price: isBuy ? maxPrice : minPrice, amount: amount, isBuy: isBuy, timestamp: block.timestamp, nextOrderId: 0, marginRequired: 0, isMarginOrder: true
         });
         uint256 remaining = amount;
+        emit LiquidationMarketOrderAttempt(trader, amount, isBuy, markPrice);
         if (isBuy) { remaining = _matchBuyOrder(liqOrder, remaining, maxPrice); } else { remaining = _matchSellOrder(liqOrder, remaining, minPrice); }
 
         // If no fill within bounds but there is book liquidity, force cross

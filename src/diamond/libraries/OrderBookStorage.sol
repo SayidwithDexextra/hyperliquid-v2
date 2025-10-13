@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "../../OrderBook.sol";
+import "../interfaces/ICoreVault.sol";
 
 library OrderBookStorage {
     bytes32 internal constant STORAGE_SLOT = keccak256("hyperliquid.orderbook.storage.v1");

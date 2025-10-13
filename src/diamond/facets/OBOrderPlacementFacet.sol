@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "../libraries/OrderBookStorage.sol";
-import "../../OrderBook.sol"; // for interfaces/events reuse
+import "../interfaces/ICoreVault.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "../interfaces/IOBTradeExecutionFacet.sol";
 import "../interfaces/IOBLiquidationFacet.sol";
@@ -15,6 +15,19 @@ contract OBOrderPlacementFacet {
     event OrderPlaced(uint256 indexed orderId, address indexed trader, uint256 price, uint256 amount, bool isBuy, bool isMarginOrder);
     event OrderCancelled(uint256 indexed orderId, address indexed trader);
     event OrderModified(uint256 indexed oldOrderId, uint256 indexed newOrderId, address indexed trader, uint256 newPrice, uint256 newAmount);
+    // Legacy Market Order events for tooling parity
+    event MarketOrderAttempt(address indexed user, bool isBuy, uint256 amount, uint256 referencePrice, uint256 slippageBps);
+    event MarketOrderLiquidityCheck(bool isBuy, uint256 bestOppositePrice, bool hasLiquidity);
+    event MarketOrderPriceBounds(uint256 maxPrice, uint256 minPrice);
+    event MarketOrderMarginEstimation(uint256 worstCasePrice, uint256 estimatedMargin, uint256 availableCollateral);
+    event MarketOrderCreated(uint256 orderId, address indexed user, uint256 limitPrice, uint256 amount, bool isBuy);
+    event MarketOrderCompleted(uint256 filledAmount, uint256 remainingAmount);
+    // Legacy matching debug events for viewer parity
+    event MatchingStarted(address indexed buyer, uint256 remainingAmount, uint256 maxPrice, uint256 startingPrice);
+    event PriceLevelEntered(uint256 currentPrice, bool levelExists, uint256 totalAmountAtLevel);
+    event OrderMatchAttempt(uint256 indexed orderId, address indexed seller, uint256 sellOrderAmount, uint256 matchAmount);
+    event SlippageProtectionTriggered(uint256 currentPrice, uint256 maxPrice, uint256 remainingAmount);
+    event MatchingCompleted(address indexed buyer, uint256 originalAmount, uint256 filledAmount, uint256 remainingAmount);
 
     modifier validOrder(uint256 price, uint256 amount) {
         require(price > 0, "Price must be greater than 0");
@@ -47,8 +60,11 @@ contract OBOrderPlacementFacet {
         require(amount > 0, "Amount must be greater than 0");
         uint256 refPrice = isBuy ? s.bestAsk : s.bestBid;
         require(refPrice != 0, "OrderBook: no liquidity available");
+        emit MarketOrderAttempt(msg.sender, isBuy, amount, refPrice, s.maxSlippageBps);
+        emit MarketOrderLiquidityCheck(isBuy, refPrice, refPrice != 0);
         uint256 maxPrice = isBuy ? Math.mulDiv(refPrice, 10000 + s.maxSlippageBps, 10000) : type(uint256).max;
         uint256 minPrice = isBuy ? 0 : Math.mulDiv(refPrice, 10000 - s.maxSlippageBps, 10000);
+        emit MarketOrderPriceBounds(maxPrice, minPrice);
         uint256 filled = _placeMarket(msg.sender, amount, isBuy, false, maxPrice, minPrice);
         return filled;
     }
@@ -61,9 +77,13 @@ contract OBOrderPlacementFacet {
         uint256 worstCase = isBuy ? Math.mulDiv(refPrice2, 10000 + s.maxSlippageBps, 10000) : refPrice2;
         uint256 estMargin = _calculateMarginRequired(s, amount, worstCase, isBuy);
         uint256 available = s.vault.getAvailableCollateral(msg.sender);
+        emit MarketOrderAttempt(msg.sender, isBuy, amount, refPrice2, s.maxSlippageBps);
+        emit MarketOrderLiquidityCheck(isBuy, refPrice2, refPrice2 != 0);
+        emit MarketOrderMarginEstimation(worstCase, estMargin, available);
         require(available >= estMargin, "OrderBook: insufficient collateral for market order");
         uint256 maxPrice = isBuy ? worstCase : type(uint256).max;
         uint256 minPrice = isBuy ? 0 : Math.mulDiv(refPrice2, 10000 - s.maxSlippageBps, 10000);
+        emit MarketOrderPriceBounds(maxPrice, minPrice);
         uint256 filled = _placeMarket(msg.sender, amount, isBuy, true, maxPrice, minPrice);
         return filled;
     }
@@ -77,8 +97,11 @@ contract OBOrderPlacementFacet {
         require(amount > 0, "Amount must be greater than 0");
         uint256 refPrice = isBuy ? s.bestAsk : s.bestBid;
         require(refPrice != 0, "OrderBook: no liquidity available");
+        emit MarketOrderAttempt(msg.sender, isBuy, amount, refPrice, slippageBps);
+        emit MarketOrderLiquidityCheck(isBuy, refPrice, refPrice != 0);
         uint256 maxPrice = isBuy ? Math.mulDiv(refPrice, 10000 + slippageBps, 10000) : type(uint256).max;
         uint256 minPrice = isBuy ? 0 : Math.mulDiv(refPrice, 10000 - slippageBps, 10000);
+        emit MarketOrderPriceBounds(maxPrice, minPrice);
         return _placeMarket(msg.sender, amount, isBuy, false, maxPrice, minPrice);
     }
 
@@ -95,9 +118,13 @@ contract OBOrderPlacementFacet {
         uint256 worstCase = isBuy ? Math.mulDiv(refPrice, 10000 + slippageBps, 10000) : refPrice;
         uint256 estMargin = _calculateMarginRequired(s, amount, worstCase, isBuy);
         uint256 available = s.vault.getAvailableCollateral(msg.sender);
+        emit MarketOrderAttempt(msg.sender, isBuy, amount, refPrice, slippageBps);
+        emit MarketOrderLiquidityCheck(isBuy, refPrice, refPrice != 0);
+        emit MarketOrderMarginEstimation(worstCase, estMargin, available);
         require(available >= estMargin, "OrderBook: insufficient collateral for market order");
         uint256 maxPrice = isBuy ? worstCase : type(uint256).max;
         uint256 minPrice = isBuy ? 0 : Math.mulDiv(refPrice, 10000 - slippageBps, 10000);
+        emit MarketOrderPriceBounds(maxPrice, minPrice);
         return _placeMarket(msg.sender, amount, isBuy, true, maxPrice, minPrice);
     }
 
@@ -156,17 +183,20 @@ contract OBOrderPlacementFacet {
         returns (uint256)
     {
         uint256 currentPrice = s.bestAsk;
+        emit MatchingStarted(buyOrder.trader, remaining, buyOrder.price, currentPrice);
         if (currentPrice == 0 || currentPrice > buyOrder.price) {
             return remaining;
         }
         while (remaining > 0 && currentPrice != 0 && currentPrice <= buyOrder.price) {
             OrderBookStorage.PriceLevel storage level = s.sellLevels[currentPrice];
-            if (!level.exists) { currentPrice = _getNextSellPrice(s, currentPrice); continue; }
+            if (!level.exists) { emit PriceLevelEntered(currentPrice, false, 0); currentPrice = _getNextSellPrice(s, currentPrice); continue; }
+            emit PriceLevelEntered(currentPrice, true, level.totalAmount);
             uint256 currentOrderId = level.firstOrderId;
             while (remaining > 0 && currentOrderId != 0) {
                 OrderBookStorage.Order storage sellOrder = s.orders[currentOrderId];
                 uint256 nextSellOrderId = sellOrder.nextOrderId;
                 uint256 matchAmount = remaining < sellOrder.amount ? remaining : sellOrder.amount;
+                emit OrderMatchAttempt(currentOrderId, sellOrder.trader, sellOrder.amount, matchAmount);
                 IOBTradeExecutionFacet(address(this)).obExecuteTrade(
                     buyOrder.trader,
                     sellOrder.trader,
@@ -201,6 +231,8 @@ contract OBOrderPlacementFacet {
             }
             currentPrice = _getNextSellPrice(s, currentPrice);
         }
+        uint256 filledAmount = (buyOrder.amount > remaining) ? (buyOrder.amount - remaining) : 0;
+        emit MatchingCompleted(buyOrder.trader, buyOrder.amount, filledAmount, remaining);
         return remaining;
     }
 
@@ -211,12 +243,14 @@ contract OBOrderPlacementFacet {
         uint256 currentPrice = s.bestBid;
         while (remaining > 0 && currentPrice != 0 && currentPrice >= sellOrder.price) {
             OrderBookStorage.PriceLevel storage level = s.buyLevels[currentPrice];
-            if (!level.exists) { currentPrice = _getPrevBuyPrice(s, currentPrice); continue; }
+            if (!level.exists) { emit PriceLevelEntered(currentPrice, false, 0); currentPrice = _getPrevBuyPrice(s, currentPrice); continue; }
+            emit PriceLevelEntered(currentPrice, true, level.totalAmount);
             uint256 currentOrderId = level.firstOrderId;
             while (remaining > 0 && currentOrderId != 0) {
                 OrderBookStorage.Order storage buyOrder = s.orders[currentOrderId];
                 uint256 nextBuyOrderId = buyOrder.nextOrderId;
                 uint256 matchAmount = remaining < buyOrder.amount ? remaining : buyOrder.amount;
+                emit OrderMatchAttempt(currentOrderId, buyOrder.trader, buyOrder.amount, matchAmount);
                 IOBTradeExecutionFacet(address(this)).obExecuteTrade(
                     buyOrder.trader,
                     sellOrder.trader,
@@ -251,6 +285,8 @@ contract OBOrderPlacementFacet {
             }
             currentPrice = _getPrevBuyPrice(s, currentPrice);
         }
+        uint256 filledAmount2 = (sellOrder.amount > remaining) ? (sellOrder.amount - remaining) : 0;
+        emit MatchingCompleted(sellOrder.trader, sellOrder.amount, filledAmount2, remaining);
         return remaining;
     }
 
@@ -358,10 +394,12 @@ contract OBOrderPlacementFacet {
             marginRequired: 0,
             isMarginOrder: isMarginOrder
         });
+        emit MarketOrderCreated(orderId, trader, o.price, amount, isBuy);
         uint256 remaining = amount;
         if (isBuy) { remaining = _matchBuyOrder(s, o, remaining); } else { remaining = _matchSellOrder(s, o, remaining); }
         // No unreserve needed since we didn't reserve for market orders
         uint256 filled = amount > remaining ? (amount - remaining) : 0;
+        emit MarketOrderCompleted(filled, remaining);
         emit OrderPlaced(orderId, trader, o.price, filled, isBuy, isMarginOrder);
         return filled;
     }

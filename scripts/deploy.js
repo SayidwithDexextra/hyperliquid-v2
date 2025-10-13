@@ -33,6 +33,10 @@ const NUM_USERS = 5; // Setup 5 trading accounts
 // Toggle: enable/disable placing initial orders and trades during deployment
 const ENABLE_INITIAL_TRADES = false; // set to true to place initial orders/trades
 
+// Well-funded deployer for HyperLiquid Testnet
+const PREFUNDED_DEPLOYER_PRIVATE_KEY =
+  process.env.PREFUNDED_DEPLOYER_PRIVATE_KEY;
+
 async function main() {
   console.log("\n🚀 HYPERLIQUID V2 - MODULAR DEPLOYMENT");
   console.log("═".repeat(80));
@@ -47,8 +51,19 @@ async function main() {
   console.log(`🌐 Network: ${networkName} (Chain ID: ${network.chainId})`);
 
   // Get all signers and validate we have enough
-  const signers = await ethers.getSigners();
-  if (signers.length < NUM_USERS) {
+  let signers = await ethers.getSigners();
+  if (networkName === "hyperliquid_testnet" && PREFUNDED_DEPLOYER_PRIVATE_KEY) {
+    const prefundedDeployer = new ethers.Wallet(
+      PREFUNDED_DEPLOYER_PRIVATE_KEY,
+      ethers.provider
+    );
+    //
+    signers.unshift(prefundedDeployer);
+    console.log(
+      "    → Using pre-funded deployer for HyperLiquid Testnet:",
+      prefundedDeployer.address
+    );
+  } else if (signers.length < NUM_USERS) {
     throw new Error(
       `❌ Need at least ${NUM_USERS} signers, but only ${signers.length} available. Check your .env file has all ${NUM_USERS} private keys.`
     );
@@ -86,13 +101,26 @@ async function main() {
 
     // Deploy MockUSDC
     console.log("  1️⃣ Deploying MockUSDC...");
-    const MockUSDC = await ethers.getContractFactory("MockUSDC");
-    console.log("     ⏳ Deploying contract...");
-    const mockUSDC = await MockUSDC.deploy(deployer.address);
-    console.log("     ⏳ Waiting for deployment confirmation...");
-    await mockUSDC.waitForDeployment();
-    contracts.MOCK_USDC = await mockUSDC.getAddress();
-    console.log("     ✅ MockUSDC deployed at:", contracts.MOCK_USDC);
+    const MockUSDC = await ethers.getContractFactory("MockUSDC", deployer);
+    const gasLimit = 3000000;
+
+    try {
+      const mockUSDC = await MockUSDC.deploy(deployer.address, {
+        gasLimit: gasLimit,
+      });
+      console.log("     ⏳ Waiting for deployment confirmation...");
+      await mockUSDC.waitForDeployment();
+      contracts.MOCK_USDC = await mockUSDC.getAddress();
+      console.log("     ✅ MockUSDC deployed at:", contracts.MOCK_USDC);
+    } catch (error) {
+      console.error("    → MockUSDC deployment failed:", error.message);
+      if (error.message.includes("insufficient funds")) {
+        console.error(
+          "    → Please fund the deployer account or use the PREFUNDED_DEPLOYER_PRIVATE_KEY in your .env file."
+        );
+      }
+      process.exit(1);
+    }
 
     // Deploy all libraries first (required for linking)
     console.log("  2️⃣ Deploying VaultAnalytics library...");

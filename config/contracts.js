@@ -20,7 +20,59 @@
 if (!process.env.HARDHAT_NETWORK) {
   process.env.HARDHAT_NETWORK = "localhost";
 }
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
+const fs = require("fs");
+const path = require("path");
+
+// Function to load deployment addresses
+function loadDeploymentAddresses() {
+  const rawNetworkName =
+    process.env.HARDHAT_NETWORK || (network && network.name) || "localhost";
+  const networkName =
+    rawNetworkName === "hardhat" ? "localhost" : rawNetworkName;
+  const filePath = path.join(
+    __dirname,
+    `../deployments/${networkName}-deployment.json`
+  );
+
+  if (fs.existsSync(filePath)) {
+    console.log(`✅ Loading contract addresses from ${filePath}`);
+    const deployment = JSON.parse(fs.readFileSync(filePath, "utf8"));
+
+    const addresses = {};
+    const contractsField = deployment.contracts || deployment.addresses || {};
+
+    for (const [name, value] of Object.entries(contractsField)) {
+      // Handle different shapes: string address or { address: "0x..." }
+      if (typeof value === "string") {
+        addresses[name] = value;
+      } else if (value && typeof value === "object") {
+        if (typeof value.address === "string") {
+          addresses[name] = value.address;
+        } else if (typeof value.addr === "string") {
+          addresses[name] = value.addr;
+        }
+      }
+    }
+
+    return addresses;
+  } else {
+    console.warn(
+      `🚨 WARNING: Deployment file not found for network "${networkName}". Using default addresses.`
+    );
+    return {};
+  }
+}
+
+// Dynamically load contract addresses
+const DEPLOYMENT_ADDRESSES = loadDeploymentAddresses();
+
+// Allow refreshing addresses at runtime (useful if network was not ready at require time)
+function refreshAddresses() {
+  const loaded = loadDeploymentAddresses();
+  Object.assign(CONTRACT_ADDRESSES, loaded);
+  return CONTRACT_ADDRESSES;
+}
 
 // 📋 CONTRACT ADDRESSES - PRODUCTION MARGIN RELEASE DEPLOYMENT
 //
@@ -56,17 +108,18 @@ const { ethers } = require("hardhat");
 //
 const CONTRACT_ADDRESSES = {
   // Core contracts - MODULAR V2 DEPLOYMENT
-  TRADING_ROUTER: "0x9C85258d9A00C01d00ded98065ea3840dF06f09c",
-  CORE_VAULT: "0xa4d0806d597146df93796A38435ABB2a3cb96677", // Updated from CentralizedVault
-  FUTURES_MARKET_FACTORY: "0x084815D1330eCC3eF94193a19Ec222C0C73dFf2d",
+  // TRADING_ROUTER: "0x9C85258d9A00C01d00ded98065ea3840dF06f09c", // Example if not in deployment
+  // CORE_VAULT: "0x3F76468754fC1FA4a79C796C580824799281aCa0",
+  // FUTURES_MARKET_FACTORY: "0x95c85427fdC7d6F04C948895fFe3dc6F84798EeC",
 
   // Market-specific contracts (populated during deployment)
-  ORDERBOOK: "0xc56C7f10fE2f6A590758e213fDfb656009123C13", // BTC-USD market
-  BTC_ORDERBOOK: "0x413b1AfCa96a3df5A686d8BFBF93d30688a7f7D9",
-  ALUMINUM_ORDERBOOK: "0xc56C7f10fE2f6A590758e213fDfb656009123C13", // Temporary - using same as BTC
+  // ORDERBOOK: "0xFC27fc4786BE01510c3564117becD13fdB077bb3",
+  // BTC_ORDERBOOK: "0x413b1AfCa96a3df5A686d8BFBF93d30688a7f7D9",
+  // ALUMINUM_ORDERBOOK: "0xFC27fc4786BE01510c3564117becD13fdB077bb3",
 
   // Mock contracts
-  MOCK_USDC: "0xd8A9159c111D0597AD1b475b8d7e5A217a1d1d05",
+  // MOCK_USDC: "0x69bfB7DAB0135fB6cD3387CF411624d874B3c799",
+  ...DEPLOYMENT_ADDRESSES, // Dynamically loaded addresses will override any defaults
 };
 
 // 📋 CONTRACT NAMES - Maps to hardhat artifacts (MODULAR V2)
@@ -78,6 +131,10 @@ const CONTRACT_NAMES = {
   BTC_ORDERBOOK: "OrderBook",
   ALUMINUM_ORDERBOOK: "OrderBook",
   MOCK_USDC: "MockUSDC",
+  // Additional known contracts
+  VAULT_ANALYTICS: "VaultAnalytics",
+  POSITION_MANAGER: "PositionManager",
+  LIQUIDATION_MANAGER: "LiquidationManager",
 };
 
 // 📊 MARKET INFORMATION
@@ -101,7 +158,8 @@ const MARKET_INFO = {
   },
   ALUMINUM: {
     symbol: "ALU-USD",
-    marketId: "0xcfb474a6dd25f6021aa5db91a29aee86136e54d18b080595aa151bd409db6cbd",
+    marketId:
+      "0xc6348f46a4dac78005a64ff26ab0e3d114645a0d336494037e628c070eb137b4",
     name: "Aluminum Futures",
     orderBook: "0xADd379DA9113b1Ae623BCB155261bce40eEfF6e9",
     leverageEnabled: false,
@@ -157,8 +215,14 @@ const ROLES = {
  * @returns {Promise<Contract>} Contract instance
  */
 async function getContract(contractKey, options = {}) {
-  const address = CONTRACT_ADDRESSES[contractKey];
+  let address = CONTRACT_ADDRESSES[contractKey];
   const contractName = CONTRACT_NAMES[contractKey];
+
+  if (!address) {
+    // Try refreshing addresses in case network/init timing caused an empty load
+    refreshAddresses();
+    address = CONTRACT_ADDRESSES[contractKey];
+  }
 
   if (!address) {
     throw new Error(`❌ Contract address not found for: ${contractKey}`);
@@ -217,7 +281,11 @@ async function getCoreContracts(options = {}) {
  * @returns {string} Contract address
  */
 function getAddress(contractKey) {
-  const address = CONTRACT_ADDRESSES[contractKey];
+  let address = CONTRACT_ADDRESSES[contractKey];
+  if (!address) {
+    refreshAddresses();
+    address = CONTRACT_ADDRESSES[contractKey];
+  }
   if (!address) {
     throw new Error(`❌ Address not found for contract: ${contractKey}`);
   }
@@ -288,10 +356,17 @@ function validateAddresses() {
  * Display current contract configuration
  */
 function displayConfig() {
+  // Ensure we show latest addresses
+  refreshAddresses();
+
   console.log("\n📋 CURRENT CONTRACT CONFIGURATION:");
   console.log("═".repeat(60));
 
+  const isAddress = (v) =>
+    typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
+
   for (const [key, address] of Object.entries(CONTRACT_ADDRESSES)) {
+    if (!isAddress(address)) continue; // Only display address-like values
     const contractName = CONTRACT_NAMES[key] || "Unknown";
     console.log(`${key.padEnd(20)} │ ${contractName.padEnd(15)} │ ${address}`);
   }
@@ -491,6 +566,7 @@ module.exports = {
   getAddress,
   updateAddresses,
   validateAddresses,
+  refreshAddresses,
 
   // Configuration
   getNetworkConfig,
