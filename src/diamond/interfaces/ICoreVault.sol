@@ -11,6 +11,7 @@ interface ICoreVault {
     function transferCollateral(address from, address to, uint256 amount) external;
     function getAvailableCollateral(address user) external view returns (uint256);
     function updateMarkPrice(bytes32 marketId, uint256 price) external;
+    function settleMarket(bytes32 marketId, uint256 finalPrice) external;
     function payMakerLiquidationReward(address liquidatedUser, bytes32 marketId, address maker, uint256 amount) external;
     // Order reservation for margin orders
     function reserveMargin(address user, bytes32 orderId, bytes32 marketId, uint256 amount) external;
@@ -18,6 +19,8 @@ interface ICoreVault {
     function releaseExcessMargin(address user, bytes32 orderId, uint256 actualMarginNeeded) external;
     // Discovery helpers
     function getUsersWithPositionsInMarket(bytes32 marketId) external view returns (address[] memory users);
+    function marketSettled(bytes32 marketId) external view returns (bool);
+    function getTotalMarginLockedInMarket(bytes32 marketId) external view returns (uint256 totalLocked6);
 }
 
 

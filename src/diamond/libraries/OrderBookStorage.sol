@@ -77,6 +77,10 @@ struct Trade { uint256 tradeId; address buyer; address seller; uint256 price; ui
         uint256 liquidationExecutionCount;
         // Simple reentrancy guard for external calls from facets
         bool nonReentrantLock;
+        // Last 20 trades ring buffer (trade IDs)
+        uint256[20] lastTwentyTradeIds;
+        uint8 lastTwentyIndex; // next write position
+        uint8 lastTwentyCount; // number of valid entries (max 20)
     }
 
     function state() internal pure returns (State storage s) {

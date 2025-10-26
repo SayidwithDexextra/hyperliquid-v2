@@ -14,6 +14,26 @@ contract OBTradeExecutionFacet {
     event TradeExecutionCompleted(address indexed buyer, address indexed seller, uint256 price, uint256 amount);
     event FeesDeducted(address indexed buyer, uint256 buyerFee, address indexed seller, uint256 sellerFee);
     event PriceUpdated(uint256 lastTradePrice, uint256 currentMarkPrice);
+    function getLastTwentyTrades() external view returns (OrderBookStorage.Trade[] memory tradeData) {
+        OrderBookStorage.State storage s = OrderBookStorage.state();
+        uint256 count = s.lastTwentyCount;
+        tradeData = new OrderBookStorage.Trade[](count);
+        if (count == 0) return tradeData;
+        // Read from most recent (index-1) backwards, wrapping around, returning in chronological (oldest->newest)
+        // Build temp array newest->oldest then reverse to keep gas small on writes
+        OrderBookStorage.Trade[] memory tmp = new OrderBookStorage.Trade[](count);
+        uint8 idx = s.lastTwentyIndex;
+        for (uint256 i = 0; i < count; i++) {
+            uint8 readIdx;
+            unchecked { readIdx = (idx + 20 - 1 - uint8(i)) % 20; }
+            uint256 tradeId = s.lastTwentyTradeIds[readIdx];
+            tmp[i] = s.trades[tradeId];
+        }
+        // Reverse tmp into chronological order
+        for (uint256 j = 0; j < count; j++) {
+            tradeData[j] = tmp[count - 1 - j];
+        }
+    }
     // Legacy liquidation & margin events for parity
     event LiquidationTradeDetected(bool isLiquidationTrade, address liquidationTarget, bool liquidationClosesShort);
     event MarginUpdatesStarted(bool isLiquidationTrade);
@@ -128,6 +148,13 @@ contract OBTradeExecutionFacet {
         s.userTradeIds[seller].push(tradeId);
         s.totalTradeCount += 1;
         s.nextTradeId = tradeId + 1;
+
+        // Update ring buffer of last 20 trades (per contract/market)
+        uint8 idx = s.lastTwentyIndex;
+        s.lastTwentyTradeIds[idx] = tradeId;
+        unchecked { idx = (idx + 1) % 20; }
+        s.lastTwentyIndex = idx;
+        if (s.lastTwentyCount < 20) { s.lastTwentyCount += 1; }
 
         // Price + mark
         s.lastTradePrice = price;

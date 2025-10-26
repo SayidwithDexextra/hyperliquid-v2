@@ -22,6 +22,263 @@
 const { ethers } = require("hardhat");
 const fs = require("fs");
 const path = require("path");
+// Load environment (prefer .env.local at repo root, then default .env)
+try {
+  require("dotenv").config({
+    path: path.resolve(__dirname, "../../.env.local"),
+  });
+} catch (_) {}
+try {
+  require("dotenv").config();
+} catch (_) {}
+const { createClient } = require("@supabase/supabase-js");
+
+function getSupabaseClient() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !serviceKey) return null;
+  return createClient(url, serviceKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+}
+
+async function saveMarketToSupabase(params) {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    console.log("  ⚠️  Supabase env not configured. Skipping DB save.");
+    return;
+  }
+
+  const {
+    marketIdentifier,
+    symbol,
+    name,
+    description,
+    category,
+    decimals,
+    minimumOrderSize,
+    requiresKyc = false,
+    settlementDate,
+    tradingEndDate = null,
+    dataRequestWindowSeconds,
+    autoSettle = true,
+    oracleProvider = null,
+    initialOrder,
+    chainId,
+    networkName,
+    creatorWalletAddress,
+    bannerImageUrl = null,
+    iconImageUrl = null,
+    supportingPhotoUrls = [],
+    // deployment info
+    marketAddress,
+    factoryAddress,
+    centralVaultAddress,
+    orderRouterAddress = null,
+    positionManagerAddress,
+    liquidationManagerAddress,
+    vaultAnalyticsAddress,
+    usdcTokenAddress,
+    umaOracleManagerAddress = null,
+    marketIdBytes32,
+    transactionHash = null,
+    blockNumber = null,
+    gasUsed = null,
+  } = params;
+
+  // 1) Find existing by market_identifier; if network differs, use network-specific identifier
+  let effectiveMarketIdentifier = marketIdentifier;
+  const { data: existing, error: findErr } = await supabase
+    .from("markets")
+    .select("id, network, market_identifier")
+    .eq("market_identifier", marketIdentifier)
+    .limit(1)
+    .maybeSingle();
+  if (findErr) throw findErr;
+
+  let marketIdUuid = existing?.id || null;
+
+  // If an existing row is for a different network, avoid clobbering it by creating/finding a network-suffixed identifier
+  if (
+    existing &&
+    existing.network &&
+    networkName &&
+    existing.network !== networkName
+  ) {
+    const suffix = String(networkName)
+      .toUpperCase()
+      .replace(/[^A-Z0-9_-]/g, "_");
+    const altIdentifier = `${marketIdentifier}-${suffix}`;
+    const { data: alt, error: altErr } = await supabase
+      .from("markets")
+      .select("id")
+      .eq("market_identifier", altIdentifier)
+      .limit(1)
+      .maybeSingle();
+    if (altErr) throw altErr;
+    if (alt?.id) {
+      effectiveMarketIdentifier = altIdentifier;
+      marketIdUuid = alt.id;
+      console.log(
+        "  ℹ️  Using existing network-specific market:",
+        effectiveMarketIdentifier
+      );
+    } else {
+      effectiveMarketIdentifier = altIdentifier;
+      marketIdUuid = null; // force create
+      console.log(
+        "  ℹ️  Creating network-specific market:",
+        effectiveMarketIdentifier
+      );
+    }
+  }
+
+  // 2) Create if missing via RPC (ensures defaults and RLS compatibility)
+  if (!marketIdUuid) {
+    const { data: createdId, error: createErr } = await supabase.rpc(
+      "create_market",
+      {
+        p_market_identifier: effectiveMarketIdentifier,
+        p_symbol: symbol,
+        p_name: name,
+        p_description: description,
+        p_category: category,
+        p_decimals: decimals,
+        p_minimum_order_size: minimumOrderSize,
+        p_requires_kyc: requiresKyc,
+        p_settlement_date: new Date(settlementDate * 1000).toISOString(),
+        p_trading_end_date: tradingEndDate,
+        p_data_request_window_seconds: dataRequestWindowSeconds,
+        p_auto_settle: autoSettle,
+        p_oracle_provider: oracleProvider,
+        p_initial_order: initialOrder,
+        p_chain_id: chainId,
+        p_network: networkName,
+        p_creator_wallet_address: creatorWalletAddress,
+        p_banner_image_url: bannerImageUrl,
+        p_icon_image_url: iconImageUrl,
+        p_supporting_photo_urls: supportingPhotoUrls,
+      }
+    );
+    if (createErr) {
+      console.log(
+        "  ℹ️  RPC create failed, falling back to direct insert:",
+        createErr?.message || createErr
+      );
+      const insertPayload = {
+        market_identifier: effectiveMarketIdentifier,
+        symbol,
+        name,
+        description,
+        category,
+        decimals,
+        minimum_order_size: minimumOrderSize,
+        tick_size: 0.01,
+        requires_kyc: requiresKyc,
+        settlement_date: new Date(settlementDate * 1000).toISOString(),
+        trading_end_date: tradingEndDate,
+        data_request_window_seconds: dataRequestWindowSeconds,
+        auto_settle: autoSettle,
+        oracle_provider: oracleProvider,
+        initial_order: initialOrder,
+        chain_id: chainId,
+        network: networkName,
+        creator_wallet_address: creatorWalletAddress,
+        banner_image_url: bannerImageUrl,
+        icon_image_url: iconImageUrl,
+        supporting_photo_urls: supportingPhotoUrls,
+      };
+      const { data: inserted, error: insertErr } = await supabase
+        .from("markets")
+        .insert(insertPayload)
+        .select("id")
+        .single();
+      if (insertErr) throw insertErr;
+      marketIdUuid = inserted.id;
+      console.log(
+        "  ✅ Supabase: market created (direct insert UUID)",
+        marketIdUuid
+      );
+    } else {
+      marketIdUuid = createdId;
+      console.log("  ✅ Supabase: market created (UUID)", marketIdUuid);
+    }
+  } else {
+    console.log(
+      "  ℹ️  Supabase: market exists (UUID)",
+      marketIdUuid,
+      "(identifier:",
+      effectiveMarketIdentifier + ")"
+    );
+  }
+
+  // 3) Update deployment info: prefer RPC except on localhost by default or when disabled
+  const rawUseRpc = process.env.SUPABASE_USE_RPC_UPDATE;
+  let useRpc;
+  if (rawUseRpc === undefined) {
+    // Default: disable RPC on localhost (to avoid schema cache issues), enable elsewhere
+    useRpc = (params.networkName || "").toLowerCase() !== "localhost";
+  } else {
+    const v = String(rawUseRpc).toLowerCase();
+    useRpc = v === "true" || v === "1" || v === "yes" || v === "on";
+  }
+
+  if (useRpc) {
+    const { error: updateErr } = await supabase.rpc(
+      "update_market_deployment",
+      {
+        p_market_id: marketIdUuid,
+        p_market_address: marketAddress,
+        p_factory_address: factoryAddress,
+        p_central_vault_address: centralVaultAddress,
+        p_order_router_address: orderRouterAddress,
+        p_position_manager_address: positionManagerAddress,
+        p_liquidation_manager_address: liquidationManagerAddress,
+        p_vault_analytics_address: vaultAnalyticsAddress,
+        p_usdc_token_address: usdcTokenAddress,
+        p_uma_oracle_manager_address: umaOracleManagerAddress,
+        p_market_id_bytes32: marketIdBytes32,
+        p_transaction_hash: transactionHash,
+        p_block_number: blockNumber,
+        p_gas_used: gasUsed ? Number(gasUsed) : null,
+      }
+    );
+    if (!updateErr) {
+      console.log("  ✅ Supabase: deployment info updated (RPC)");
+      return;
+    }
+    console.log(
+      "  ℹ️  RPC update failed, falling back to direct markets update:",
+      updateErr?.message || updateErr
+    );
+  }
+
+  // Fallback or chosen path: direct table update using service role
+  const directUpdate = {
+    market_address: marketAddress,
+    factory_address: factoryAddress,
+    central_vault_address: centralVaultAddress,
+    order_router_address: orderRouterAddress,
+    position_manager_address: positionManagerAddress,
+    liquidation_manager_address: liquidationManagerAddress,
+    vault_analytics_address: vaultAnalyticsAddress,
+    usdc_token_address: usdcTokenAddress,
+    uma_oracle_manager_address: umaOracleManagerAddress,
+    market_id_bytes32: marketIdBytes32,
+    deployment_transaction_hash: transactionHash,
+    deployment_block_number: blockNumber != null ? Number(blockNumber) : null,
+    deployment_gas_used: gasUsed ? Number(gasUsed) : null,
+    deployed_at: new Date().toISOString(),
+    market_status: "ACTIVE",
+    deployment_status: "DEPLOYED",
+  };
+  const { error: tblUpdErr } = await supabase
+    .from("markets")
+    .update(directUpdate)
+    .eq("id", marketIdUuid);
+  if (tblUpdErr) throw tblUpdErr;
+  console.log("  ✅ Supabase: deployment info updated (direct table update)");
+}
 
 // Configuration
 const USDC_PER_USER = "10000"; // 10,000 USDC per user
@@ -38,6 +295,7 @@ const PREFUNDED_DEPLOYER_PRIVATE_KEY =
   process.env.PREFUNDED_DEPLOYER_PRIVATE_KEY;
 
 async function main() {
+  let mockUSDC, coreVault; // <-- HOIST TO TOP
   console.log("\n🚀 HYPERLIQUID V2 - MODULAR DEPLOYMENT");
   console.log("═".repeat(80));
   console.log(
@@ -105,7 +363,7 @@ async function main() {
     const gasLimit = 3000000;
 
     try {
-      const mockUSDC = await MockUSDC.deploy(deployer.address, {
+      mockUSDC = await MockUSDC.deploy(deployer.address, {
         gasLimit: gasLimit,
       });
       console.log("     ⏳ Waiting for deployment confirmation...");
@@ -151,10 +409,7 @@ async function main() {
         PositionManager: contracts.POSITION_MANAGER,
       },
     });
-    const coreVault = await CoreVault.deploy(
-      contracts.MOCK_USDC,
-      deployer.address
-    );
+    coreVault = await CoreVault.deploy(contracts.MOCK_USDC, deployer.address);
     await coreVault.waitForDeployment();
     contracts.CORE_VAULT = await coreVault.getAddress();
     console.log("     ✅ CoreVault deployed at:", contracts.CORE_VAULT);
@@ -219,6 +474,9 @@ async function main() {
       "OBLiquidationFacet"
     );
     const OBViewFacet = await ethers.getContractFactory("OBViewFacet");
+    const OBSettlementFacet = await ethers.getContractFactory(
+      "OBSettlementFacet"
+    );
 
     const initFacet = await OrderBookInitFacet.deploy();
     await initFacet.waitForDeployment();
@@ -234,6 +492,8 @@ async function main() {
     await liqFacet.waitForDeployment();
     const viewFacet = await OBViewFacet.deploy();
     await viewFacet.waitForDeployment();
+    const settlementFacet = await OBSettlementFacet.deploy();
+    await settlementFacet.waitForDeployment();
 
     const initAddr = await initFacet.getAddress();
     const adminAddr = await adminFacet.getAddress();
@@ -241,6 +501,7 @@ async function main() {
     const placementAddr = await placementFacet.getAddress();
     const execAddr = await execFacet.getAddress();
     const liqAddr = await liqFacet.getAddress();
+    const settlementAddr = await settlementFacet.getAddress();
 
     console.log("     ✅ Facets deployed:");
     console.log("        init:", initAddr);
@@ -249,6 +510,7 @@ async function main() {
     console.log("        placement:", placementAddr);
     console.log("        execution:", execAddr);
     console.log("        liquidation:", liqAddr);
+    console.log("        settlement:", settlementAddr);
 
     // Set conservative defaults: 100% margin, 0 bps trading fee (no fees)
     try {
@@ -377,6 +639,11 @@ async function main() {
       action: FacetCutAction.Add,
       functionSelectors: selectors(viewFacet.interface),
     });
+    cut.push({
+      facetAddress: settlementAddr,
+      action: FacetCutAction.Add,
+      functionSelectors: selectors(settlementFacet.interface),
+    });
 
     const createTx = await factory.createFuturesMarketDiamond(
       marketSymbol,
@@ -465,6 +732,92 @@ async function main() {
     // Grant SETTLEMENT_ROLE to the Diamond OB
     await coreVault.grantRole(SETTLEMENT_ROLE, contracts.ALUMINUM_ORDERBOOK);
     console.log("     ✅ SETTLEMENT_ROLE granted to OrderBook");
+
+    // ============================================
+    // STEP 3b: SAVE MARKET TO SUPABASE (Testnet + opt-in for localhost)
+    // ============================================
+    const _saveLocalTgl = String(
+      process.env.SAVE_TO_SUPABASE_LOCALHOST || ""
+    ).toLowerCase();
+    const saveOnLocalhost =
+      _saveLocalTgl === "true" ||
+      _saveLocalTgl === "1" ||
+      _saveLocalTgl === "yes" ||
+      _saveLocalTgl === "on";
+
+    const shouldSaveToSupabase =
+      networkName === "hyperliquid" ||
+      networkName === "hyperliquid_testnet" ||
+      (networkName === "localhost" && saveOnLocalhost);
+
+    if (shouldSaveToSupabase) {
+      try {
+        console.log(
+          `\n🗄️  Saving market to Supabase (network=${networkName})...`
+        );
+        const decimals = Number(process.env.DEFAULT_MARKET_DECIMALS || 8);
+        const minOrder = Number(process.env.DEFAULT_MINIMUM_ORDER_SIZE || 0.1);
+        const windowSec = Number(
+          process.env.DEFAULT_DATA_REQUEST_WINDOW_SECONDS || 3600
+        );
+        const initialOrder = {
+          metricUrl,
+          startPrice: String(ethers.formatUnits(startPrice, 6)),
+          dataSource,
+          tags,
+        };
+        await saveMarketToSupabase({
+          marketIdentifier: marketSymbol,
+          symbol: marketSymbol,
+          name: "Aluminum Futures",
+          description:
+            networkName === "localhost"
+              ? "Aluminum futures (localhost test save)."
+              : "Aluminum futures on HyperLiquid Testnet.",
+          category: "COMMODITIES",
+          decimals,
+          minimumOrderSize: minOrder,
+          requiresKyc: false,
+          settlementDate,
+          tradingEndDate: null,
+          dataRequestWindowSeconds: windowSec,
+          autoSettle: true,
+          oracleProvider: null,
+          initialOrder,
+          chainId: Number(network.chainId),
+          networkName,
+          creatorWalletAddress: deployer.address,
+          bannerImageUrl: null,
+          iconImageUrl: null,
+          supportingPhotoUrls: [],
+          marketAddress: contracts.ALUMINUM_ORDERBOOK,
+          factoryAddress: contracts.FUTURES_MARKET_FACTORY,
+          centralVaultAddress: contracts.CORE_VAULT,
+          orderRouterAddress: null,
+          positionManagerAddress: contracts.POSITION_MANAGER,
+          liquidationManagerAddress: contracts.LIQUIDATION_MANAGER,
+          vaultAnalyticsAddress: contracts.VAULT_ANALYTICS,
+          usdcTokenAddress: contracts.MOCK_USDC,
+          umaOracleManagerAddress: null,
+          marketIdBytes32: actualMarketId,
+          transactionHash: receipt?.hash || null,
+          blockNumber: receipt?.blockNumber || null,
+          gasUsed: receipt?.gasUsed?.toString?.() || null,
+        });
+      } catch (e) {
+        console.log("  ⚠️  Supabase save failed:", e?.message || e);
+      }
+    } else {
+      if (networkName === "localhost") {
+        console.log(
+          "\nℹ️  Skipping Supabase save on localhost (SAVE_TO_SUPABASE_LOCALHOST is not truthy)"
+        );
+      } else {
+        console.log(
+          "\nℹ️  Skipping Supabase save (network not supported for Supabase saving)"
+        );
+      }
+    }
 
     // Verify role assignments and market registration
     try {

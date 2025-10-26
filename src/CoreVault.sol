@@ -135,6 +135,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     mapping(bytes32 => uint256) public marketMarkPrices;
     // Bad debt per market when winners cannot fully cover a shortfall (USDC, 6 decimals)
     mapping(bytes32 => uint256) public marketBadDebt;
+    // Settlement status per market (finalized at a terminal price)
+    mapping(bytes32 => bool) public marketSettled;
     // ===== Dynamic Maintenance Margin (MMR) Parameters =====
     // BASE_MMR_BPS (default 10%) + PENALTY_MMR_BPS (default 10%) + f(fill_ratio) capped by MAX_MMR_BPS (default 50%)
     uint256 public baseMmrBps = 1000;           // 10% buffer
@@ -181,6 +183,8 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
     event HaircutApplied(address indexed user, bytes32 indexed marketId, uint256 debitAmount, uint256 collateralAfter);
     event BadDebtRecorded(bytes32 indexed marketId, uint256 amount, address indexed liquidatedUser);
     event BadDebtOffset(bytes32 indexed marketId, uint256 amount, uint256 remainingBadDebt);
+    // Settlement completion (oracle-agnostic, uses provided final price)
+    event VaultMarketSettled(bytes32 indexed marketId, uint256 finalPrice, uint256 totalProfit6, uint256 totalLoss6, uint256 badDebt6);
     // Debug: Detailed liquidation eligibility check
     event DebugIsLiquidatable(
         address indexed user,
@@ -349,7 +353,26 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
 
         // Handle realized P&L
         if (result.realizedPnL != 0) {
+            // Always record to realized PnL ledger (can be negative)
             userRealizedPnL[user] += result.realizedPnL;
+
+            if (result.realizedPnL < 0) {
+                // Debit realized losses directly from collateral (6 decimals), mirroring settlement behavior.
+                // Convert 18d PnL to 6d loss amount.
+                int256 loss6Signed = result.realizedPnL / int256(DECIMAL_SCALE); // negative
+                uint256 loss6 = uint256(-loss6Signed);
+                if (loss6 > 0) {
+                    uint256 balance = userCollateral[user];
+                    if (balance >= loss6) {
+                        userCollateral[user] = balance - loss6;
+                    } else {
+                        uint256 shortfall = loss6 - balance;
+                        userCollateral[user] = 0;
+                        marketBadDebt[marketId] += shortfall;
+                        emit BadDebtRecorded(marketId, shortfall, user);
+                    }
+                }
+            }
         }
         
         // Update market IDs
@@ -472,6 +495,10 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
                 realizedPnLAdj = 0;
             }
             if (anyUnderLiquidation && realizedPnLAdj < 0) {
+                realizedPnLAdj = 0;
+            }
+            // Avoid double-counting realized losses in available collateral; losses are already debited from collateral
+            if (realizedPnLAdj < 0) {
                 realizedPnLAdj = 0;
             }
             int256 realizedPnL6 = realizedPnLAdj / int256(DECIMAL_SCALE);
@@ -637,6 +664,23 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
             });
         }
         return VaultAnalytics.getTotalMarginUsed(positions);
+    }
+
+    /**
+     * @dev Aggregate total margin locked in a specific market across all users (USDC, 6 decimals).
+     *      Intended for off-chain analytics and admin dashboards; may be gas-expensive on-chain.
+     */
+    function getTotalMarginLockedInMarket(bytes32 marketId) external view returns (uint256 totalLocked6) {
+        address[] memory usersWithPositions = _getUsersWithPositionsInMarket(marketId);
+        for (uint256 u = 0; u < usersWithPositions.length; u++) {
+            PositionManager.Position[] storage positions = userPositions[usersWithPositions[u]];
+            for (uint256 i = 0; i < positions.length; i++) {
+                if (positions[i].marketId == marketId && positions[i].size != 0) {
+                    totalLocked6 += positions[i].marginLocked;
+                }
+            }
+        }
+        return totalLocked6;
     }
 
     function getUserPositions(address user) external view returns (PositionManager.Position[] memory) {
@@ -876,7 +920,7 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
         uint256 available = getAvailableCollateral(user);
         require(available >= amount, "insufficient collateral");
 
-        // Ensure not double-reserving same orderId
+        // Ensure not double-reserving same reservation id (can be namespaced by caller)
         VaultAnalytics.PendingOrder[] storage orders = userPendingOrders[user];
         for (uint256 i = 0; i < orders.length; i++) {
             require(orders[i].orderId != orderId, "already reserved");
@@ -950,6 +994,111 @@ contract CoreVault is AccessControl, ReentrancyGuard, Pausable {
 
     function updateMarkPrice(bytes32 marketId, uint256 price) external onlyRole(SETTLEMENT_ROLE) {
         marketMarkPrices[marketId] = price;
+    }
+
+    /**
+     * @dev Generic market settlement: finalize all user positions in a market at a provided final price.
+     *      - Oracle-agnostic: caller provides the terminal price (6 decimals)
+     *      - Realizes PnL to userRealizedPnL (18 decimals) for winners
+     *      - Deducts losses directly from userCollateral for losers (up to balance), recording bad debt if needed
+     *      - Releases all locked margin by removing positions in the market
+     *
+     * Industry-standard behavior: payout per position becomes marginLocked + PnL - accrued haircut.
+     * Implementation leverages the ledger model:
+     *   deltaCollateral6 = PnL6 - haircut6
+     *   - if positive: credit to realized PnL (withdrawable profits)
+     *   - if negative: debit user collateral; shortfall recorded as market bad debt
+     */
+    function settleMarket(bytes32 marketId, uint256 finalPrice) external onlyRole(SETTLEMENT_ROLE) nonReentrant {
+        require(marketToOrderBook[marketId] != address(0), "market!");
+        require(!marketSettled[marketId], "settled");
+        require(finalPrice > 0, "!price");
+
+        // Persist terminal price for the market
+        marketMarkPrices[marketId] = finalPrice;
+
+        // Aggregate accounting for transparency
+        uint256 totalProfit6 = 0;
+        uint256 totalLoss6 = 0;
+        uint256 badDebt6Total = 0;
+
+        // Gather all users with positions in this market
+        address[] memory users = _getUsersWithPositionsInMarket(marketId);
+        for (uint256 u = 0; u < users.length; u++) {
+            address user = users[u];
+            PositionManager.Position[] storage positions = userPositions[user];
+
+            // Iterate and remove positions for this market using swap-and-pop
+            uint256 i = 0;
+            while (i < positions.length) {
+                if (positions[i].marketId != marketId) {
+                    unchecked { i++; }
+                    continue;
+                }
+
+                // Compute PnL at final price
+                int256 priceDiff = int256(finalPrice) - int256(positions[i].entryPrice);
+                int256 pnl18 = (priceDiff * positions[i].size) / int256(TICK_PRECISION);
+                int256 pnl6 = pnl18 / int256(DECIMAL_SCALE);
+
+                // Accrued haircut on this position (6 decimals)
+                uint256 haircut6 = positions[i].socializedLossAccrued6;
+
+                // Changes to user's ledger relative to returning locked margin
+                // Positive -> profit to realized PnL; Negative -> debit from collateral
+                int256 deltaCollateral6 = pnl6 - int256(haircut6);
+                if (deltaCollateral6 > 0) {
+                    uint256 profit6 = uint256(deltaCollateral6);
+                    userRealizedPnL[user] += int256(profit6) * int256(DECIMAL_SCALE);
+                    totalProfit6 += profit6;
+
+                    // Reduce user's cumulative haircut ledger if any
+                    uint256 ledger = userSocializedLoss[user];
+                    if (ledger > 0) {
+                        uint256 applied = haircut6 <= ledger ? haircut6 : ledger;
+                        userSocializedLoss[user] = ledger - applied;
+                    }
+                } else if (deltaCollateral6 < 0) {
+                    // Record net realized loss (PnL - haircut) to realized PnL ledger (18 decimals)
+                    userRealizedPnL[user] += int256(deltaCollateral6) * int256(DECIMAL_SCALE);
+                    uint256 loss6 = uint256(-deltaCollateral6);
+                    totalLoss6 += loss6;
+                    uint256 balance = userCollateral[user];
+                    if (balance >= loss6) {
+                        userCollateral[user] = balance - loss6;
+                    } else {
+                        uint256 shortfall = loss6 - balance;
+                        userCollateral[user] = 0;
+                        marketBadDebt[marketId] += shortfall;
+                        badDebt6Total += shortfall;
+                        emit BadDebtRecorded(marketId, shortfall, user);
+                    }
+                }
+
+                // Release locked margin by removing the position
+                uint256 locked = positions[i].marginLocked;
+                if (locked > 0) {
+                    if (totalMarginLocked >= locked) {
+                        totalMarginLocked -= locked;
+                    } else {
+                        totalMarginLocked = 0;
+                    }
+                }
+
+                // Remove position via swap & pop
+                if (i < positions.length - 1) {
+                    positions[i] = positions[positions.length - 1];
+                }
+                positions.pop();
+                // Do not increment i; we need to evaluate the swapped-in element
+            }
+
+            // Remove marketId reference from user's index list (best-effort)
+            PositionManager.removeMarketIdFromUser(userMarketIds[user], marketId);
+        }
+
+        marketSettled[marketId] = true;
+        emit VaultMarketSettled(marketId, finalPrice, totalProfit6, totalLoss6, badDebt6Total);
     }
 
     // ============ ADL Configuration ============

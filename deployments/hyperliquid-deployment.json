@@ -1,6 +1,6 @@
 {
-  "network": "hyperliquid_testnet",
-  "chainId": 998,
+  "network": "hyperliquid",
+  "chainId": 999,
   "timestamp": "2025-10-15T22:50:08.562Z",
   "contracts": {
     "MOCK_USDC": "0x779d7401B73Ac1d3ceAC3693f5401D2ad1058b8D",

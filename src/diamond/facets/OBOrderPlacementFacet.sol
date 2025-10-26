@@ -6,6 +6,7 @@ import "../interfaces/ICoreVault.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "../interfaces/IOBTradeExecutionFacet.sol";
 import "../interfaces/IOBLiquidationFacet.sol";
+import "../libraries/LibDiamond.sol";
 
 contract OBOrderPlacementFacet {
     using Math for uint256;
@@ -28,6 +29,7 @@ contract OBOrderPlacementFacet {
     event OrderMatchAttempt(uint256 indexed orderId, address indexed seller, uint256 sellOrderAmount, uint256 matchAmount);
     event SlippageProtectionTriggered(uint256 currentPrice, uint256 maxPrice, uint256 remainingAmount);
     event MatchingCompleted(address indexed buyer, uint256 originalAmount, uint256 filledAmount, uint256 remainingAmount);
+    event SelfCrossNetted(address indexed user, uint256 price, uint256 amount, bool aggressorIsBuy);
 
     modifier validOrder(uint256 price, uint256 amount) {
         require(price > 0, "Price must be greater than 0");
@@ -35,9 +37,26 @@ contract OBOrderPlacementFacet {
         _;
     }
 
+    modifier onlyOwner() {
+        LibDiamond.enforceIsContractOwner();
+        _;
+    }
+
+    modifier marketActive() {
+        OrderBookStorage.State storage s = OrderBookStorage.state();
+        require(!s.vault.marketSettled(s.marketId), "OB: settled");
+        _;
+    }
+
+    // Compose a reservation ID unique per (market, trader, orderId)
+    function _reservationId(OrderBookStorage.State storage s, address trader, uint256 orderId) private view returns (bytes32) {
+        return keccak256(abi.encodePacked(s.marketId, trader, orderId));
+    }
+
     function placeLimitOrder(uint256 price, uint256 amount, bool isBuy)
         external
         validOrder(price, amount)
+        marketActive
         returns (uint256 orderId)
     {
         return _placeLimitOrder(msg.sender, price, amount, isBuy, false, 0);
@@ -46,6 +65,7 @@ contract OBOrderPlacementFacet {
     function placeMarginLimitOrder(uint256 price, uint256 amount, bool isBuy)
         external
         validOrder(price, amount)
+        marketActive
         returns (uint256 orderId)
     {
         OrderBookStorage.State storage s = OrderBookStorage.state();
@@ -55,7 +75,7 @@ contract OBOrderPlacementFacet {
         uint256 marginRequired = _calculateMarginRequired(s, adjustedAmount, price, isBuy);
         return _placeLimitOrder(msg.sender, price, amount, isBuy, true, marginRequired);
     }
-    function placeMarketOrder(uint256 amount, bool isBuy) external returns (uint256 filledAmount) {
+    function placeMarketOrder(uint256 amount, bool isBuy) external marketActive returns (uint256 filledAmount) {
         OrderBookStorage.State storage s = OrderBookStorage.state();
         require(amount > 0, "Amount must be greater than 0");
         uint256 refPrice = isBuy ? s.bestAsk : s.bestBid;
@@ -68,7 +88,7 @@ contract OBOrderPlacementFacet {
         uint256 filled = _placeMarket(msg.sender, amount, isBuy, false, maxPrice, minPrice);
         return filled;
     }
-    function placeMarginMarketOrder(uint256 amount, bool isBuy) external returns (uint256 filledAmount) {
+    function placeMarginMarketOrder(uint256 amount, bool isBuy) external marketActive returns (uint256 filledAmount) {
         OrderBookStorage.State storage s = OrderBookStorage.state();
         require(s.leverageEnabled || s.marginRequirementBps == 10000, "OrderBook: margin orders require leverage to be enabled or 1:1 margin");
         require(amount > 0, "Amount must be greater than 0");
@@ -90,6 +110,7 @@ contract OBOrderPlacementFacet {
 
     function placeMarketOrderWithSlippage(uint256 amount, bool isBuy, uint256 slippageBps)
         external
+        marketActive
         returns (uint256 filledAmount)
     {
         require(slippageBps <= 5000, "OrderBook: slippage too high");
@@ -107,6 +128,7 @@ contract OBOrderPlacementFacet {
 
     function placeMarginMarketOrderWithSlippage(uint256 amount, bool isBuy, uint256 slippageBps)
         external
+        marketActive
         returns (uint256 filledAmount)
     {
         require(slippageBps <= 5000, "OrderBook: slippage too high");
@@ -139,6 +161,9 @@ contract OBOrderPlacementFacet {
             _removeFromSellBook(s, orderId, order.price);
         }
         if (order.isMarginOrder) {
+            // Prefer namespaced reservation id; also try legacy plain id for backward compatibility
+            bytes32 rid = _reservationId(s, order.trader, orderId);
+            OrderBookStorage.state().vault.unreserveMargin(order.trader, rid);
             OrderBookStorage.state().vault.unreserveMargin(order.trader, bytes32(orderId));
         }
         _removeOrderFromUserList(s, msg.sender, orderId);
@@ -149,9 +174,97 @@ contract OBOrderPlacementFacet {
         _onOrderBookLiquidityChanged();
     }
 
+    /**
+     * @dev Admin-only: cancel a specific order by id, regardless of owner. Used for settlement/expiry cleanup.
+     */
+    function adminCancelOrder(uint256 orderId) external onlyOwner {
+        OrderBookStorage.State storage s = OrderBookStorage.state();
+        OrderBookStorage.Order storage order = s.orders[orderId];
+        require(order.trader != address(0), "Order does not exist");
+        // Remove from book side
+        if (order.isBuy) {
+            _removeFromBuyBook(s, orderId, order.price);
+        } else {
+            _removeFromSellBook(s, orderId, order.price);
+        }
+        // Release reserved margin if margin order
+        if (order.isMarginOrder) {
+            bytes32 rid = _reservationId(s, order.trader, orderId);
+            s.vault.unreserveMargin(order.trader, rid);
+            s.vault.unreserveMargin(order.trader, bytes32(orderId));
+        }
+        // Remove from user's list and delete order
+        _removeOrderFromUserList(s, order.trader, orderId);
+        emit OrderCancelled(orderId, order.trader);
+        delete s.orders[orderId];
+        delete s.cumulativeMarginUsed[orderId];
+        // Update marks/liquidations after liquidity removal
+        _onOrderBookLiquidityChanged();
+    }
+
+    /**
+     * @dev Admin-only: cancel all resting orders for this market. Used at settlement.
+     *      Iterates through known users' order lists and cancels any remaining orders.
+     *      Best-effort: skips if order no longer exists.
+     */
+    function adminCancelAllRestingOrders() external onlyOwner {
+        OrderBookStorage.State storage s = OrderBookStorage.state();
+        // Cancel all buy-side orders by traversing price levels
+        for (uint256 i = 0; i < s.buyPrices.length; i++) {
+            uint256 price = s.buyPrices[i];
+            OrderBookStorage.PriceLevel storage level = s.buyLevels[price];
+            if (!level.exists) { continue; }
+            uint256 currentOrderId = level.firstOrderId;
+            while (currentOrderId != 0) {
+                OrderBookStorage.Order storage order = s.orders[currentOrderId];
+                uint256 nextOrderId = order.nextOrderId;
+                if (order.trader != address(0)) {
+                    _removeFromBuyBook(s, currentOrderId, price);
+                    if (order.isMarginOrder) {
+                        bytes32 rid = _reservationId(s, order.trader, currentOrderId);
+                        s.vault.unreserveMargin(order.trader, rid);
+                        s.vault.unreserveMargin(order.trader, bytes32(currentOrderId));
+                    }
+                    _removeOrderFromUserList(s, order.trader, currentOrderId);
+                    emit OrderCancelled(currentOrderId, order.trader);
+                    delete s.orders[currentOrderId];
+                    delete s.cumulativeMarginUsed[currentOrderId];
+                }
+                currentOrderId = nextOrderId;
+            }
+        }
+        // Cancel all sell-side orders by traversing price levels
+        for (uint256 j = 0; j < s.sellPrices.length; j++) {
+            uint256 price2 = s.sellPrices[j];
+            OrderBookStorage.PriceLevel storage level2 = s.sellLevels[price2];
+            if (!level2.exists) { continue; }
+            uint256 currentOrderId2 = level2.firstOrderId;
+            while (currentOrderId2 != 0) {
+                OrderBookStorage.Order storage order2 = s.orders[currentOrderId2];
+                uint256 nextOrderId2 = order2.nextOrderId;
+                if (order2.trader != address(0)) {
+                    _removeFromSellBook(s, currentOrderId2, price2);
+                    if (order2.isMarginOrder) {
+                        bytes32 rid2 = _reservationId(s, order2.trader, currentOrderId2);
+                        s.vault.unreserveMargin(order2.trader, rid2);
+                        s.vault.unreserveMargin(order2.trader, bytes32(currentOrderId2));
+                    }
+                    _removeOrderFromUserList(s, order2.trader, currentOrderId2);
+                    emit OrderCancelled(currentOrderId2, order2.trader);
+                    delete s.orders[currentOrderId2];
+                    delete s.cumulativeMarginUsed[currentOrderId2];
+                }
+                currentOrderId2 = nextOrderId2;
+            }
+        }
+        // After bulk liquidity removal, poke for mark/liquidation updates
+        _onOrderBookLiquidityChanged();
+    }
+
     function modifyOrder(uint256 orderId, uint256 price, uint256 amount)
         external
         validOrder(price, amount)
+        marketActive
         returns (uint256 newOrderId)
     {
         OrderBookStorage.State storage s = OrderBookStorage.state();
@@ -165,7 +278,12 @@ contract OBOrderPlacementFacet {
 
         if (isBuy) { _removeFromBuyBook(s, orderId, oldOrder.price); } else { _removeFromSellBook(s, orderId, oldOrder.price); }
         _removeOrderFromUserList(s, msg.sender, orderId);
-        if (isMarginOrder) { OrderBookStorage.state().vault.unreserveMargin(msg.sender, bytes32(orderId)); }
+        if (isMarginOrder) {
+            // Prefer namespaced reservation id; also try legacy plain id for backward compatibility
+            bytes32 rid = _reservationId(s, msg.sender, orderId);
+            OrderBookStorage.state().vault.unreserveMargin(msg.sender, rid);
+            OrderBookStorage.state().vault.unreserveMargin(msg.sender, bytes32(orderId));
+        }
         delete s.orders[orderId];
         delete s.cumulativeMarginUsed[orderId];
 
@@ -197,14 +315,19 @@ contract OBOrderPlacementFacet {
                 uint256 nextSellOrderId = sellOrder.nextOrderId;
                 uint256 matchAmount = remaining < sellOrder.amount ? remaining : sellOrder.amount;
                 emit OrderMatchAttempt(currentOrderId, sellOrder.trader, sellOrder.amount, matchAmount);
-                IOBTradeExecutionFacet(address(this)).obExecuteTrade(
-                    buyOrder.trader,
-                    sellOrder.trader,
-                    currentPrice,
-                    matchAmount,
-                    buyOrder.isMarginOrder,
-                    sellOrder.isMarginOrder
-                );
+                // Self-cross prevention: if the buyer is matching against their own resting sell, net the orders without executing a trade
+                if (sellOrder.trader == buyOrder.trader) {
+                    emit SelfCrossNetted(buyOrder.trader, currentPrice, matchAmount, true);
+                } else {
+                    IOBTradeExecutionFacet(address(this)).obExecuteTrade(
+                        buyOrder.trader,
+                        sellOrder.trader,
+                        currentPrice,
+                        matchAmount,
+                        buyOrder.isMarginOrder,
+                        sellOrder.isMarginOrder
+                    );
+                }
                 unchecked { remaining -= matchAmount; }
                 if (sellOrder.amount > matchAmount) { sellOrder.amount -= matchAmount; } else { sellOrder.amount = 0; }
                 if (level.totalAmount > matchAmount) { level.totalAmount -= matchAmount; } else { level.totalAmount = 0; }
@@ -212,9 +335,13 @@ contract OBOrderPlacementFacet {
                 // Adjust reserved margin for resting margin orders
                 if (sellOrder.isMarginOrder) {
                     if (sellOrder.amount == 0) {
+                        bytes32 rid = _reservationId(s, sellOrder.trader, currentOrderId);
+                        s.vault.unreserveMargin(sellOrder.trader, rid);
                         s.vault.unreserveMargin(sellOrder.trader, bytes32(currentOrderId));
                     } else {
                         uint256 newReserved = _calculateMarginRequired(s, sellOrder.amount, sellOrder.price, sellOrder.isBuy);
+                        bytes32 rid2 = _reservationId(s, sellOrder.trader, currentOrderId);
+                        s.vault.releaseExcessMargin(sellOrder.trader, rid2, newReserved);
                         s.vault.releaseExcessMargin(sellOrder.trader, bytes32(currentOrderId), newReserved);
                         s.orders[currentOrderId].marginRequired = newReserved;
                     }
@@ -251,14 +378,19 @@ contract OBOrderPlacementFacet {
                 uint256 nextBuyOrderId = buyOrder.nextOrderId;
                 uint256 matchAmount = remaining < buyOrder.amount ? remaining : buyOrder.amount;
                 emit OrderMatchAttempt(currentOrderId, buyOrder.trader, buyOrder.amount, matchAmount);
-                IOBTradeExecutionFacet(address(this)).obExecuteTrade(
-                    buyOrder.trader,
-                    sellOrder.trader,
-                    currentPrice,
-                    matchAmount,
-                    buyOrder.isMarginOrder,
-                    sellOrder.isMarginOrder
-                );
+                // Self-cross prevention: if the seller is matching against their own resting buy, net the orders without executing a trade
+                if (buyOrder.trader == sellOrder.trader) {
+                    emit SelfCrossNetted(sellOrder.trader, currentPrice, matchAmount, false);
+                } else {
+                    IOBTradeExecutionFacet(address(this)).obExecuteTrade(
+                        buyOrder.trader,
+                        sellOrder.trader,
+                        currentPrice,
+                        matchAmount,
+                        buyOrder.isMarginOrder,
+                        sellOrder.isMarginOrder
+                    );
+                }
                 unchecked { remaining -= matchAmount; }
                 if (buyOrder.amount > matchAmount) { buyOrder.amount -= matchAmount; } else { buyOrder.amount = 0; }
                 if (level.totalAmount > matchAmount) { level.totalAmount -= matchAmount; } else { level.totalAmount = 0; }
@@ -266,9 +398,13 @@ contract OBOrderPlacementFacet {
                 // Adjust reserved margin for resting margin orders
                 if (buyOrder.isMarginOrder) {
                     if (buyOrder.amount == 0) {
+                        bytes32 rid = _reservationId(s, buyOrder.trader, currentOrderId);
+                        s.vault.unreserveMargin(buyOrder.trader, rid);
                         s.vault.unreserveMargin(buyOrder.trader, bytes32(currentOrderId));
                     } else {
                         uint256 newReserved = _calculateMarginRequired(s, buyOrder.amount, buyOrder.price, buyOrder.isBuy);
+                        bytes32 rid2 = _reservationId(s, buyOrder.trader, currentOrderId);
+                        s.vault.releaseExcessMargin(buyOrder.trader, rid2, newReserved);
                         s.vault.releaseExcessMargin(buyOrder.trader, bytes32(currentOrderId), newReserved);
                         s.orders[currentOrderId].marginRequired = newReserved;
                     }
@@ -417,7 +553,8 @@ contract OBOrderPlacementFacet {
         orderId = s.nextOrderId++;
 
         if (isMarginOrder) {
-            s.vault.reserveMargin(trader, bytes32(orderId), s.marketId, marginRequired);
+            bytes32 rid = _reservationId(s, trader, orderId);
+            s.vault.reserveMargin(trader, rid, s.marketId, marginRequired);
         }
 
         OrderBookStorage.Order memory newOrder = OrderBookStorage.Order({
@@ -440,6 +577,8 @@ contract OBOrderPlacementFacet {
             if (isMarginOrder) {
                 uint256 adjustedReserved = _calculateMarginRequired(s, remaining, price, isBuy);
                 newOrder.marginRequired = adjustedReserved;
+                bytes32 rid3 = _reservationId(s, trader, orderId);
+                s.vault.releaseExcessMargin(trader, rid3, adjustedReserved);
                 s.vault.releaseExcessMargin(trader, bytes32(orderId), adjustedReserved);
             }
             s.orders[orderId] = newOrder;
@@ -448,6 +587,8 @@ contract OBOrderPlacementFacet {
             emit OrderPlaced(orderId, trader, price, remaining, isBuy, isMarginOrder);
         } else {
             if (isMarginOrder) {
+                bytes32 rid4 = _reservationId(s, trader, orderId);
+                s.vault.unreserveMargin(trader, rid4);
                 s.vault.unreserveMargin(trader, bytes32(orderId));
             }
             emit OrderPlaced(orderId, trader, price, 0, isBuy, isMarginOrder);

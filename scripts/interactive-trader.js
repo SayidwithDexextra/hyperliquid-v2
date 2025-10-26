@@ -130,6 +130,19 @@ async function safeDecodeMarketId(marketId, contracts) {
       return marketSymbolCache.get(marketId);
     }
 
+    // Try to resolve via MARKET_INFO by marketId match (preferred)
+    try {
+      const idHex = String(marketId).toLowerCase();
+      const entries = Object.values(MARKET_INFO || {});
+      for (const info of entries) {
+        if (!info || !info.marketId) continue;
+        if (String(info.marketId).toLowerCase() === idHex) {
+          marketSymbolCache.set(marketId, info.symbol || "");
+          if (info.symbol) return info.symbol;
+        }
+      }
+    } catch (_) {}
+
     // If it's a hash, try to get the symbol from the factory
     try {
       if (contracts && contracts.factory) {
@@ -144,9 +157,13 @@ async function safeDecodeMarketId(marketId, contracts) {
       // Factory lookup failed
     }
 
-    // For our known market, return ALU-USD
-    // The marketId from deploy.js is based on the full hash
-    return "ALU-USD";
+    // Fallback: return shortened id label if symbol not found
+    try {
+      const hex = String(marketId);
+      return hex.startsWith("0x") ? hex.substring(0, 10) + "…" : hex;
+    } catch (_) {
+      return "UNKNOWN";
+    }
   }
 }
 
@@ -357,6 +374,36 @@ function calculateSafeMarkPrice(bestBid, bestAsk, fallbackPrice, decimals = 6) {
 }
 
 /**
+ * Normalize a Position struct returned from the contract to a plain object
+ * Supports both named struct objects and tuple arrays returned by ABI fragments.
+ */
+function normalizePositionStruct(positionLike) {
+  if (!positionLike) return null;
+  const p = positionLike;
+  const marketId = p.marketId !== undefined ? p.marketId : p[0];
+  const size = p.size !== undefined ? p.size : p[1];
+  const entryPrice = p.entryPrice !== undefined ? p.entryPrice : p[2];
+  const marginLocked = p.marginLocked !== undefined ? p.marginLocked : p[3];
+  const socializedLossAccrued6 =
+    p.socializedLossAccrued6 !== undefined ? p.socializedLossAccrued6 : p[4];
+  const haircutUnits18 =
+    p.haircutUnits18 !== undefined ? p.haircutUnits18 : p[5];
+  const liquidationPrice =
+    p.liquidationPrice !== undefined ? p.liquidationPrice : p[6];
+  if (marketId === undefined || size === undefined || entryPrice === undefined)
+    return null;
+  return {
+    marketId,
+    size,
+    entryPrice,
+    marginLocked,
+    socializedLossAccrued6,
+    haircutUnits18,
+    liquidationPrice,
+  };
+}
+
+/**
  * Helper function to calculate total real-time unrealized P&L across all user positions
  * @param {Object} contracts - Smart contract instances
  * @param {string} userAddress - User address
@@ -367,16 +414,17 @@ async function getTotalRealTimeUnrealizedPnL(contracts, userAddress) {
     const positions = await contracts.vault.getUserPositions(userAddress);
     let totalUnrealizedPnL = 0;
 
-    for (const position of positions) {
+    for (const rawPosition of positions) {
+      const position = normalizePositionStruct(rawPosition);
+      if (!position) continue;
       try {
         const { pnl } = await getMarkPriceAndPnL(contracts, position);
         totalUnrealizedPnL += pnl;
       } catch (error) {
         console.error(
-          `Error calculating P&L for position ${position.marketId.substring(
-            0,
-            8
-          )}:`,
+          `Error calculating P&L for position ${
+            position.marketId ? String(position.marketId).substring(0, 8) : "?"
+          }:`,
           error
         );
         // Continue with other positions
@@ -389,7 +437,6 @@ async function getTotalRealTimeUnrealizedPnL(contracts, userAddress) {
     return 0;
   }
 }
-
 /**
  * Helper function to get mark price and calculate P&L from smart contracts
  * Uses real-time mark price calculation from OrderBook for consistency
@@ -399,13 +446,15 @@ async function getTotalRealTimeUnrealizedPnL(contracts, userAddress) {
  */
 async function getMarkPriceAndPnL(contracts, position) {
   try {
+    const pos = normalizePositionStruct(position);
+    if (!pos) return { markPrice: 0, pnl: 0 };
     // Get real-time mark price from OrderBook (consistent with order book display)
     let markPriceBigInt = 0n;
 
     try {
       // Try to get the OrderBook address for this market
       const orderBookAddress = await contracts.vault.marketToOrderBook(
-        position.marketId
+        pos.marketId
       );
 
       if (orderBookAddress && orderBookAddress !== ethers.ZeroAddress) {
@@ -422,7 +471,7 @@ async function getMarkPriceAndPnL(contracts, position) {
     } catch (error) {
       // Fallback to default OrderBook if market mapping fails
       console.log(
-        `Using default OrderBook for market ${position.marketId.substring(
+        `Using default OrderBook for market ${String(pos.marketId).substring(
           0,
           8
         )}...`
@@ -438,8 +487,8 @@ async function getMarkPriceAndPnL(contracts, position) {
       // Calculate P&L using the same formula as the smart contract
       // Formula: (markPrice - entryPrice) * size / TICK_PRECISION
       // Result: 6-decimal prices × 18-decimal size ÷ 1e6 = 18-decimal result
-      const positionSize = BigInt(position.size.toString());
-      const entryPriceBigInt = BigInt(position.entryPrice.toString());
+      const positionSize = BigInt(pos.size.toString());
+      const entryPriceBigInt = BigInt(pos.entryPrice.toString());
       const priceDiffBigInt = markPriceBigInt - entryPriceBigInt;
       const pnlBigInt = (priceDiffBigInt * positionSize) / BigInt(1e6); // TICK_PRECISION = 1e6
       const pnl = parseFloat(ethers.formatUnits(pnlBigInt, 18)); // Result is in 18 decimals
@@ -570,6 +619,7 @@ class InteractiveTrader {
     this.contracts = {};
     this.users = [];
     this.currentUser = null;
+    this.currentMarket = null; // { symbol, marketId, orderBook }
     this.currentUserIndex = 0;
     this.isRunning = true;
     this.hackHistory = [];
@@ -811,19 +861,18 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         throw new Error("MOCK_USDC contract has no bytecode.");
       }
       this.contracts.vault = await getContract("CORE_VAULT");
-      // Resolve OrderBook (Diamond) address for ALUMINUM
-      let obAddress;
-      try {
-        const mapped = await this.contracts.vault.marketToOrderBook(
-          MARKET_INFO.ALUMINUM.marketId
-        );
-        if (mapped && mapped !== ethers.ZeroAddress) {
-          obAddress = mapped;
-        } else {
-          obAddress = getAddress("ALUMINUM_ORDERBOOK");
+      // Resolve OrderBook (Diamond) address from generic pointer, then fallback to aluminum
+      const genericOb = getAddress("ORDERBOOK");
+      let obAddress =
+        genericOb && genericOb !== ethers.ZeroAddress ? genericOb : null;
+      if (!obAddress) {
+        const aluOb = getAddress("ALUMINUM_ORDERBOOK");
+        if (!aluOb || aluOb === ethers.ZeroAddress) {
+          throw new Error(
+            "ORDERBOOK/ALUMINUM_ORDERBOOK address is not configured. Ensure <network>-deployment.json is loaded."
+          );
         }
-      } catch (_) {
-        obAddress = getAddress("ALUMINUM_ORDERBOOK");
+        obAddress = aluOb;
       }
       this.contracts.orderBookAddress = obAddress;
 
@@ -846,6 +895,10 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
       );
       this.contracts.obLiq = await ethers.getContractAt(
         "OBLiquidationFacet",
+        obAddress
+      );
+      this.contracts.obSettle = await ethers.getContractAt(
+        "OBSettlementFacet",
         obAddress
       );
       // Build a combined ABI at the diamond address so we can listen across facets
@@ -1252,7 +1305,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           );
         }
       );
-
       this.contracts.orderBook.on(
         "ActiveTradersUpdated",
         (buyer, buyerActive, seller, sellerActive, event) => {
@@ -1633,7 +1685,7 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
         }
       );
       // Listen for CoreVault detailed liquidatability checks
-      this.contracts.vault.on(
+      this.contracts.orderBook.on(
         "DebugIsLiquidatable",
         (
           user,
@@ -1753,7 +1805,6 @@ ${gradient("╚═════╝ ╚══════╝╚═╝  ╚═╝�
           this.handleLiquidationConfigUpdatedEvent(scanOnTrade, debug, event);
         }
       );
-
       this.contracts.orderBook.on(
         "LiquidationSocializedLossAttempt",
         (trader, isLong, method, event) => {
@@ -2240,7 +2291,6 @@ ${
           }
         );
       }
-
       // Listen for GapLoss and Liquidation Processing events from OrderBook
       if (this.contracts.orderBook) {
         // New: counterparty receives units when liquidation matches against their resting order
@@ -2547,7 +2597,6 @@ ${
         colors.cyan
       )
     );
-
     try {
       // Test 1: Check if we can query past events
       console.log(colorText("📋 Test 1: Querying past events...", colors.blue));
@@ -3481,16 +3530,6 @@ ${colors.bgMagenta}${colors.white}${
 ${
   colors.brightMagenta
 }┌─────────────────────────────────────────────────────────┐${colors.reset}
-${colors.brightMagenta}│${colors.reset} ${colors.brightRed}💸 MARGIN SEIZED${
-      colors.reset
-    } ${colors.dim}at ${timestamp}${colors.reset}                       ${
-      colors.brightMagenta
-    }│${colors.reset}
-${colors.brightMagenta}│${
-      colors.reset
-    }                                                         ${
-      colors.brightMagenta
-    }│${colors.reset}
 ${colors.brightMagenta}│${colors.reset} ${colors.brightYellow}👤 Trader:${
       colors.reset
     } ${traderType.padEnd(15)}                        ${colors.brightMagenta}│${
@@ -5255,7 +5294,6 @@ ${colors.brightRed}└───────────────────�
       await this.selectUser();
     }
   }
-
   // HACK MODE: power-user command console
   async enterHackMode() {
     console.clear();
@@ -5532,7 +5570,9 @@ ${colors.brightRed}└───────────────────�
               "ASSERT POSITION usage: ASSERT POSITION [U#] LONG|SHORT <op> <units>"
             );
 
-          const marketId = MARKET_INFO.ALUMINUM.marketId;
+          const marketId =
+            (this.currentMarket && this.currentMarket.marketId) ||
+            MARKET_INFO["ALU-USD"].marketId;
           const positions = await this.contracts.vault.getUserPositions(
             targetUser.address
           );
@@ -5740,7 +5780,6 @@ ${colors.brightRed}└───────────────────�
         );
         return `${isBuy ? "MB" : "MS"} ${amountAlu} slip ${slippageBps}bps`;
       }
-
       case "DEP": {
         // Deposit collateral: amountUSDC
         const amtStr = parts[cursor++];
@@ -6577,6 +6616,8 @@ ${colors.brightRed}└───────────────────�
   // Non-interactive views for hack mode
   async viewOpenPositionsFor(user) {
     const positions = await this.contracts.vault.getUserPositions(user.address);
+    console.log(positions);
+
     if (!positions.length) {
       console.log(colorText("(no positions)", colors.dim));
       return;
@@ -7469,7 +7510,6 @@ ${colors.brightRed}└───────────────────�
       );
     }
   }
-
   async showMainMenu() {
     // Attach left/right arrow listener to switch users while on main menu
     const input = this.rl && this.rl.input;
@@ -7962,7 +8002,6 @@ ${colors.brightRed}└───────────────────�
           colors.white
         )
       );
-
       const unrealizedColor = unrealizedPnL >= 0 ? colors.green : colors.red;
       const unrealizedSign = unrealizedPnL >= 0 ? "+" : "";
       console.log(
@@ -8247,7 +8286,7 @@ ${colors.brightRed}└───────────────────�
             colorText(
               `│ 📦 Total Margin Reserved: ${colorText(
                 comprehensiveMarginData.sources.unifiedMargin
-                  .totalMarginCommitted
+                  ?.totalMarginCommitted
                   ? Number(
                       comprehensiveMarginData.sources.unifiedMargin
                         .marginReservedForOrders
@@ -8262,7 +8301,7 @@ ${colors.brightRed}└───────────────────�
             colorText(
               `│ 📚 Total Margin Committed: ${colorText(
                 comprehensiveMarginData.sources.unifiedMargin
-                  .totalMarginCommitted
+                  ?.totalMarginCommitted
                   ? Number(
                       comprehensiveMarginData.sources.unifiedMargin
                         .totalMarginCommitted
@@ -8688,17 +8727,50 @@ ${colors.brightRed}└───────────────────�
     // Show first 4 characters of address
     return colorText(traderAddress.substring(2, 6), colors.dim);
   }
-
   async displayMenu() {
     // Quick position summary before menu
     try {
-      const positions = await this.contracts.vault.getUserPositions(
+      let positions = await this.contracts.vault.getUserPositions(
         this.currentUser.address
       );
 
+      // Resolve current market context
+      let targetMarketId =
+        (this.currentMarket && this.currentMarket.marketId) || null;
+      let currentSymbol =
+        (this.currentMarket && this.currentMarket.symbol) || "";
+      if (
+        !targetMarketId &&
+        this.contracts &&
+        this.contracts.orderBookAddress
+      ) {
+        try {
+          const entries = Object.values(MARKET_INFO || {});
+          const match = entries.find(
+            (m) =>
+              m &&
+              m.orderBook &&
+              m.orderBook.toLowerCase() ===
+                this.contracts.orderBookAddress.toLowerCase()
+          );
+          if (match) {
+            targetMarketId = match.marketId;
+            currentSymbol = match.symbol || currentSymbol;
+          }
+        } catch (_) {}
+      }
+
+      if (targetMarketId) {
+        positions = positions.filter((p) => p && p.marketId === targetMarketId);
+      }
+
       if (positions.length > 0) {
+        const headerSuffix = currentSymbol ? ` • ${currentSymbol}` : "";
         console.log(
-          colorText("\n🎯 QUICK POSITION SUMMARY", colors.brightYellow)
+          colorText(
+            `\n🎯 QUICK POSITION SUMMARY${headerSuffix}`,
+            colors.brightYellow
+          )
         );
         console.log(
           colorText("┌─────────────────────────────────────────┐", colors.cyan)
@@ -8723,20 +8795,22 @@ ${colors.brightRed}└───────────────────�
               false // Don't show warnings in quick summary
             );
 
-            // Fetch liquidation state and liquidation price
+            // Fetch liquidation state and liquidation price (consistent with frontend hook)
             let liqStr = "N/A";
             let mmrBreakdown = "N/A";
             try {
-              const under =
-                await this.contracts.vault.isUnderLiquidationPosition(
+              const under = await this.withRpcRetry(() =>
+                this.contracts.vault.isUnderLiquidationPosition(
                   this.currentUser.address,
                   position.marketId
-                );
-              const [liqPrice, hasPos] =
-                await this.contracts.vault.getLiquidationPrice(
+                )
+              );
+              const [liqPrice, hasPos] = await this.withRpcRetry(() =>
+                this.contracts.vault.getLiquidationPrice(
                   this.currentUser.address,
                   position.marketId
-                );
+                )
+              );
               if (hasPos) {
                 if (under) {
                   liqStr = "UNDER LIQ";
@@ -8746,8 +8820,11 @@ ${colors.brightRed}└───────────────────�
                     side,
                   });
                 } else {
-                  const liqBn = BigInt(liqPrice.toString());
-                  liqStr = liqBn > 0n ? formatPrice(liqBn) : "0.0000";
+                  const liqBn =
+                    typeof liqPrice === "bigint"
+                      ? liqPrice
+                      : BigInt(liqPrice?.toString?.() || "0");
+                  liqStr = liqBn > 0n ? formatPrice(liqBn, 6, 2) : "0.00";
                 }
               }
             } catch (_) {}
@@ -8871,9 +8948,21 @@ ${colors.brightRed}└───────────────────�
       this.currentUserIndex === 0
         ? "Deployer"
         : `User ${this.currentUserIndex}`;
+    // Determine current market symbol (prefer this.currentMarket)
+    let currentSymbol = (this.currentMarket && this.currentMarket.symbol) || "";
+    if (!currentSymbol && this.contracts && this.contracts.orderBookAddress) {
+      try {
+        const entries = Object.values(MARKET_INFO || {});
+        const match = entries.find(
+          (m) => m && m.orderBook === this.contracts.orderBookAddress
+        );
+        if (match && match.symbol) currentSymbol = match.symbol;
+      } catch (_) {}
+    }
+    const marketSuffix = currentSymbol ? ` • ${currentSymbol}` : "";
     console.log(
       colorText(
-        `\n🎮 TRADING ACTIONS (${actionsUserLabel})`,
+        `\n🎮 TRADING ACTIONS (${actionsUserLabel}${marketSuffix})`,
         colors.brightYellow
       )
     );
@@ -8924,6 +9013,12 @@ ${colors.brightRed}└───────────────────�
     );
     console.log(
       colorText(
+        "│ 17. 🕒 View Last 20 Market Trades      │",
+        colors.brightGreen
+      )
+    );
+    console.log(
+      colorText(
         "│ 13. 🔍 Detailed Margin Analysis        │",
         colors.brightYellow
       )
@@ -8942,6 +9037,18 @@ ${colors.brightRed}└───────────────────�
         "│ 16. ➖ Reduce Margin (Partial Close)     │",
         colors.brightYellow
       )
+    );
+    console.log(
+      colorText("│ T. 💼 Market Total Margin                │", colors.blue)
+    );
+    console.log(
+      colorText(
+        "│ S. ✅ Settle Market (owner-only)          │",
+        colors.brightGreen
+      )
+    );
+    console.log(
+      colorText("│ M. 🔀 Switch Market                      │", colors.white)
     );
     console.log(
       colorText("│ r. 🔄 Refresh Display                  │", colors.white)
@@ -9004,6 +9111,9 @@ ${colors.brightRed}└───────────────────�
       case "12":
         await this.viewTradeHistory();
         break;
+      case "17":
+        await this.viewLastTwentyTrades();
+        break;
       case "13":
         await this.viewDetailedMarginAnalysis();
         break;
@@ -9015,6 +9125,15 @@ ${colors.brightRed}└───────────────────�
         break;
       case "16":
         await this.reducePositionMarginFlow();
+        break;
+      case "t":
+        await this.viewMarketTotalMargin();
+        break;
+      case "s":
+        await this.settleMarketFlow();
+        break;
+      case "m":
+        await this.selectMarket();
         break;
       case "l":
         await this.viewLiquidationBreakdown();
@@ -9028,6 +9147,126 @@ ${colors.brightRed}└───────────────────�
       default:
         console.log(colorText("❌ Invalid choice", colors.red));
         await this.pause(1000);
+    }
+  }
+
+  async selectMarket() {
+    try {
+      console.clear();
+      console.log(boxText("🔀 SWITCH MARKET", colors.brightCyan));
+
+      const markets = MARKET_INFO || {};
+      const entries = Object.values(markets);
+      if (!entries.length) {
+        console.log(colorText("❌ No markets available", colors.red));
+        await this.pause(1500);
+        return;
+      }
+
+      for (let i = 0; i < entries.length; i++) {
+        const m = entries[i];
+        console.log(
+          colorText(
+            `${i + 1}. ${m.name || m.symbol} (${m.symbol})`,
+            colors.white
+          )
+        );
+        console.log(colorText(`   id=${m.marketId}`, colors.dim));
+        console.log(colorText(`   ob=${m.orderBook}`, colors.dim));
+      }
+      const input = await this.askQuestion(
+        colorText("\nChoose market # (Enter to cancel): ", colors.cyan)
+      );
+      const idx = parseInt((input || "").trim(), 10) - 1;
+      if (Number.isNaN(idx) || idx < 0 || idx >= entries.length) {
+        console.log(colorText("⚠️ Cancelled", colors.yellow));
+        await this.pause(1000);
+        return;
+      }
+
+      const selected = entries[idx];
+      this.currentMarket = {
+        symbol: selected.symbol,
+        marketId: selected.marketId,
+        orderBook: selected.orderBook,
+      };
+      await this.rebindOrderBook(selected.orderBook);
+      console.log(colorText(`✅ Switched to ${selected.symbol}`, colors.green));
+      await this.pause(1000);
+    } catch (e) {
+      console.log(
+        colorText(`❌ Failed to switch market: ${e.message}`, colors.red)
+      );
+      await this.pause(1500);
+    }
+  }
+
+  async rebindOrderBook(obAddress) {
+    try {
+      if (
+        this.contracts.orderBook &&
+        this.contracts.orderBook.removeAllListeners
+      ) {
+        try {
+          this.contracts.orderBook.removeAllListeners();
+        } catch (_) {}
+      }
+      this.contracts.orderBookAddress = obAddress;
+      this.contracts.obView = await ethers.getContractAt(
+        "OBViewFacet",
+        obAddress
+      );
+      this.contracts.obPricing = await ethers.getContractAt(
+        "OBPricingFacet",
+        obAddress
+      );
+      this.contracts.obPlace = await ethers.getContractAt(
+        "OBOrderPlacementFacet",
+        obAddress
+      );
+      this.contracts.obExec = await ethers.getContractAt(
+        "OBTradeExecutionFacet",
+        obAddress
+      );
+      this.contracts.obLiq = await ethers.getContractAt(
+        "OBLiquidationFacet",
+        obAddress
+      );
+
+      const obExecAbi =
+        require("../artifacts/src/diamond/facets/OBTradeExecutionFacet.sol/OBTradeExecutionFacet.json").abi;
+      const obPlaceAbi =
+        require("../artifacts/src/diamond/facets/OBOrderPlacementFacet.sol/OBOrderPlacementFacet.json").abi;
+      const obPricingAbi =
+        require("../artifacts/src/diamond/facets/OBPricingFacet.sol/OBPricingFacet.json").abi;
+      const obViewAbi =
+        require("../artifacts/src/diamond/facets/OBViewFacet.sol/OBViewFacet.json").abi;
+      const obLiqAbi =
+        require("../artifacts/src/diamond/facets/OBLiquidationFacet.sol/OBLiquidationFacet.json").abi;
+      const obSettleAbi =
+        require("../artifacts/src/diamond/facets/OBSettlementFacet.sol/OBSettlementFacet.json").abi;
+      const combinedAbi = [
+        ...obExecAbi,
+        ...obPlaceAbi,
+        ...obPricingAbi,
+        ...obViewAbi,
+        ...obLiqAbi,
+        ...obSettleAbi,
+      ];
+      const provider =
+        (this.contracts.vault &&
+          this.contracts.vault.runner &&
+          this.contracts.vault.runner.provider) ||
+        ethers.provider;
+      this.contracts.orderBook = new ethers.Contract(
+        obAddress,
+        combinedAbi,
+        provider
+      );
+    } catch (e) {
+      console.log(
+        colorText(`❌ Failed to rebind orderbook: ${e.message}`, colors.red)
+      );
     }
   }
   // === Margin Top-Up ===
@@ -9221,6 +9460,125 @@ ${colors.brightRed}└───────────────────�
       );
     }
     await this.pause(3000);
+  }
+
+  // === Settlement ===
+  async settleMarketFlow() {
+    try {
+      console.clear();
+      console.log(boxText("✅ SETTLE MARKET", colors.brightGreen));
+      if (!this.currentMarket || !this.currentMarket.orderBook) {
+        console.log(colorText("❌ No market selected", colors.red));
+        await this.pause(1500);
+        return;
+      }
+      // Check settlement readiness (by date) if available from config
+      const now = Math.floor(Date.now() / 1000);
+      const markets = MARKET_INFO || {};
+      const entry = Object.values(markets).find(
+        (m) =>
+          m.orderBook?.toLowerCase() ===
+          this.contracts.orderBookAddress?.toLowerCase()
+      );
+      if (entry && entry.settlementDate && Number(entry.settlementDate) > now) {
+        const dt = new Date(
+          Number(entry.settlementDate) * 1000
+        ).toLocaleString();
+        console.log(
+          colorText(
+            `⚠️  Settlement date not reached (${dt}). Continue anyway? (y/N)`,
+            colors.yellow
+          )
+        );
+        const cont = (await this.askQuestion("")).trim().toLowerCase();
+        if (cont !== "y") {
+          return;
+        }
+      }
+
+      const input = await this.askQuestion(
+        colorText(
+          "Enter final settlement price (USDC, 6d): $",
+          colors.brightGreen
+        )
+      );
+      if (!input || isNaN(input) || Number(input) <= 0) {
+        console.log(colorText("❌ Invalid price", colors.red));
+        await this.pause(1500);
+        return;
+      }
+      const finalPrice6 = ethers.parseUnits(String(input), 6);
+
+      // Confirm
+      const confirm = (
+        await this.askQuestion(
+          colorText("Type 'SETTLE' to confirm: ", colors.brightYellow)
+        )
+      )
+        .trim()
+        .toUpperCase();
+      if (confirm !== "SETTLE") {
+        console.log(colorText("⚠️  Cancelled", colors.yellow));
+        await this.pause(1000);
+        return;
+      }
+
+      // Execute via OBSettlementFacet (owner-only)
+      const signer = this.currentUser; // will revert if not owner; surface error
+      const obSettle = await ethers.getContractAt(
+        "OBSettlementFacet",
+        this.contracts.orderBookAddress,
+        signer
+      );
+      console.log(colorText("⏳ Submitting settlement...", colors.yellow));
+      const tx = await obSettle.settleMarket(finalPrice6);
+      const rcpt = await tx.wait();
+      console.log(
+        colorText(`✅ Market settled. Gas: ${rcpt.gasUsed}`, colors.green)
+      );
+      await this.pause(2000);
+    } catch (e) {
+      console.log(colorText(`❌ Settlement failed: ${e.message}`, colors.red));
+      await this.pause(2500);
+    }
+  }
+
+  async viewMarketTotalMargin() {
+    try {
+      console.clear();
+      console.log(boxText("💼 MARKET TOTAL MARGIN", colors.blue));
+      if (!this.contracts || !this.contracts.obView) {
+        console.log(colorText("❌ OrderBook not initialized", colors.red));
+        await this.pause(1500);
+        return;
+      }
+      const totalLocked =
+        await this.contracts.obView.totalMarginLockedInMarket();
+      console.log(
+        colorText(
+          `📊 Total margin locked: $${formatUSDC(
+            BigInt(totalLocked.toString())
+          )} USDC`,
+          colors.brightGreen
+        )
+      );
+      // Show current mark price for context
+      try {
+        const [vaultAddr, mktId] = await this.contracts.obView.marketStatic();
+        const mark = await this.contracts.vault.getMarkPrice(mktId);
+        console.log(
+          colorText(
+            `🏷️  Mark price: $${formatPrice(BigInt(mark.toString()), 6, 4)}`,
+            colors.cyan
+          )
+        );
+      } catch (_) {}
+    } catch (e) {
+      console.log(
+        colorText(`❌ Failed to fetch total margin: ${e.message}`, colors.red)
+      );
+    }
+    await this.pause(2500);
   }
   async placeLimitOrder(isBuy) {
     console.clear();
@@ -9424,7 +9782,6 @@ ${colors.brightRed}└───────────────────�
         colors.yellow
       )
     );
-
     try {
       // Get current best price for reference (diamond view facet provides bestBid/bestAsk)
       const bestBid = await this.contracts.obView.bestBid();
@@ -9895,7 +10252,6 @@ ${colors.brightRed}└───────────────────�
             colors.green
           )
         );
-
         // Additional order management options
         if (activeCount > 0) {
           console.log(
@@ -10917,19 +11273,25 @@ ${colors.brightRed}└───────────────────�
             const pnlColor = positionPnL >= 0 ? colors.green : colors.red;
             const pnlSign = positionPnL >= 0 ? "+" : "";
 
-            // Compute liquidation price from on-chain view
+            // Compute liquidation price from on-chain view (consistent with frontend hook)
             let liqDisplay = "N/A";
             try {
-              const [liqPrice, hasPos] =
-                await this.contracts.vault.getLiquidationPrice(
+              const [liqPrice, hasPos] = await this.withRpcRetry(() =>
+                this.contracts.vault.getLiquidationPrice(
                   this.currentUser.address,
                   position.marketId
-                );
+                )
+              );
               if (hasPos) {
-                const liqBn = BigInt(liqPrice.toString());
+                const liqBn =
+                  typeof liqPrice === "bigint"
+                    ? liqPrice
+                    : BigInt(liqPrice?.toString?.() || "0");
                 liqDisplay = liqBn > 0n ? formatPrice(liqBn, 6, 2) : "0.00";
               }
-            } catch (_) {}
+            } catch (_) {
+              // keep N/A on failure
+            }
 
             console.log(
               colorText(
@@ -11071,7 +11433,6 @@ ${colors.brightRed}└───────────────────�
       colorText("\n📱 Press Enter to continue...", colors.dim)
     );
   }
-
   async detailedPositionAnalysis(positions) {
     console.clear();
     console.log(boxText("🔬 DETAILED POSITION ANALYSIS", colors.brightCyan));
@@ -12238,6 +12599,90 @@ ${colors.brightRed}└───────────────────�
       colorText("\n📱 Press Enter to continue...", colors.dim)
     );
   }
+
+  async viewLastTwentyTrades() {
+    console.clear();
+    console.log(boxText("🕒 LAST 20 MARKET TRADES", colors.brightGreen));
+
+    try {
+      const trades = await this.contracts.orderBook.getLastTwentyTrades();
+      console.log(
+        colorText(
+          `\n📈 Showing ${trades.length} most recent trades (market-wide)`,
+          colors.brightYellow
+        )
+      );
+
+      if (trades.length === 0) {
+        console.log(colorText("\n💤 No recent market trades", colors.yellow));
+      } else {
+        console.log(
+          colorText(
+            "\n┌─────────────────────────────────────────────────────────────────────────────┐",
+            colors.cyan
+          )
+        );
+        console.log(
+          colorText(
+            "│   Buyer    │   Seller   │    Amount     │    Price     │      Date/Time      │",
+            colors.cyan
+          )
+        );
+        console.log(
+          colorText(
+            "├─────────────────────────────────────────────────────────────────────────────┤",
+            colors.cyan
+          )
+        );
+
+        for (const trade of trades) {
+          const buyerShort = trade.buyer.substring(0, 8) + "...";
+          const sellerShort = trade.seller.substring(0, 8) + "...";
+          const amount = Number(ethers.formatUnits(trade.amount, 18));
+          const price = Number(ethers.formatUnits(trade.price, 6));
+          const timestamp = new Date(Number(trade.timestamp) * 1000);
+          const timeStr = timestamp.toLocaleString();
+
+          console.log(
+            colorText(
+              `│ ${buyerShort.padEnd(10)} │ ${sellerShort.padEnd(10)} │ ${amount
+                .toFixed(4)
+                .padStart(13)} │ ${("$" + price.toFixed(4)).padStart(
+                12
+              )} │ ${timeStr.padEnd(19)} │`,
+              colors.white
+            )
+          );
+        }
+
+        console.log(
+          colorText(
+            "└─────────────────────────────────────────────────────────────────────────────┘",
+            colors.cyan
+          )
+        );
+      }
+
+      console.log(colorText("\nOptions:", colors.brightCyan));
+      console.log(colorText("  r. 🔄 Refresh", colors.white));
+      console.log(colorText("  Enter. 🔙 Back to Menu", colors.dim));
+
+      const action = await this.askQuestion(
+        colorText("Choose action (or Enter): ", colors.brightMagenta)
+      );
+      if (action.trim().toLowerCase() === "r") {
+        await this.viewLastTwentyTrades();
+        return;
+      }
+    } catch (error) {
+      console.log(
+        colorText(
+          "❌ Failed to fetch last 20 trades: " + error.message,
+          colors.red
+        )
+      );
+    }
+  }
   async showMarketStatistics() {
     console.clear();
     console.log(boxText("📊 MARKET TRADE STATISTICS", colors.brightCyan));
@@ -12314,11 +12759,12 @@ ${colors.brightRed}└───────────────────�
 
       // Show recent market trades
       console.log(
-        colorText("\n📈 RECENT MARKET TRADES (Last 10)", colors.brightYellow)
+        colorText("\n📈 RECENT MARKET TRADES (Last 20)", colors.brightYellow)
       );
 
       try {
-        const recentTrades = await this.contracts.orderBook.getRecentTrades(10);
+        const recentTrades =
+          await this.contracts.orderBook.getLastTwentyTrades();
 
         if (recentTrades.length === 0) {
           console.log(colorText("💤 No recent trades", colors.yellow));
@@ -12597,8 +13043,8 @@ ${colors.brightRed}└───────────────────�
 
       // Display margin ratio
       const marginRatio = (
-        (Number(unified.totalMarginCommitted) /
-          Number(unified.totalCollateral)) *
+        (Number(unified?.totalMarginCommitted || 0) /
+          Math.max(1, Number(unified?.totalCollateral || 0))) *
         100
       ).toFixed(2);
       const marginRatioColor =
@@ -12672,7 +13118,7 @@ ${colors.brightRed}└───────────────────�
       console.log(
         colorText(
           `   Total Committed:      ${colorText(
-            unified.totalMarginCommitted,
+            unified?.totalMarginCommitted ?? "0.00",
             colors.magenta
           )} USDC`,
           colors.white
@@ -12827,7 +13273,8 @@ ${colors.brightRed}└───────────────────�
         console.log(
           colorText(
             `   Total Margin Reserved: ${colorText(
-              comprehensiveMarginData.sources.unifiedMargin.totalMarginCommitted
+              comprehensiveMarginData.sources.unifiedMargin
+                ?.totalMarginCommitted
                 ? Number(
                     comprehensiveMarginData.sources.unifiedMargin
                       .marginReservedForOrders
@@ -12841,7 +13288,8 @@ ${colors.brightRed}└───────────────────�
         console.log(
           colorText(
             `   Total Margin Committed: ${colorText(
-              comprehensiveMarginData.sources.unifiedMargin.totalMarginCommitted
+              comprehensiveMarginData.sources.unifiedMargin
+                ?.totalMarginCommitted
                 ? Number(
                     comprehensiveMarginData.sources.unifiedMargin
                       .totalMarginCommitted
@@ -12878,7 +13326,9 @@ ${colors.brightRed}└───────────────────�
    * @returns {Object} Comprehensive margin breakdown with sources
    */
   async getComprehensiveMarginData() {
-    const marketId = MARKET_INFO.ALUMINUM.marketId;
+    const marketId =
+      (this.currentMarket && this.currentMarket.marketId) ||
+      MARKET_INFO["ALU-USD"].marketId;
     const marginData = {
       sources: {},
       totals: {

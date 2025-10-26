@@ -1,4 +1,5 @@
 require("@nomicfoundation/hardhat-toolbox");
+require("@nomicfoundation/hardhat-verify");
 require("dotenv").config(); // Load main .env file
 // require("dotenv").config({ path: ".env.polygon" }); // Load specific network configs if needed
 
@@ -29,6 +30,12 @@ const config = {
       },
       viaIR: true,
     },
+  },
+  // Enable Sourcify verification and point to Parsec's instance
+  sourcify: {
+    enabled: true,
+    // Parsec Sourcify instance as requested: https://sourcify.parsec.finance
+    apiUrl: process.env.SOURCIFY_API_URL || "https://sourcify.parsec.finance",
   },
   networks: {
     hardhat: {
@@ -87,6 +94,16 @@ const config = {
       timeout: 60000,
       allowUnlimitedContractSize: true,
     },
+    // HyperLiquid Mainnet (default network)
+    hyperliquid: {
+      url: process.env.HYPERLIQUID_RPC_URL || "https://rpc.hyperliquid.xyz",
+      accounts: networkAccounts,
+      chainId: 999, // HyperLiquid chain ID (corrected from RPC response)
+      gasPrice: "auto",
+      gas: "auto",
+      timeout: 60000,
+      allowUnlimitedContractSize: true,
+    },
     // HyperLiquid Testnet (if available)
     hyperliquid_testnet: {
       url:
@@ -123,6 +140,7 @@ const config = {
       polygonMumbai: process.env.POLYGONSCAN_API_KEY || "",
       mainnet: process.env.ETHERSCAN_API_KEY || "",
     },
+    // No customChains for Hyperliquid → enforce Sourcify-only flow
   },
   paths: {
     sources: "./src",

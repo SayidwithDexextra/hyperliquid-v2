@@ -1,592 +1,436 @@
-// contracts.js - Centralized contract configuration
-//
-// 🎯 PURPOSE:
-//   - Single source of truth for all contract addresses
-//   - Centralized ABI exports
-//   - Network-specific configurations
-//   - Easy deployment management
-//
-// 🔄 USAGE:
-//   const { getContract, ADDRESSES } = require('../config/contracts');
-//   const tradingRouter = await getContract('TRADING_ROUTER');
-//
-// 📝 UPDATE PROCESS:
-//   1. Run deployment script
-//   2. Update CONTRACT_ADDRESSES below
-//   3. All scripts automatically use new addresses
-//
-// Ensure Node-run scripts connect to the running Hardhat node (localhost)
-// This avoids ABI mismatches caused by connecting to the in-process "hardhat" network
-if (!process.env.HARDHAT_NETWORK) {
-  process.env.HARDHAT_NETWORK = "localhost";
-}
-const { ethers, network } = require("hardhat");
-const fs = require("fs");
+/**
+ * Contract Addresses and Configuration
+ *
+ * This file maintains the addresses of deployed contracts and provides utilities
+ * for interacting with the contracts in both development and production environments.
+ * It is automatically updated during deployments.
+ */
+
+// Import dependencies
 const path = require("path");
+const fs = require("fs");
 
-// Function to load deployment addresses
-function loadDeploymentAddresses() {
-  const rawNetworkName =
-    process.env.HARDHAT_NETWORK || (network && network.name) || "localhost";
-  const networkName =
-    rawNetworkName === "hardhat" ? "localhost" : rawNetworkName;
-  const filePath = path.join(
-    __dirname,
-    `../deployments/${networkName}-deployment.json`
-  );
+// ═══════════════════════════════════════════════════════════════════════════
+// CONFIGURATION SETTINGS
+// ═══════════════════════════════════════════════════════════════════════════
 
-  if (fs.existsSync(filePath)) {
-    console.log(`✅ Loading contract addresses from ${filePath}`);
-    const deployment = JSON.parse(fs.readFileSync(filePath, "utf8"));
-
-    const addresses = {};
-    const contractsField = deployment.contracts || deployment.addresses || {};
-
-    for (const [name, value] of Object.entries(contractsField)) {
-      // Handle different shapes: string address or { address: "0x..." }
-      if (typeof value === "string") {
-        addresses[name] = value;
-      } else if (value && typeof value === "object") {
-        if (typeof value.address === "string") {
-          addresses[name] = value.address;
-        } else if (typeof value.addr === "string") {
-          addresses[name] = value.addr;
-        }
-      }
-    }
-
-    return addresses;
-  } else {
-    console.warn(
-      `🚨 WARNING: Deployment file not found for network "${networkName}". Using default addresses.`
-    );
-    return {};
+// Current network settings - prefer Hardhat runtime network if available
+let ACTIVE_NETWORK = process.env.HARDHAT_NETWORK || "hyperliquid";
+try {
+  // If running under Hardhat, use the active network name (e.g., 'localhost', 'hyperliquid_testnet')
+  const hre = require("hardhat");
+  if (hre?.network?.name) {
+    ACTIVE_NETWORK = hre.network.name;
   }
+} catch (_) {
+  // not running under Hardhat; keep env/default
 }
 
-// Dynamically load contract addresses
-const DEPLOYMENT_ADDRESSES = loadDeploymentAddresses();
-
-// Allow refreshing addresses at runtime (useful if network was not ready at require time)
-function refreshAddresses() {
-  const loaded = loadDeploymentAddresses();
-  Object.assign(CONTRACT_ADDRESSES, loaded);
-  return CONTRACT_ADDRESSES;
-}
-
-// 📋 CONTRACT ADDRESSES - PRODUCTION MARGIN RELEASE DEPLOYMENT
-//
-// 🎯 FIXES APPLIED:
-//   ✅ Fixed position netting logic for partial closes
-//   ✅ Improved VWAP calculation precision
-//   ✅ Fixed event emission for correct entry prices
-//   ✅ Proper authorization for OrderBook -> Vault calls
-//   ✅ 1:1 margin requirement by default (100% collateral)
-//   ✅ Complete role-based access control
-//   ✅ Production-grade margin release for partial fills
-//   ✅ Cumulative tracking for margin across multiple fills
-//   ✅ Correctly handles orders filled at multiple price levels
-//
-// 💰 TRADING BEHAVIOR:
-//   • $100 position requires $100 collateral (1:1 ratio) by default
-//   • Partial closes preserve original entry price
-//   • VWAP calculations use improved precision
-//   • All authorization issues resolved
-//   • All orders use margin order functions for consistent behavior
-//   • Leverage can be enabled by authorized controller if desired
-//   • Spot trades transfer collateral directly between users
-//   • Market orders need existing liquidity to execute
-//   • Margin adjusts based on actual execution price, not limit price
-//
-// 🎯 MARGIN RELEASE FEATURES:
-//   ✅ When limit buy order at $1.50 matches at $1.00, only $100 margin used
-//   ✅ Tracks cumulative margin across multiple partial fills
-//   ✅ Properly handles both full and partial fills
-//   ✅ Sell orders don't adjust margin (margin based on amount, not price)
-//   ✅ Exact price matches don't trigger margin adjustment
-//   ✅ Gas efficient - updates happen in-place
-//
-const CONTRACT_ADDRESSES = {
-  // Core contracts - MODULAR V2 DEPLOYMENT
-  // TRADING_ROUTER: "0x9C85258d9A00C01d00ded98065ea3840dF06f09c", // Example if not in deployment
-  // CORE_VAULT: "0x3F76468754fC1FA4a79C796C580824799281aCa0",
-  // FUTURES_MARKET_FACTORY: "0x95c85427fdC7d6F04C948895fFe3dc6F84798EeC",
-
-  // Market-specific contracts (populated during deployment)
-  // ORDERBOOK: "0xFC27fc4786BE01510c3564117becD13fdB077bb3",
-  // BTC_ORDERBOOK: "0x413b1AfCa96a3df5A686d8BFBF93d30688a7f7D9",
-  // ALUMINUM_ORDERBOOK: "0xFC27fc4786BE01510c3564117becD13fdB077bb3",
-
-  // Mock contracts
-  // MOCK_USDC: "0x69bfB7DAB0135fB6cD3387CF411624d874B3c799",
-  ...DEPLOYMENT_ADDRESSES, // Dynamically loaded addresses will override any defaults
-};
-
-// 📋 CONTRACT NAMES - Maps to hardhat artifacts (MODULAR V2)
-const CONTRACT_NAMES = {
-  TRADING_ROUTER: "TradingRouter",
-  CORE_VAULT: "CoreVault", // Updated from CentralizedVault
-  FUTURES_MARKET_FACTORY: "FuturesMarketFactory",
-  ORDERBOOK: "OrderBook",
-  BTC_ORDERBOOK: "OrderBook",
-  ALUMINUM_ORDERBOOK: "OrderBook",
-  MOCK_USDC: "MockUSDC",
-  // Additional known contracts
-  VAULT_ANALYTICS: "VaultAnalytics",
-  POSITION_MANAGER: "PositionManager",
-  LIQUIDATION_MANAGER: "LiquidationManager",
-};
-
-// 📊 MARKET INFORMATION
-const MARKET_INFO = {
-  BTC: {
-    symbol: "BTC-USD",
-    marketId: ethers.keccak256(ethers.toUtf8Bytes("BTC-USD")),
-    name: "Bitcoin Futures",
-    orderBook: "0x413b1AfCa96a3df5A686d8BFBF93d30688a7f7D9",
-    leverageEnabled: false, // 1:1 margin by default
-    maxLeverage: "1x",
-    marginRequirement: "100%", // 1:1 ratio
-    defaultMargin: "100%", // Conservative default
-    riskLevel: "LOW", // No leverage = low risk
-    collateralRatio: "1:1", // $100 position = $100 collateral
-    features: {
-      marginRelease: true, // Margin adjusts to execution price
-      cumulativeTracking: true, // Tracks margin across partial fills
-      multiPriceLevel: true, // Handles fills at multiple price levels
-    },
-  },
-  ALUMINUM: {
-    symbol: "ALU-USD",
-    marketId:
-      "0xc6348f46a4dac78005a64ff26ab0e3d114645a0d336494037e628c070eb137b4",
-    name: "Aluminum Futures",
-    orderBook: "0xADd379DA9113b1Ae623BCB155261bce40eEfF6e9",
-    leverageEnabled: false,
-    maxLeverage: "1x",
-    marginRequirement: "100%",
-    defaultMargin: "100%",
-    riskLevel: "LOW",
-    collateralRatio: "1:1",
-    features: {
-      marginRelease: true,
-      cumulativeTracking: true,
-      multiPriceLevel: true,
-    },
-  },
-  // Additional markets can be created using FuturesMarketFactory
-  // All new markets start with 1:1 margin by default
-};
-
-// 🌐 NETWORK CONFIGURATIONS
-const NETWORK_CONFIG = {
+// Define supported networks
+const NETWORKS = {
   localhost: {
     name: "Hardhat Local",
     chainId: 31337,
     blockConfirmations: 1,
-    gasLimit: 30000000,
   },
   polygon: {
     name: "Polygon Mainnet",
     chainId: 137,
     blockConfirmations: 5,
   },
-  // Add more networks as needed
+  mumbai: {
+    name: "Mumbai Testnet",
+    chainId: 80001,
+    blockConfirmations: 5,
+  },
+  hyperliquid: {
+    name: "HyperLiquid Mainnet",
+    chainId: 999,
+    blockConfirmations: 3,
+  },
+  hyperliquid_testnet: {
+    name: "HyperLiquid Testnet",
+    chainId: 998,
+    blockConfirmations: 2,
+  },
 };
 
-// 🔒 ROLE DEFINITIONS - For authorization management (MODULAR V2)
-const ROLES = {
-  // CoreVault roles (updated from CentralizedVault)
-  ORDERBOOK_ROLE: ethers.keccak256(ethers.toUtf8Bytes("ORDERBOOK_ROLE")),
-  SETTLEMENT_ROLE: ethers.keccak256(ethers.toUtf8Bytes("SETTLEMENT_ROLE")),
-  FACTORY_ROLE: ethers.keccak256(ethers.toUtf8Bytes("FACTORY_ROLE")),
-
-  // Default admin role (from OpenZeppelin AccessControl)
-  DEFAULT_ADMIN_ROLE:
-    "0x0000000000000000000000000000000000000000000000000000000000000000",
+// Contract names to address mapping
+// Will be initialized from a deployment file below
+let CONTRACT_ADDRESSES = {
+  MOCK_USDC: "0x6F6f570F45833E249e27022648a26F4076F48f78",
+  VAULT_ANALYTICS: "0xCA8c8688914e0F7096c920146cd0Ad85cD7Ae8b9",
+  POSITION_MANAGER: "0xB0f05d25e41FbC2b52013099ED9616f1206Ae21B",
+  CORE_VAULT: "0x5FeaeBfB4439F3516c74939A9D04e95AFE82C4ae",
+  LIQUIDATION_MANAGER: "0x976fcd02f7C4773dd89C309fBF55D5923B4c98a1",
+  FUTURES_MARKET_FACTORY: "0xD42912755319665397FF090fBB63B1a31aE87Cee",
+  ALUMINUM_ORDERBOOK: "0x57aD6B95508a96dfC6e17efD702360B5124f4680",
+  BTC_ORDERBOOK: "0x196ACcDd41754F5d1FEA0D813A39a63792bb2751", // Using same address as ALU for now
+  ORDERBOOK: "0x196ACcDd41754F5d1FEA0D813A39a63792bb2751", // Generic reference
+  TRADING_ROUTER: "0x3F76468754fC1FA4a79C796C580824799281aCa0", // Using CORE_VAULT for now as fallback
 };
 
-// 🔧 HELPER FUNCTIONS
+// Contract role definitions (using hardcoded values instead of ethers.js)
+const CONTRACT_ROLES = {
+  ADMIN: "0x41444d494e00000000000000000000000000000000000000000000000000000000",
+  VAULT_MANAGER:
+    "0x5641554c545f4d414e4147455200000000000000000000000000000000000000",
+  ORDER_EXECUTOR:
+    "0x4f524445525f45584543555445520000000000000000000000000000000000",
+  LIQUIDATOR:
+    "0x4c49515549444154455200000000000000000000000000000000000000000000",
+  PRICE_REPORTER:
+    "0x50524943455f5245504f52544552000000000000000000000000000000000000",
+};
+
+// Define market information
+const MARKET_INFO = {
+  "ALU-USD": {
+    name: "Aluminum",
+    symbol: "ALU-USD",
+    marketId:
+      "0xc6348f46a4dac78005a64ff26ab0e3d114645a0d336494037e628c070eb137b4",
+    orderBook: "0xFC27fc4786BE01510c3564117becD13fdB077bb3",
+    active: true,
+  },
+  "BTC-USD": {
+    name: "Bitcoin",
+    symbol: "BTC-USD",
+    marketId:
+      "0xc6348f46a4dac78005a64ff26ab0e3d114645a0d336494037e628c070eb137b4", // Using same ID for now
+    orderBook: "0xFC27fc4786BE01510c3564117becD13fdB077bb3", // Using same address for now
+    active: true,
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONTRACT INTERFACES
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Contract ABIs are loaded dynamically from artifacts when needed
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PUBLIC FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Get contract instance by name
- * @param {string} contractKey - Key from CONTRACT_ADDRESSES
- * @param {object} options - Optional parameters
- * @returns {Promise<Contract>} Contract instance
+ * Refreshes contract addresses from deployment files
+ * @returns {Object} Updated addresses
  */
-async function getContract(contractKey, options = {}) {
-  let address = CONTRACT_ADDRESSES[contractKey];
-  const contractName = CONTRACT_NAMES[contractKey];
-
-  if (!address) {
-    // Try refreshing addresses in case network/init timing caused an empty load
-    refreshAddresses();
-    address = CONTRACT_ADDRESSES[contractKey];
-  }
-
-  if (!address) {
-    throw new Error(`❌ Contract address not found for: ${contractKey}`);
-  }
-
-  if (!contractName) {
-    throw new Error(`❌ Contract name not found for: ${contractKey}`);
-  }
-
+function refreshAddresses() {
   try {
-    const contract = await ethers.getContractAt(contractName, address);
+    // Look for network-specific deployment file
+    const deploymentPath = path.join(
+      __dirname,
+      "..",
+      "deployments",
+      `${ACTIVE_NETWORK}-deployment.json`
+    );
 
-    if (options.signer) {
-      return contract.connect(options.signer);
+    if (fs.existsSync(deploymentPath)) {
+      const deployment = JSON.parse(fs.readFileSync(deploymentPath, "utf8"));
+
+      // Update addresses from deployment
+      if (deployment && deployment.contracts) {
+        CONTRACT_ADDRESSES = { ...CONTRACT_ADDRESSES, ...deployment.contracts };
+
+        // Also update market info if available
+        if (deployment.aluminumMarket) {
+          MARKET_INFO["ALU-USD"] = {
+            name: "Aluminum",
+            symbol: deployment.aluminumMarket.symbol || "ALU-USD",
+            marketId: deployment.aluminumMarket.marketId,
+            orderBook: deployment.aluminumMarket.orderBook,
+            active: true,
+          };
+        }
+
+        // Merge any markets[] entries into MARKET_INFO for frontend + scripts
+        if (Array.isArray(deployment.markets)) {
+          for (const m of deployment.markets) {
+            if (!m || !m.symbol || !m.orderBook || !m.marketId) continue;
+            const key = m.symbol;
+            MARKET_INFO[key] = {
+              name: m.symbol.split("-")[0],
+              symbol: m.symbol,
+              marketId: m.marketId,
+              orderBook: m.orderBook,
+              active: true,
+            };
+            // Expose convenience contract keys like <SYMBOL>_ORDERBOOK if not already present
+            const alias = m.symbol
+              .toUpperCase()
+              .split("-")[0]
+              .replace(/[^A-Z0-9]+/g, "_");
+            const obKey = `${alias}_ORDERBOOK`;
+            if (!CONTRACT_ADDRESSES[obKey])
+              CONTRACT_ADDRESSES[obKey] = m.orderBook;
+            const idKey = `${alias}_MARKET_ID`;
+            if (!CONTRACT_ADDRESSES[idKey])
+              CONTRACT_ADDRESSES[idKey] = m.marketId;
+          }
+        }
+
+        console.log(
+          `📝 Loaded contract addresses from ${ACTIVE_NETWORK}-deployment.json`
+        );
+      }
+    } else {
+      console.warn(`⚠️ No deployment file found for network ${ACTIVE_NETWORK}`);
     }
 
-    return contract;
+    return CONTRACT_ADDRESSES;
   } catch (error) {
-    throw new Error(
-      `❌ Failed to get contract ${contractKey}: ${error.message}`
-    );
+    console.error(`❌ Error refreshing addresses: ${error.message}`);
+    return CONTRACT_ADDRESSES;
   }
 }
 
 /**
- * Get multiple contracts at once
- * @param {string[]} contractKeys - Array of contract keys
- * @param {object} options - Optional parameters
- * @returns {Promise<object>} Object with contract instances
- */
-async function getContracts(contractKeys, options = {}) {
-  const contracts = {};
-
-  for (const key of contractKeys) {
-    contracts[key.toLowerCase()] = await getContract(key, options);
-  }
-
-  return contracts;
-}
-
-/**
- * Get all core trading contracts
- * @param {object} options - Optional parameters
- * @returns {Promise<object>} Object with all core contracts
- */
-async function getCoreContracts(options = {}) {
-  return await getContracts(
-    ["TRADING_ROUTER", "CORE_VAULT", "FUTURES_MARKET_FACTORY"],
-    options
-  );
-}
-
-/**
- * Get contract address by key
- * @param {string} contractKey - Contract key
- * @returns {string} Contract address
+ * Gets the address for a specific contract
+ * @param {string} contractKey - The contract key
+ * @returns {string} The contract address
  */
 function getAddress(contractKey) {
-  let address = CONTRACT_ADDRESSES[contractKey];
-  if (!address) {
-    refreshAddresses();
-    address = CONTRACT_ADDRESSES[contractKey];
-  }
-  if (!address) {
-    throw new Error(`❌ Address not found for contract: ${contractKey}`);
-  }
-  return address;
-}
-
-/**
- * Update contract addresses (useful for deployment scripts)
- * @param {object} newAddresses - Object with new addresses
- */
-function updateAddresses(newAddresses) {
-  Object.assign(CONTRACT_ADDRESSES, newAddresses);
-  console.log(
-    `✅ Updated ${Object.keys(newAddresses).length} contract addresses`
+  return (
+    CONTRACT_ADDRESSES[contractKey] ||
+    "0x0000000000000000000000000000000000000000"
   );
 }
 
 /**
- * Get current network configuration
- * @returns {object} Network config
+ * Gets contract instance
+ * @param {string} contractKey - The contract key
+ * @param {Object} options - Options including provider, signer
+ * @returns {Promise<Contract>} Ethers contract instance
  */
-async function getNetworkConfig() {
-  const network = await ethers.provider.getNetwork();
-  const chainId = Number(network.chainId);
+async function getContract(contractKey, options = {}) {
+  const address = getAddress(contractKey);
+  if (!address || address === "0x0000000000000000000000000000000000000000") {
+    throw new Error(`No address configured for ${contractKey}`);
+  }
 
-  // Find matching network config
-  for (const [key, config] of Object.entries(NETWORK_CONFIG)) {
-    if (config.chainId === chainId) {
-      return { key, ...config };
+  // Resolve ethers (prefer Hardhat's ethers if available)
+  let ethersLib;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    ethersLib = require("hardhat").ethers;
+  } catch (_) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    ethersLib = require("ethers");
+  }
+
+  // Determine runner (signer/provider)
+  let runner = options.signer || options.provider;
+  if (!runner && ethersLib.provider) {
+    runner = ethersLib.provider; // Hardhat
+  }
+  if (!runner && ethersLib.JsonRpcProvider) {
+    const rpcUrl =
+      process.env.RPC_URL ||
+      process.env.ALCHEMY_HTTP_URL ||
+      process.env.INFURA_HTTP_URL;
+    if (rpcUrl) {
+      runner = new ethersLib.JsonRpcProvider(rpcUrl);
     }
   }
 
-  return {
-    key: "unknown",
-    name: "Unknown Network",
-    chainId,
-    blockConfirmations: 1,
-  };
+  // Minimal ABIs per contract (extend as needed). These are sufficient for address checks and basic ops.
+  const ERC20_ABI = [
+    "function balanceOf(address) view returns (uint256)",
+    "function transfer(address,uint256) returns (bool)",
+    "function approve(address,uint256) returns (bool)",
+    "function decimals() view returns (uint8)",
+    "function symbol() view returns (string)",
+    "function name() view returns (string)",
+  ];
+
+  const CORE_VAULT_ABI = [
+    "function depositCollateral(uint256 amount)",
+    "function userCollateral(address) view returns (uint256)",
+    "function getAvailableCollateral(address) view returns (uint256)",
+    // Portfolio/summary views used by interactive-trader
+    "function getUnifiedMarginSummary(address) view returns (uint256,uint256,uint256,uint256,int256,int256,uint256,bool)",
+    "function getUserPositions(address) view returns (tuple(bytes32 marketId,int256 size,uint256 entryPrice,uint256 marginLocked,uint256 socializedLossAccrued6,uint256 haircutUnits18,uint256 liquidationPrice)[])",
+    "function userSocializedLoss(address) view returns (uint256)",
+    // Position/market helpers
+    "function marketToOrderBook(bytes32) view returns (address)",
+    "function getPositionSummary(address,bytes32) view returns (int256 size,uint256 entryPrice,uint256 marginLocked)",
+    "function getPositionEquity(address,bytes32) view returns (int256 equity6,uint256 notional6,bool hasPosition)",
+    "function getPositionFreeMargin(address,bytes32) view returns (uint256 freeMargin6,uint256 maintenance6,bool hasPosition)",
+    "function getEffectiveMaintenanceMarginBps(address,bytes32) view returns (uint256 mmrBps,uint256 fillRatio1e18,bool hasPosition)",
+    // Liquidation & risk views
+    "function getLiquidationPrice(address,bytes32) view returns (uint256 liquidationPrice,bool hasPosition)",
+    "function isUnderLiquidationPosition(address,bytes32) view returns (bool)",
+    "function getUsersWithPositionsInMarket(bytes32) view returns (address[])",
+    // Risk parameters
+    "function baseMmrBps() view returns (uint256)",
+    "function penaltyMmrBps() view returns (uint256)",
+    // Misc
+    "function getEffectiveMaintenanceDetails(address,bytes32) view returns (uint256 mmrBps,uint256 fillRatio1e18,uint256 gapRatio1e18,bool hasPosition)",
+    "function getMarkPrice(bytes32) view returns (uint256)",
+    "function grantRole(bytes32,address)",
+    "function hasRole(bytes32,address) view returns (bool)",
+    "function setLiquidationManager(address)",
+    "function setMmrParams(uint16,uint16,uint16,uint16,uint8)",
+    "function updateMarkPrice(bytes32,uint256)",
+  ];
+
+  const ORDERBOOK_ABI = [
+    // Common read methods used across scripts
+    "function bestBid() view returns (uint256)",
+    "function bestAsk() view returns (uint256)",
+    "function markPrice() view returns (uint256)",
+    // Placement/trading (for interactive tools)
+    "function placeMarginLimitOrder(uint256 price, uint256 amount, bool isBuy)",
+    "function placeMarginMarketOrder(uint256 amount, bool isBuy)",
+  ];
+
+  const FACTORY_ABI = [
+    "function createFuturesMarketDiamond(string,string,uint256,uint256,string,string[],address,bytes4[],address,bytes) returns (address,bytes32)",
+    "function getDefaultParameters() view returns (uint16,uint16)",
+    "function updateDefaultParameters(uint16,uint16)",
+    "event FuturesMarketCreated(bytes32 indexed marketId, address indexed orderBook)",
+  ];
+
+  // Allow caller to override ABI
+  let abi = options.abi;
+  if (!abi) {
+    switch (contractKey) {
+      case "MOCK_USDC":
+        abi = ERC20_ABI;
+        break;
+      case "CORE_VAULT":
+        abi = CORE_VAULT_ABI;
+        break;
+      case "ALUMINUM_ORDERBOOK":
+      case "BTC_ORDERBOOK":
+      case "ORDERBOOK":
+        abi = ORDERBOOK_ABI;
+        break;
+      case "FUTURES_MARKET_FACTORY":
+        abi = FACTORY_ABI;
+        break;
+      default:
+        // Fallback to an empty ABI which is still sufficient for .getAddress()
+        abi = [];
+    }
+  }
+
+  // In Hardhat, prefer getContractAt to attach to deployed address
+  try {
+    if (ethersLib.getContractAt) {
+      // Hardhat-style API
+      const contract = await ethersLib.getContractAt(
+        abi,
+        address,
+        options.signer || undefined
+      );
+      return contract;
+    }
+  } catch (_) {
+    // Ignore and fallback to generic ethers.Contract
+  }
+
+  // Generic ethers v6 contract creation
+  const contract = new ethersLib.Contract(address, abi, runner);
+  return contract;
 }
 
 /**
- * Validate all contract addresses are set
- * @returns {boolean} True if all addresses are valid
+ * Gets the current network configuration
+ * @returns {Object} Network config
+ */
+function getNetworkConfig() {
+  return NETWORKS[ACTIVE_NETWORK] || NETWORKS.localhost;
+}
+
+/**
+ * Validates that all critical addresses are set
+ * @returns {boolean} Whether validation passed
  */
 function validateAddresses() {
-  const missing = [];
+  const requiredContracts = [
+    "MOCK_USDC",
+    "CORE_VAULT",
+    "FUTURES_MARKET_FACTORY",
+    "ALUMINUM_ORDERBOOK",
+  ];
 
-  for (const [key, address] of Object.entries(CONTRACT_ADDRESSES)) {
-    if (!address || address === "0x0000000000000000000000000000000000000000") {
-      missing.push(key);
-    }
-  }
+  const missingContracts = requiredContracts.filter(
+    (key) =>
+      !CONTRACT_ADDRESSES[key] ||
+      CONTRACT_ADDRESSES[key] === "0x0000000000000000000000000000000000000000"
+  );
 
-  if (missing.length > 0) {
-    console.error(`❌ Missing contract addresses: ${missing.join(", ")}`);
+  if (missingContracts.length > 0) {
+    console.warn(
+      `⚠️ Missing required contract addresses: ${missingContracts.join(", ")}`
+    );
     return false;
   }
 
-  console.log(
-    `✅ All ${
-      Object.keys(CONTRACT_ADDRESSES).length
-    } contract addresses are valid`
-  );
   return true;
 }
 
 /**
- * Display current contract configuration
+ * Displays the current configuration
  */
 function displayConfig() {
-  // Ensure we show latest addresses
-  refreshAddresses();
+  console.log("\n═════════════════════════════════════════");
+  console.log(
+    `🌐 Network: ${ACTIVE_NETWORK} (${
+      NETWORKS[ACTIVE_NETWORK]?.name || "Unknown"
+    })`
+  );
+  console.log("═════════════════════════════════════════");
+  console.log("📚 CONTRACT ADDRESSES");
+  console.log("═════════════════════════════════════════");
 
-  console.log("\n📋 CURRENT CONTRACT CONFIGURATION:");
-  console.log("═".repeat(60));
+  Object.entries(CONTRACT_ADDRESSES).forEach(([key, address]) => {
+    console.log(`${key.padEnd(25)} │ ${address}`);
+  });
 
-  const isAddress = (v) =>
-    typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
+  console.log("\n📊 MARKETS");
+  console.log("═════════════════════════════════════════");
 
-  for (const [key, address] of Object.entries(CONTRACT_ADDRESSES)) {
-    if (!isAddress(address)) continue; // Only display address-like values
-    const contractName = CONTRACT_NAMES[key] || "Unknown";
-    console.log(`${key.padEnd(20)} │ ${contractName.padEnd(15)} │ ${address}`);
-  }
-
-  console.log("═".repeat(60));
+  Object.entries(MARKET_INFO).forEach(([key, info]) => {
+    console.log(`${key} (${info.name})`);
+    console.log(`  Market ID: ${info.marketId}`);
+    console.log(`  OrderBook: ${info.orderBook}`);
+    console.log(`  Status: ${info.active ? "Active" : "Inactive"}`);
+    console.log("───────────────────────────────────────");
+  });
 }
 
-/**
- * Verify modular contract structure is working correctly
- */
-async function verifyModularStructure() {
-  console.log("\n🔍 MODULAR STRUCTURE VERIFICATION:");
-  console.log("═".repeat(60));
+// Initialize by loading the latest deployment if available
+refreshAddresses();
 
-  try {
-    const vault = await getContract("CORE_VAULT");
-    const orderBook = await getContract("ORDERBOOK");
-    const factory = await getContract("FUTURES_MARKET_FACTORY");
-    const tradingRouter = await getContract("TRADING_ROUTER");
+// ═══════════════════════════════════════════════════════════════════════════
+// EXPORTS
+// ═══════════════════════════════════════════════════════════════════════════
 
-    console.log("✅ CoreVault contract loaded successfully");
-    console.log("✅ OrderBook contract loaded successfully");
-    console.log("✅ FuturesMarketFactory contract loaded successfully");
-    console.log("✅ TradingRouter contract loaded successfully");
-
-    // Test method availability
-    const vaultMethods = [
-      "getUserPositions",
-      "getMarginSummary",
-      "depositCollateral",
-    ];
-    const orderBookMethods = [
-      "placeMarginLimitOrder",
-      "getUserOrders",
-      "calculateMarkPrice",
-    ];
-    const factoryMethods = [
-      "getMarketDetails",
-      "getAllMarkets",
-      "doesMarketExist",
-    ];
-    const routerMethods = [
-      "marketBuyWithLeverage",
-      "getUserPositionBreakdowns",
-    ];
-
-    for (const method of vaultMethods) {
-      if (typeof vault[method] === "function") {
-        console.log(`  ✅ CoreVault.${method}() available`);
-      } else {
-        console.log(`  ❌ CoreVault.${method}() missing`);
-      }
-    }
-
-    for (const method of orderBookMethods) {
-      if (typeof orderBook[method] === "function") {
-        console.log(`  ✅ OrderBook.${method}() available`);
-      } else {
-        console.log(`  ❌ OrderBook.${method}() missing`);
-      }
-    }
-
-    for (const method of factoryMethods) {
-      if (typeof factory[method] === "function") {
-        console.log(`  ✅ FuturesMarketFactory.${method}() available`);
-      } else {
-        console.log(`  ❌ FuturesMarketFactory.${method}() missing`);
-      }
-    }
-
-    for (const method of routerMethods) {
-      if (typeof tradingRouter[method] === "function") {
-        console.log(`  ✅ TradingRouter.${method}() available`);
-      } else {
-        console.log(`  ❌ TradingRouter.${method}() missing`);
-      }
-    }
-
-    console.log("═".repeat(60));
-    return true;
-  } catch (error) {
-    console.error(`❌ Error verifying modular structure: ${error.message}`);
-    return false;
-  }
-}
-
-/**
- * Display full configuration including markets
- */
-async function displayFullConfig() {
-  console.log("\n📋 FULL SYSTEM CONFIGURATION (MODULAR V2):");
-  console.log("═".repeat(80));
-
-  console.log("\n🏢 CONTRACT ADDRESSES:");
-  for (const [key, address] of Object.entries(CONTRACT_ADDRESSES)) {
-    const contractName = CONTRACT_NAMES[key] || "Unknown";
-    console.log(
-      `  ${key.padEnd(20)} │ ${contractName.padEnd(15)} │ ${address}`
-    );
-  }
-
-  console.log("\n📊 MARKET INFORMATION:");
-  for (const [key, market] of Object.entries(MARKET_INFO)) {
-    console.log(`  ${key}:`);
-    console.log(`    Symbol: ${market.symbol}`);
-    console.log(`    Market ID: ${market.marketId}`);
-    console.log(`    OrderBook: ${market.orderBook}`);
-    console.log(`    Margin Requirement: ${market.marginRequirement}`);
-    console.log(`    Features:`);
-    if (market.features) {
-      for (const [feat, enabled] of Object.entries(market.features)) {
-        console.log(`      - ${feat}: ${enabled ? "✅" : "❌"}`);
-      }
-    }
-  }
-
-  const networkConfig = await getNetworkConfig();
-  console.log("\n🌐 NETWORK:");
-  console.log(`  Name: ${networkConfig.name}`);
-  console.log(`  Chain ID: ${networkConfig.chainId}`);
-
-  console.log("\n🔒 ROLES:");
-  for (const [key, hash] of Object.entries(ROLES)) {
-    console.log(`  ${key.padEnd(20)} │ ${hash}`);
-  }
-
-  console.log("═".repeat(80));
-}
-
-/**
- * Check and display authorization status
- */
-async function checkAuthorization() {
-  console.log("\n🔒 AUTHORIZATION STATUS:");
-  console.log("═".repeat(60));
-
-  try {
-    const vault = await getContract("CORE_VAULT");
-    const factory = await getContract("FUTURES_MARKET_FACTORY");
-    const orderBook = await getContract("ORDERBOOK");
-
-    // Check Factory -> Vault authorization
-    const factoryHasRole = await vault.hasRole(
-      ROLES.FACTORY_ROLE,
-      await factory.getAddress()
-    );
-    console.log(
-      `Factory has FACTORY_ROLE on Vault: ${factoryHasRole ? "✅" : "❌"}`
-    );
-
-    // Check OrderBook -> Vault authorization
-    const orderBookHasRole = await vault.hasRole(
-      ROLES.ORDERBOOK_ROLE,
-      await orderBook.getAddress()
-    );
-    console.log(
-      `OrderBook has ORDERBOOK_ROLE on Vault: ${orderBookHasRole ? "✅" : "❌"}`
-    );
-
-    // Check OrderBook registration
-    const isRegistered = await vault.registeredOrderBooks(
-      await orderBook.getAddress()
-    );
-    console.log(
-      `OrderBook is registered in Vault: ${isRegistered ? "✅" : "❌"}`
-    );
-
-    // Check market assignment
-    const marketId = MARKET_INFO.BTC.marketId;
-    const assignedOrderBook = await vault.marketToOrderBook(marketId);
-    const isAssigned = assignedOrderBook === (await orderBook.getAddress());
-    console.log(
-      `BTC market assigned to OrderBook: ${isAssigned ? "✅" : "❌"}`
-    );
-
-    console.log("═".repeat(60));
-    return {
-      factoryHasRole,
-      orderBookHasRole,
-      isRegistered,
-      isAssigned,
-    };
-  } catch (error) {
-    console.error(`❌ Error checking authorization: ${error.message}`);
-    return null;
-  }
-}
-
-// 📤 EXPORTS
 module.exports = {
-  // Main functions
+  ADDRESSES: CONTRACT_ADDRESSES,
+  NAMES: {
+    MOCK_USDC: "Mock USDC",
+    CORE_VAULT: "Core Vault",
+    FUTURES_MARKET_FACTORY: "Futures Market Factory",
+    ALUMINUM_ORDERBOOK: "Aluminum OrderBook",
+    BTC_ORDERBOOK: "BTC OrderBook",
+    TRADING_ROUTER: "Trading Router",
+    ORDERBOOK: "Generic OrderBook",
+    VAULT_ANALYTICS: "Vault Analytics",
+    POSITION_MANAGER: "Position Manager",
+    LIQUIDATION_MANAGER: "Liquidation Manager",
+  },
+  NETWORKS,
+  MARKET_INFO,
+  ROLES: CONTRACT_ROLES,
   getContract,
-  getContracts,
-  getCoreContracts,
-
-  // Address functions
   getAddress,
-  updateAddresses,
-  validateAddresses,
-  refreshAddresses,
-
-  // Configuration
   getNetworkConfig,
   displayConfig,
-  displayFullConfig,
-  verifyModularStructure,
-  checkAuthorization,
-
-  // Constants (for backwards compatibility)
-  ADDRESSES: CONTRACT_ADDRESSES,
-  NAMES: CONTRACT_NAMES,
-  NETWORKS: NETWORK_CONFIG,
-  MARKET_INFO,
-  ROLES,
-
-  // Direct access to addresses (for scripts that need them)
-  TRADING_ROUTER: () => getAddress("TRADING_ROUTER"),
-  CORE_VAULT: () => getAddress("CORE_VAULT"),
-  CENTRALIZED_VAULT: () => getAddress("CORE_VAULT"), // Backwards compatibility
-  FUTURES_MARKET_FACTORY: () => getAddress("FUTURES_MARKET_FACTORY"),
-  ORDERBOOK: () => getAddress("ORDERBOOK"),
-  MOCK_USDC: () => getAddress("MOCK_USDC"),
+  validateAddresses,
+  refreshAddresses,
 };

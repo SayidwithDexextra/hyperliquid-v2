@@ -94,7 +94,6 @@ contract FuturesMarketFactory {
     // Oracle integration
     mapping(bytes32 => address) internal marketOracles; // Custom oracle per market
     mapping(bytes32 => bytes32) internal umaRequestIds; // UMA request IDs for settlement
-    mapping(bytes32 => bool) internal marketSettled; // Settlement status
     // removed: finalSettlementPrices mapping to reduce bytecode
     
     // Global oracle settings
@@ -124,9 +123,7 @@ contract FuturesMarketFactory {
     );
     // Admin/config events removed to reduce bytecode size
     
-    // Oracle and settlement events
-    // Auxiliary oracle events removed to reduce bytecode size
-    event MarketSettled(bytes32 indexed marketId, uint256 finalPrice, address indexed settler);
+    // Oracle events (settlement events removed from factory)
     // Auxiliary oracle events removed to reduce bytecode size
     
     // ============ Modifiers ============
@@ -330,87 +327,7 @@ contract FuturesMarketFactory {
         // event omitted to reduce bytecode size
     }
     
-    /**
-     * @dev Request settlement via UMA oracle
-     * @param marketId Market identifier
-     */
-    function requestUMASettlement(bytes32 marketId) external {
-        if (!marketExists[marketId]) revert MarketNotFound();
-        if (marketSettled[marketId]) revert MarketAlreadySettledErr();
-        if (block.timestamp < marketSettlementDates[marketId]) revert SettlementNotReady();
-        if (address(umaOracle) == address(0)) revert OracleNotConfigured();
-        
-        // Create UMA request
-        bytes memory ancillaryData = abi.encodePacked(
-            "URL:", marketMetricUrls[marketId],
-            ",SYM:", marketSymbols[marketId],
-            ",T:", marketSettlementDates[marketId]
-        );
-        
-        bytes32 requestId = umaOracle.requestPrice(
-            marketId, // Use marketId as identifier
-            marketSettlementDates[marketId],
-            ancillaryData,
-            address(vault.collateralToken()),
-            defaultOracleReward
-        );
-        
-        umaRequestIds[marketId] = requestId;
-        // event omitted to reduce bytecode size
-    }
-    
-    /**
-     * @dev Settle market with UMA oracle result
-     * @param marketId Market identifier
-     */
-    function settleMarketWithUMA(bytes32 marketId) external {
-        if (!marketExists[marketId]) revert MarketNotFound();
-        if (marketSettled[marketId]) revert MarketAlreadySettledErr();
-        if (umaRequestIds[marketId] == bytes32(0)) revert UmaRequestMissing();
-        
-        // Get price from UMA oracle
-        int256 oraclePrice = umaOracle.getPrice(umaRequestIds[marketId]);
-        if (oraclePrice <= 0) revert InvalidOraclePrice();
-        
-        uint256 finalPrice = uint256(oraclePrice);
-        
-        // Settle the market
-        _settleMarket(marketId, finalPrice);
-        
-        emit MarketSettled(marketId, finalPrice, msg.sender);
-    }
-    
-    /**
-     * @dev Manual settlement by oracle admin
-     * @param marketId Market identifier
-     * @param finalPrice Final settlement price
-     */
-    function manualSettle(bytes32 marketId, uint256 finalPrice) external {
-        if (!(msg.sender == oracleAdmin || msg.sender == admin)) revert NotAuthorized();
-        if (!marketExists[marketId]) revert MarketNotFound();
-        if (marketSettled[marketId]) revert MarketAlreadySettledErr();
-        if (block.timestamp < marketSettlementDates[marketId]) revert SettlementNotReady();
-        if (finalPrice == 0) revert InvalidFinalPrice();
-        
-        _settleMarket(marketId, finalPrice);
-        
-        emit MarketSettled(marketId, finalPrice, msg.sender);
-    }
-    
-    /**
-     * @dev Internal function to settle a market
-     * @param marketId Market identifier
-     * @param finalPrice Final settlement price
-     */
-    function _settleMarket(bytes32 marketId, uint256 finalPrice) internal {
-        marketSettled[marketId] = true;
-        
-        // Update final mark price in vault
-        vault.updateMarkPrice(marketId, finalPrice);
-        
-        // TODO: Implement position settlement logic
-        // This would calculate P&L for all positions and settle them
-    }
+    // Settlement is fully handled by CoreVault/OrderBook. The factory no longer settles.
     
     // ============ Administrative Functions ============
     
@@ -653,7 +570,7 @@ contract FuturesMarketFactory {
         uint256 count = 0;
         for (uint256 i = 0; i < mLen; ) {
             bytes32 mid = allMarkets[i];
-            if (!marketSettled[mid] && block.timestamp >= marketSettlementDates[mid]) {
+            if (!vault.marketSettled(mid) && block.timestamp >= marketSettlementDates[mid]) {
                 count++;
             }
             unchecked { ++i; }
@@ -664,7 +581,7 @@ contract FuturesMarketFactory {
         
         for (uint256 i = 0; i < mLen; ) {
             bytes32 mid = allMarkets[i];
-            if (!marketSettled[mid] && block.timestamp >= marketSettlementDates[mid]) {
+            if (!vault.marketSettled(mid) && block.timestamp >= marketSettlementDates[mid]) {
                 ready[index] = mid;
                 unchecked { ++index; }
             }
@@ -798,7 +715,7 @@ contract FuturesMarketFactory {
         uint256 len = marketIds.length;
         for (uint256 i = 0; i < len; ) {
             bytes32 mid = marketIds[i];
-            if (marketExists[mid] && !marketSettled[mid]) {
+            if (marketExists[mid] && !vault.marketSettled(mid)) {
                 vault.updateMarkPrice(mid, prices[i]);
             }
             unchecked { ++i; }

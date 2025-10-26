@@ -6,25 +6,33 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
-    "deploy": "hardhat run scripts/deploy.js",
+    "deploy": "hardhat run scripts/deploy.js --network hyperliquid",
     "deploy:localhost": "hardhat run scripts/deploy.js --network localhost",
     "deploy:hyperliquid": "hardhat run scripts/deploy.js --network hyperliquid",
     "deploy:hyperliquid-testnet": "hardhat run scripts/deploy.js --network hyperliquid_testnet",
     "deploy:polygon": "hardhat run scripts/deploy.js --network polygon",
     "size:contracts": "node scripts/check-contract-sizes.js",
-    "trade": "hardhat run scripts/interactive-trader.js --network localhost",
+    "trade": "hardhat run scripts/interactive-trader.js --network hyperliquid",
+    "trade:localhost": "hardhat run scripts/interactive-trader.js --network localhost",
     "trade:hyperliquid": "hardhat run scripts/interactive-trader.js --network hyperliquid",
+    "trade:hyperliquid-testnet": "hardhat run scripts/interactive-trader.js --network hyperliquid_testnet",
+    "enable:scan-on-trade": "hardhat run scripts/enable-scan-on-trade.js --network hyperliquid",
+    "poke:liq": "hardhat run scripts/poke-liquidations.js --network hyperliquid",
+    "query:scan-on-trade": "hardhat run scripts/query-scan-on-trade.js --network hyperliquid",
     "viewer": "hardhat run scripts/live-orderbook-viewer.js --network localhost",
     "accounts": "hardhat accounts",
     "accounts:hyperliquid": "hardhat accounts --network hyperliquid",
+    "launch": "node scripts/launch-macos.js --network hyperliquid",
     "launch:localhost": "node scripts/launch-macos.js --network localhost",
     "launch:hyperliquid": "node scripts/launch-macos.js --network hyperliquid",
-    "launch:hyperliquid-testnet": "node scripts/launch-macos.js --network hyperliquid_testnet"
+    "launch:hyperliquid-testnet": "node scripts/launch-macos.js --network hyperliquid_testnet",
+    "verify:all": "hardhat run scripts/verify-all.js --network hyperliquid"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.1.1",
     "@types/node": "^20.0.0",
-    "hardhat": "^2.19.0",
+    "hardhat": "^2.26.0",
     "typescript": "^5.0.0"
   },
   "dependencies": {

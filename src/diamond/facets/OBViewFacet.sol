@@ -55,6 +55,12 @@ contract OBViewFacet {
     function sellLevels(uint256 price) external view returns (OrderBookStorage.PriceLevel memory level) {
         return OrderBookStorage.state().sellLevels[price];
     }
+
+    // Total margin locked in this market across all users (USDC, 6 decimals)
+    function totalMarginLockedInMarket() external view returns (uint256 totalLocked6) {
+        OrderBookStorage.State storage s = OrderBookStorage.state();
+        return s.vault.getTotalMarginLockedInMarket(s.marketId);
+    }
 }
 
 
