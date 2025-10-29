@@ -728,6 +728,9 @@ class InteractiveTrader {
     console.log(
       "\n🔗 Loading smart contract addresses for the current network..."
     );
+
+    // Refresh addresses from Supabase or deployment file
+    await getContract.refreshAddresses();
     displayConfig(); // This will print the table of addresses
 
     await this.loadContracts();

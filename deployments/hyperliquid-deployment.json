@@ -1,16 +1,22 @@
 {
   "network": "hyperliquid",
   "chainId": 999,
-  "timestamp": "2025-10-15T22:50:08.562Z",
+  "timestamp": "2025-10-28T18:33:01.293Z",
   "contracts": {
     "MOCK_USDC": "0x779d7401B73Ac1d3ceAC3693f5401D2ad1058b8D",
     "VAULT_ANALYTICS": "0x6628976668Ac05cB1e6dfBac2C1f244636cE6234",
     "POSITION_MANAGER": "0x42c68638cA5c4cBa21be2DAB2f36Fa0d9f22eD78",
-    "CORE_VAULT": "0xcd6f02c182c76a22D77F653860DCE238F8515b6d",
+    "CORE_VAULT": "0x492897946bBCC356559E4Ae63E903Dcb808936e5",
     "LIQUIDATION_MANAGER": "0xe9f5928C9162c46f8208C0B21E5471F7b7be5792",
-    "FUTURES_MARKET_FACTORY": "0xcDF6fb9Ba0A2c755f474704d54FbA7Ab602C5749",
-    "ALUMINUM_ORDERBOOK": "0x7464aC2e8f1665099F36519315A6BdAC4de32143", 
-    "ALUMINUM_MARKET_ID": "0x84df5da1dc24d655e8d74a938f8fa61ebe4288d27c27238f318464ef5e6d0bb4"
+    "FUTURES_MARKET_FACTORY": "0x3d4959938de34C5D57C36987b966e194C9bD5912",
+    "ALUMINUM_ORDERBOOK": "0x7464aC2e8f1665099F36519315A6BdAC4de32143",
+    "ALUMINUM_MARKET_ID": "0x84df5da1dc24d655e8d74a938f8fa61ebe4288d27c27238f318464ef5e6d0bb4",
+    "GOLD_ORDERBOOK": "0x08FF2C42EA996aA8aaEdEd0E517F77FDca5C5Bd9",
+    "GOLD_MARKET_ID": "0xeeba843613042f88d5f0be4d515232372c25447b938c9a3bbc8c95bbca8657b2",
+    "ORDERBOOK": "0xbcFAf8771b5Fb7Ef42365E3e034f8e793EB7F1d4",
+    "MARKET_ID": "0xbe6b3c4d3a5d2a210197ec0988fd82fd2068617d7ba2d40747e9f8303f491c62",
+    "SILVER_ORDERBOOK": "0xbcFAf8771b5Fb7Ef42365E3e034f8e793EB7F1d4",
+    "SILVER_MARKET_ID": "0xbe6b3c4d3a5d2a210197ec0988fd82fd2068617d7ba2d40747e9f8303f491c62"
   },
   "deployer": "0x84b1e48e10D6326eD70a1947AaABF49AC8e290C7",
   "allUsers": [
@@ -44,5 +50,46 @@
     "marketId": "0x84df5da1dc24d655e8d74a938f8fa61ebe4288d27c27238f318464ef5e6d0bb4",
     "symbol": "ALU-USD",
     "orderBook": "0x7464aC2e8f1665099F36519315A6BdAC4de32143"
+  },
+  "markets": [
+    {
+      "symbol": "GOLD-USD",
+      "marketId": "0xeeba843613042f88d5f0be4d515232372c25447b938c9a3bbc8c95bbca8657b2",
+      "orderBook": "0x08FF2C42EA996aA8aaEdEd0E517F77FDca5C5Bd9",
+      "metricUrl": "https://www.lbma.org.uk/prices-and-data/daily-prices",
+      "settlementDate": 1793097840,
+      "startPrice": "2500000000",
+      "dataSource": "LBMA",
+      "tags": [
+        "COMMODITIES",
+        "PRECIOUS_METAL",
+        "GOLD"
+      ]
+    },
+    {
+      "symbol": "ALU-USD",
+      "marketId": "0x84df5da1dc24d655e8d74a938f8fa61ebe4288d27c27238f318464ef5e6d0bb4",
+      "orderBook": "0x7464aC2e8f1665099F36519315A6BdAC4de32143",
+      "metricUrl": "",
+      "settlementDate": 0,
+      "startPrice": "0",
+      "dataSource": "Legacy",
+      "tags": []
+    },
+    {
+      "symbol": "Silver-USD",
+      "marketId": "0xbe6b3c4d3a5d2a210197ec0988fd82fd2068617d7ba2d40747e9f8303f491c62",
+      "orderBook": "0xbcFAf8771b5Fb7Ef42365E3e034f8e793EB7F1d4",
+      "metricUrl": "https://example.com",
+      "settlementDate": 1793212381,
+      "startPrice": "5000000",
+      "dataSource": "User Provided",
+      "tags": []
+    }
+  ],
+  "defaultMarket": {
+    "symbol": "Silver-USD",
+    "marketId": "0xbe6b3c4d3a5d2a210197ec0988fd82fd2068617d7ba2d40747e9f8303f491c62",
+    "orderBook": "0xbcFAf8771b5Fb7Ef42365E3e034f8e793EB7F1d4"
   }
 }

@@ -55,19 +55,23 @@ const NETWORKS = {
   },
 };
 
+const { fetchMarketData } = require("./supabase-client");
+
 // Contract names to address mapping
-// Will be initialized from a deployment file below
+// Core contracts initialized from .env
 let CONTRACT_ADDRESSES = {
-  MOCK_USDC: "0x6F6f570F45833E249e27022648a26F4076F48f78",
-  VAULT_ANALYTICS: "0xCA8c8688914e0F7096c920146cd0Ad85cD7Ae8b9",
-  POSITION_MANAGER: "0xB0f05d25e41FbC2b52013099ED9616f1206Ae21B",
-  CORE_VAULT: "0x5FeaeBfB4439F3516c74939A9D04e95AFE82C4ae",
-  LIQUIDATION_MANAGER: "0x976fcd02f7C4773dd89C309fBF55D5923B4c98a1",
-  FUTURES_MARKET_FACTORY: "0xD42912755319665397FF090fBB63B1a31aE87Cee",
-  ALUMINUM_ORDERBOOK: "0x57aD6B95508a96dfC6e17efD702360B5124f4680",
-  BTC_ORDERBOOK: "0x196ACcDd41754F5d1FEA0D813A39a63792bb2751", // Using same address as ALU for now
-  ORDERBOOK: "0x196ACcDd41754F5d1FEA0D813A39a63792bb2751", // Generic reference
-  TRADING_ROUTER: "0x3F76468754fC1FA4a79C796C580824799281aCa0", // Using CORE_VAULT for now as fallback
+  MOCK_USDC: process.env.MOCK_USDC_ADDRESS,
+  VAULT_ANALYTICS: process.env.VAULT_ANALYTICS_ADDRESS,
+  POSITION_MANAGER: process.env.POSITION_MANAGER_ADDRESS,
+  CORE_VAULT: process.env.CORE_VAULT_ADDRESS,
+  LIQUIDATION_MANAGER: process.env.LIQUIDATION_MANAGER_ADDRESS,
+  FUTURES_MARKET_FACTORY: process.env.FUTURES_MARKET_FACTORY_ADDRESS,
+  // Market-specific addresses will be populated from Supabase
+  ALUMINUM_ORDERBOOK: "",
+  BTC_ORDERBOOK: "",
+  ORDERBOOK: "",
+  TRADING_ROUTER: "",
+  ORDERBOOK: "0xbcFAf8771b5Fb7Ef42365E3e034f8e793EB7F1d4",
 };
 
 // Contract role definitions (using hardcoded values instead of ethers.js)
@@ -114,12 +118,54 @@ const MARKET_INFO = {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Refreshes contract addresses from deployment files
- * @returns {Object} Updated addresses
+ * Refreshes contract addresses from Supabase and deployment files
+ * @returns {Promise<Object>} Updated addresses
  */
-function refreshAddresses() {
+async function refreshAddresses() {
   try {
-    // Look for network-specific deployment file
+    // For hyperliquid mainnet, fetch market data from Supabase
+    if (ACTIVE_NETWORK === "hyperliquid") {
+      try {
+        const markets = await fetchMarketData();
+
+        // Clear existing market info
+        Object.keys(MARKET_INFO).forEach((key) => delete MARKET_INFO[key]);
+
+        // Update MARKET_INFO with Supabase data
+        markets.forEach((market) => {
+          MARKET_INFO[market.symbol] = {
+            name: market.name,
+            symbol: market.symbol,
+            marketId: market.marketId,
+            orderBook: market.orderBook,
+            active: market.active,
+          };
+
+          // Update orderbook addresses in CONTRACT_ADDRESSES
+          const alias = market.symbol
+            .toUpperCase()
+            .split("-")[0]
+            .replace(/[^A-Z0-9]+/g, "_");
+          const obKey = `${alias}_ORDERBOOK`;
+          CONTRACT_ADDRESSES[obKey] = market.orderBook;
+
+          // Set default ORDERBOOK if not set
+          if (!CONTRACT_ADDRESSES.ORDERBOOK) {
+            CONTRACT_ADDRESSES.ORDERBOOK = market.orderBook;
+          }
+        });
+
+        console.log("📝 Loaded market data from Supabase");
+        return CONTRACT_ADDRESSES;
+      } catch (supabaseError) {
+        console.warn(
+          "⚠️ Failed to load from Supabase, falling back to deployment file:",
+          supabaseError.message
+        );
+      }
+    }
+
+    // Fallback to deployment file
     const deploymentPath = path.join(
       __dirname,
       "..",
@@ -404,12 +450,22 @@ function displayConfig() {
 }
 
 // Initialize by loading the latest deployment if available
-refreshAddresses();
+(async () => {
+  try {
+    await refreshAddresses();
+  } catch (error) {
+    console.warn("Initial address refresh failed:", error.message);
+  }
+})();
 
 // ═══════════════════════════════════════════════════════════════════════════
 // EXPORTS
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Add refreshAddresses to getContract for proper async access
+getContract.refreshAddresses = refreshAddresses;
+
+// Export the module
 module.exports = {
   ADDRESSES: CONTRACT_ADDRESSES,
   NAMES: {
@@ -432,5 +488,4 @@ module.exports = {
   getNetworkConfig,
   displayConfig,
   validateAddresses,
-  refreshAddresses,
 };

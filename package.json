@@ -26,7 +26,11 @@
     "launch:localhost": "node scripts/launch-macos.js --network localhost",
     "launch:hyperliquid": "node scripts/launch-macos.js --network hyperliquid",
     "launch:hyperliquid-testnet": "node scripts/launch-macos.js --network hyperliquid_testnet",
-    "verify:all": "hardhat run scripts/verify-all.js --network hyperliquid"
+    "verify:all": "hardhat run scripts/verify-all.js --network hyperliquid",
+    "mark": "hardhat run scripts/mark-price-cli.js --network hyperliquid",
+    "mark:localhost": "hardhat run scripts/mark-price-cli.js --network localhost",
+    "mark:hyperliquid": "hardhat run scripts/mark-price-cli.js --network hyperliquid",
+    "mark:hyperliquid-testnet": "hardhat run scripts/mark-price-cli.js --network hyperliquid_testnet"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^4.0.0",
@@ -37,7 +41,7 @@
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.4.0",
-    "@supabase/supabase-js": "^2.56.1",
-    "dotenv": "^17.2.1"
+    "@supabase/supabase-js": "^2.39.3",
+    "dotenv": "^16.4.1"
   }
 }
